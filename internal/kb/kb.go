@@ -96,21 +96,36 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return Result{}, err
 	}
 	if c := e.pickReusable(same, qe, query); c != nil {
-		c.Evolve(query, e.querySetEmbed(ctx, *c))
-		_ = e.Store.Save(ctx, *c)
-		// Reuse still surfaces the stored evidence windows (0 new samples).
-		samples := c.Evidence
-		cov := mcs.Coverage(query, samples)
-		return finish(Result{
-			Answer: fast.Answer{
-				Query: query, Mode: "FAST", Confidence: c.Confidence,
-				Summary: c.Content, SourceID: c.SourceID, LLMCalls: 0,
-				Samples:  samples,
-				Coverage: cov,
-			},
-			Reused: true, ClusterID: c.ID, ClusterVer: c.Version,
-			Sampled: 0, Persisted: true,
-		}), nil
+		// B8 warm-prior validation (LENS): a prior is only warm while it
+		// still matches the CURRENT corpus. Any evidence window that no
+		// longer pins back exactly (source updated/gone) disqualifies the
+		// prior — mark it 待复核 and fall through to L0, which self-heals
+		// the cluster through the merge path below.
+		if e.priorStale(ctx, c, sources) {
+			c.Lifecycle = cluster.LifecycleEmerging
+			_ = e.Store.Save(ctx, *c)
+		} else {
+			if c.Lifecycle == cluster.LifecycleEmerging {
+				// B8: the prior just validated against the current corpus —
+				// self-heal complete.
+				c.Lifecycle = cluster.LifecycleStable
+			}
+			c.Evolve(query, e.querySetEmbed(ctx, *c))
+			_ = e.Store.Save(ctx, *c)
+			// Reuse still surfaces the stored evidence windows (0 new samples).
+			samples := c.Evidence
+			cov := mcs.Coverage(query, samples)
+			return finish(Result{
+				Answer: fast.Answer{
+					Query: query, Mode: "FAST", Confidence: c.Confidence,
+					Summary: c.Content, SourceID: c.SourceID, LLMCalls: 0,
+					Samples:  samples,
+					Coverage: cov,
+				},
+				Reused: true, ClusterID: c.ID, ClusterVer: c.Version,
+				Sampled: 0, Persisted: true,
+			}), nil
+		}
 	}
 
 	// L0 path.
@@ -131,11 +146,19 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	// Create or merge (G-id / G-merge).
 	if target := e.pickMergeable(same, qe); target != nil {
 		target.Evolve(query, e.querySetEmbed(ctx, *target))
+		// B8 self-heal: a 待复核 (stale-prior) cluster re-anchors onto the
+		// live source — its dead evidence windows are replaced, not stacked.
+		wasStale := target.Lifecycle == cluster.LifecycleEmerging
+		target.SourceID = ans.SourceID
 		// Fold the new answer in.
 		target.Content = target.Content + "\n---\n" + ans.Summary
 		target.Confidence = (target.Confidence + ans.Confidence) / 2
 		if len(ans.Samples) > 0 {
-			target.Evidence = append(target.Evidence, ans.Samples[0])
+			if wasStale {
+				target.Evidence = ans.Samples[:1]
+			} else {
+				target.Evidence = append(target.Evidence, ans.Samples[0])
+			}
 			e.writeCites(ctx, target.ID, ans.SourceID, ans.Samples[:1])
 		}
 		if err := e.Store.Save(ctx, *target); err != nil {
@@ -232,6 +255,34 @@ func (e *Engine) lastClusterID(ctx context.Context) string {
 		}
 	}
 	return best.ID
+}
+
+// priorStale validates a warm prior against the CURRENT corpus (B8): the
+// cluster's source must still exist and every stored evidence window must
+// pin back exactly (rune-exact slice of the live body). Empty evidence is
+// treated as valid — nothing there can contradict the corpus.
+func (e *Engine) priorStale(ctx context.Context, c *cluster.Cluster, sources []source.Source) bool {
+	if len(c.Evidence) == 0 {
+		return false
+	}
+	byID := map[string]source.Source{}
+	for _, s := range sources {
+		byID[s.ID] = s
+	}
+	src, ok := byID[c.SourceID]
+	if !ok {
+		return true // source gone/updated to a new content address
+	}
+	runes := []rune(src.Body)
+	for _, ev := range c.Evidence {
+		if ev.Start < 0 || ev.End > len(runes) || ev.Start >= ev.End {
+			return true
+		}
+		if string(runes[ev.Start:ev.End]) != ev.Content {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) pickReusable(cs []cluster.Cluster, qe []float64, query string) *cluster.Cluster {

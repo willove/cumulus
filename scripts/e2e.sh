@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# e2e: gates A–J — ingest (A) + cluster reuse (B) + graph expansion (C) +
+# e2e: gates A–L — ingest (A) + cluster reuse (B) + graph expansion (C) +
 # DEEP citations (D) + multi-hop coverage (F) + ingest face/tiering (G) +
 # html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I) +
-# conflict detect (J), against a REAL cumudb. Scorer/embedder are the offline
-# stubs by design (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
+# conflict detect (J) + B5/B6/B9 surfaces (K) + dynamic corpus γ(I) (L),
+# against a REAL cumudb. Scorer/embedder are the offline stubs by design
+# (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
 cd "$(dirname "$0")/.."
 # The gates are offline-stub territory: never let a developer's .env route
@@ -390,6 +391,39 @@ echo "$S3" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"];
 echo "$S4" | python3 -c 'import json,sys; r=json.load(sys.stdin); v=r.get("latency_ms"); assert isinstance(v,int) and v>=0, v' ; check "result carries latency accounting (B9)" $?
 MH2="$($A search -q "路由器怎么配置 和 交换机怎么配置" -raw)"
 echo "$MH2" | python3 -c 'import json,sys; r=json.load(sys.stdin); c=r.get("cover") or {}; f=c.get("facts") or []; assert len(f)>=2 and all("covers_ok" in x or True for x in f), c' ; check "multi-hop cover report stable on paraphrase (B6 path guard)" $?
+
+# --- Gate L: B7/B8 dynamic corpus — stale prior never becomes现证 --------------
+cat >"$WORK/st1.md" <<'MD'
+# 稳定手册
+供电容量上限 500 千瓦，超载自动降载。
+MD
+$A put -title "稳定手册" -key st-doc -body-file "$WORK/st1.md" >/dev/null
+ST1="$($A search -q "供电容量上限是多少" -raw)"
+echo "$ST1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("persisted") and r.get("cluster_id"), r' ; check "B7 arm D1: first ask persists a cluster" $?
+cat >"$WORK/st2.md" <<'MD'
+# 稳定手册
+供电容量上限 800 千瓦，超载自动降载。
+MD
+$A put -title "稳定手册" -key st-doc -body-file "$WORK/st2.md" >/dev/null
+ST2="$($A search -q "供电容量上限是多少" -raw)"
+echo "$ST2" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert not r.get("reused"), ("stale prior must be refused", r.get("reused"))
+assert r.get("merged"), ("fresh answer must self-heal into the cluster", r)
+refs=(r.get("citations") or {}).get("refs") or []
+resolved=[x for x in refs if x.get("resolved")]
+assert resolved and all("500" not in (x.get("quote") or "") for x in resolved), refs
+print("ok")' ; check "B7 arm D2: stale prior refused, fresh 800 served, no stale quote resolved" $?
+ST3="$($A search -q "供电容量上限是多少" -raw)"
+echo "$ST3" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r.get("reused") and r.get("sampled")==0, ("healed cluster must reuse again", r.get("reused"), r.get("sampled"))
+assert "800" in (r["answer"]["summary"] or ""), r["answer"]["summary"][:80]
+print("ok")' ; check "B8 self-heal: cluster reuses again on the live source" $?
+B10="$($A search -q "供电容量上限500千瓦吗 以及 断开要等多久" -raw)"
+echo "$B10" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "latency_ms" in r and r.get("mode") in ("FAST","DEEP"), r.get("mode")' ; check "γ(I) modulated stop keeps accounting (B10)" $?
 
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

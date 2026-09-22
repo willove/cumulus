@@ -174,6 +174,29 @@ func (e *Engine) scorer() mcs.Scorer {
 	return mcs.KeywordScorer{}
 }
 
+// gammaStep raises the escalation line per extra atomic fact (B10): a
+// multi-fact comparison must not stop on a single-fact-quality answer.
+const gammaStep = 0.05
+
+// thresholdFor modulates the escalation line by intent shape (B10 γ(I)):
+// single-fact lookups stop at the base line, multi-fact comparisons demand
+// proportionally more (capped at 0.6 so DEEP stays reachable).
+func (e *Engine) thresholdFor(fx []facts.Fact) float64 {
+	thr := e.EscalateBelow
+	if thr <= 0 {
+		thr = EscalateBelow
+	}
+	extra := len(fx) - 1
+	if extra > 3 {
+		extra = 3
+	}
+	thr += gammaStep * float64(extra)
+	if thr > 0.6 {
+		thr = 0.6
+	}
+	return thr
+}
+
 // Ask runs the confidence-gated path (门 D: 置信不足必升级).
 func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
 	started := time.Now()
@@ -186,6 +209,8 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		thr = EscalateBelow
 	}
 	query = e.effectiveQuery(ctx, query)
+	fx := facts.Build(query)
+	thr = e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
 
 	// FILENAME_ONLY tier (D5 附档): name/extension lookups answer before any
 	// retrieval, with 0 LLM calls.
@@ -211,7 +236,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	}
 	res.Citations = BuildCitations(query, base.Answer, sources)
 	res.Conflicts = e.conflictsFor(ctx, base.ClusterID)
-	res.Cover = facts.ReportFor(facts.Build(query), base.Answer.Samples)
+	res.Cover = facts.ReportFor(fx, base.Answer.Samples)
 
 	// Tier exits: non-search intents never escalate.
 	switch base.Answer.Mode {
