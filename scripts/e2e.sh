@@ -444,5 +444,48 @@ BIGFAIL=0
 $A put -title 超限 -key big -body-file "$WORK/big.md" >/dev/null 2>&1 || BIGFAIL=1
 [ "$BIGFAIL" = "1" ] ; check "sync put refuses bodies over the 256 KiB cap" $?
 
+# --- Gate N: six-modality synergy (doc+text+vector+graph+TS+structured) -------
+cat >"$WORK/litA.md" <<'MD'
+# 照明设计文档
+照明系统主灯功率 200 瓦，色温 4000K。
+MD
+cat >"$WORK/litB.md" <<'MD'
+# 照明运维手册
+主灯不亮先查保险丝，再对照照明设计文档复核功率。
+MD
+cat >"$WORK/litC.md" <<'MD'
+# 照明监控旧版
+旧版监控面板每 60 秒刷新一次。
+MD
+$A put -title "照明设计文档" -key lit-a -body-file "$WORK/litA.md" >/dev/null
+$A put -title "照明运维手册" -key lit-b -body-file "$WORK/litB.md" >/dev/null
+$A put -title "照明监控旧版" -key lit-c -body-file "$WORK/litC.md" >/dev/null
+$A search -q "照明系统主灯功率是多少" -raw >/dev/null
+$A search -q "主灯不亮怎么排查" -raw >/dev/null
+$A search -q "旧版监控刷新频率是多少" -raw >/dev/null
+N1="$($A search -q "照明系统主灯功率是多大" -raw)"
+echo "$N1" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); nb=r.get("neighbors") or []
+texts=[(n.get("cluster") or {}).get("content","") for n in nb]
+assert len(nb)>=2, ("want both hops of neighbors", len(nb), texts)
+assert any("保险丝" in t for t in texts) and any("监控" in t for t in texts), texts
+print("ok")' ; check "sixmod: graph chain reaches depth-2 neighbors (doc+vector+graph)" $?
+LCID="$($A put -title "照明监控旧版" -key lit-c -body-file "$WORK/litC.md" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
+"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc patch ask_sources "$LCID" '{"$set":{"updated_at":"2026-08-20T00:00:00Z"}}' >/dev/null
+N2="$($A search -q "照明系统主灯功率是多大" -raw -hopts 168h)"
+echo "$N2" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); nb=r.get("neighbors") or []
+texts=[(n.get("cluster") or {}).get("content","") for n in nb]
+assert not any("监控" in t for t in texts), ("stale-source neighbor must be pruned", texts)
+print("ok")' ; check "sixmod: hopTS prunes the stale-source neighbor (time-series)" $?
+N3="$($A search -q "照明系统主灯功率是多大" -raw -minconf 0.99)"
+echo "$N3" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); nb=r.get("neighbors") or []
+assert len(nb)==0, ("min-confidence must prune low-conf neighbors", len(nb))
+print("ok")' ; check "sixmod: structured confidence prune empties neighborhood (structured)" $?
+
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

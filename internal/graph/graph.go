@@ -118,11 +118,11 @@ type ExpandRequest struct {
 
 // ExpandResult is one neighbor at some depth.
 type ExpandResult struct {
-	Cluster cluster.Cluster
-	Depth   int
-	Via     []string // edge ids on the path
-	Score   float64  // accumulated edge weight
-	Pruned  bool     // dropped by hopKNN this hop (kept for assertions)
+	Cluster cluster.Cluster `json:"cluster"`
+	Depth   int             `json:"depth"`
+	Via     []string        `json:"via"`    // edge ids on the path
+	Score   float64         `json:"score"`  // accumulated edge weight
+	Pruned  bool            `json:"pruned"` // dropped by hopKNN this hop (kept for assertions)
 }
 
 // Expander walks weak edges over a cluster store.

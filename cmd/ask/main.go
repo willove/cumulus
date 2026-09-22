@@ -226,6 +226,8 @@ func main() {
 		q := fs.String("q", "", "query")
 		rawOut := fs.Bool("raw", false, "raw JSON")
 		hopts := fs.Duration("hopts", 0, "hopTS freshness prune (e.g. 168h; 0 = off)")
+		minhot := fs.Float64("minhot", 0, "neighbor min hotness (structured prune)")
+		minconf := fs.Float64("minconf", 0, "neighbor min confidence (structured prune)")
 		history := fs.String("history", "", "pipe-separated follow-up history (rewrite query)")
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
 		l1pre := fs.Bool("l1pre", false, "narrow candidates via body_embed KNN (L1 cache)")
@@ -309,6 +311,8 @@ func main() {
 		kbE.Edges = graph.NewCumuStore(c, "ask_weak_edges")
 		kbE.Cites = deep.NewCumuCiteStore(c, "ask_cites")
 		kbE.HopTS = *hopts
+		kbE.MinHotness = *minhot
+		kbE.MinConfidence = *minconf
 		dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
 		dE.Scorer = scorer
 		dE.Synth = synth

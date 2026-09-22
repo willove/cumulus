@@ -40,6 +40,10 @@ type Engine struct {
 	// HopTS prunes expanded neighbors whose linked source is staler than this
 	// (D4 optional freshness pass 时序剪枝; 0 = off).
 	HopTS time.Duration
+	// MinHotness / MinConfidence prune expanded neighbors by structured
+	// fields (D4 结构化剪枝; 0 = off).
+	MinHotness    float64
+	MinConfidence float64
 }
 
 func New(f *fast.Engine, st cluster.Store, emb cluster.Embedder) *Engine {
@@ -225,6 +229,7 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 	got, err := ex.Expand(ctx, graph.ExpandRequest{
 		StartID: start, MaxDepth: 2, MaxResults: 16,
 		MinWeight: 0.5, HopKNN: hop, Probe: probe,
+		MinHotness: e.MinHotness, MinConfidence: e.MinConfidence,
 	})
 	if err != nil {
 		return nil
