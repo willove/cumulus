@@ -172,6 +172,54 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}, nil
 }
 
+// WidenSources re-ranks the FULL corpus by the query's keyword cascade
+// (primary → fallback → expander levels) and returns up to m active sources
+// not in exclude — the DEEP loop's mid-search file admission (Sirchmunk
+// ReAct 对齐：探索回路可以扩大候选集，而不是在定死的集合里打转).
+func (e *Engine) WidenSources(ctx context.Context, query string, sources []source.Source, exclude map[string]bool, m int) ([]source.Source, error) {
+	if m <= 0 {
+		return nil, nil
+	}
+	an := e.Analyzer
+	if an == nil {
+		an = RuleAnalyzer{}
+	}
+	a, err := an.Analyze(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	var out []source.Source
+	add := func(fields []string) bool {
+		for _, sc := range rankSources(fields, sources) {
+			if exclude[sc.src.ID] || sc.src.Status != source.StatusActive {
+				continue
+			}
+			out = append(out, sc.src)
+			if len(out) >= m {
+				return true
+			}
+		}
+		return false
+	}
+	candidates := [][]string{orderedKeys(a.Primary), orderedKeys(a.Fallback)}
+	if e.Expander != nil {
+		if levels, err := e.Expander.Expand(ctx, query, 2); err == nil {
+			for _, lv := range levels {
+				candidates = append(candidates, lv)
+			}
+		}
+	}
+	for _, fields := range candidates {
+		if len(fields) == 0 {
+			continue
+		}
+		if add(fields) {
+			break
+		}
+	}
+	return out, nil
+}
+
 // render prefers the production Synthesizer and degrades to the deterministic
 // template on refusal/error (never blocks the answer path).
 func (e *Engine) render(ctx context.Context, query string, src source.Source, samples []mcs.Sample) string {

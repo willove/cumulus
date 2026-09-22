@@ -133,20 +133,29 @@ func (s *Store) Get(ctx context.Context, id string) (*source.Source, error) {
 
 // ActiveSources lists live sources — the L0 sampling candidate set.
 func (s *Store) ActiveSources(ctx context.Context) ([]source.Source, error) {
-	res, err := s.c.Query(ctx, s.sources, client.Query{
-		Filter: map[string]any{"status": source.StatusActive},
-		Limit:  1000,
-	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]source.Source, 0, len(res.Documents))
-	for _, d := range res.Documents {
-		src, err := fromDoc(d)
+	// Paginate: the corpus may exceed any single page (14k+ articles), and a
+	// silently truncated candidate universe breaks every ranking face.
+	const page = 1000
+	var out []source.Source
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.sources, client.Query{
+			Filter: map[string]any{"status": source.StatusActive},
+			Skip:   skip,
+			Limit:  page,
+		})
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *src)
+		for _, d := range res.Documents {
+			src, err := fromDoc(d)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, *src)
+		}
+		if len(res.Documents) < page {
+			break
+		}
 	}
 	return out, nil
 }

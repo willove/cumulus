@@ -103,6 +103,14 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
+	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
+	dE.Widen = func(wctx context.Context, q string, exclude map[string]bool, m int) ([]source.Source, error) {
+		all, err := st.ActiveSources(wctx)
+		if err != nil {
+			return nil, err
+		}
+		return fe.WidenSources(wctx, q, all, exclude, m)
+	}
 
 	// Per-item budget: a batch of items must not share one global deadline —
 	// a few slow DEEP escalations would otherwise starve the tail items.

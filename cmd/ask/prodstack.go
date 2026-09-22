@@ -13,6 +13,7 @@ import (
 	"github.com/cumubase/ask/internal/fast"
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/mcs"
+	"github.com/cumubase/ask/internal/minilm"
 )
 
 type prodStack struct {
@@ -29,6 +30,11 @@ func newProdStack() prodStack {
 	ps := prodStack{
 		scorer: mcs.KeywordScorer{},
 		emb:    cluster.Local{N: 64},
+	}
+	// 簇语义缓存（Sirchmunk 对齐位）：MiniLM 只嵌查询与簇摘要——查询驱动的
+	// 复用匹配，从不预嵌语料。语料侧向量仍是 opt-in 加速器（embedderFor）。
+	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
+		ps.emb = minilm.New(minilm.DefaultDir())
 	}
 	base := os.Getenv("AIGATE_BASE_URL")
 	if base == "" {

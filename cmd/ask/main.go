@@ -282,6 +282,14 @@ func main() {
 		dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
 		dE.Scorer = scorer
 		dE.Synth = synth
+		// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
+		dE.Widen = func(wctx context.Context, q string, exclude map[string]bool, m int) ([]source.Source, error) {
+			all, err := st.ActiveSources(wctx)
+			if err != nil {
+				return nil, err
+			}
+			return fe.WidenSources(wctx, q, all, exclude, m)
+		}
 		if *history != "" {
 			var hist []string
 			for _, h := range strings.Split(*history, "|") {
@@ -344,26 +352,15 @@ func main() {
 		}
 		out := map[string]any{"collections": colls}
 		if *embed {
-			dims := 64
-			var embedFn ingest.EmbedderFn
-			// Same rule as search: embeddings need the explicit model env.
-			if os.Getenv("AIGATE_EMBED_MODEL") != "" && os.Getenv("AIGATE_BASE_URL") != "" {
-				fe := &llm.AigateEmbedder{
-					BaseURL: os.Getenv("AIGATE_BASE_URL"),
-					APIKey:  os.Getenv("AIGATE_API_KEY"),
-					Model:   os.Getenv("AIGATE_EMBED_MODEL"),
-					N:       64,
-				}
-				embedFn, dims = fe.Embed, fe.Dims()
-			} else {
-				loc := cluster.Local{N: 64}
-				embedFn = loc.Embed
-			}
-			n, err := st.EnsureEmbed(ctx, embedFn, dims, envOr("AIGATE_EMBED_MODEL", "local-hash-64"), 64)
+			// One embedder table for all faces (search -l1pre / eval-run /
+			// ensure -embed): ASK_EMBED=minilm wins, then aigate, then hash.
+			embedFn, dims, model := embedderFor()
+			n, err := st.EnsureEmbed(ctx, embedFn, dims, model, 64)
 			if err != nil {
 				fatal(err)
 			}
 			out["embedded"] = n
+			out["model"] = model
 		}
 		printJSON(out)
 	case "job":

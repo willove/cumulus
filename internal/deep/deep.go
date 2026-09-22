@@ -28,6 +28,10 @@ const EscalateBelow = 0.35
 // MaxLoops bounds the DEEP tool loop (Sirchmunk max_loops analogue).
 const MaxLoops = 6
 
+// widenBudget is the widening pass's own file allowance, independent of
+// MaxLoops (the initial admission must not starve exploration).
+const widenBudget = 4
+
 // Mode labels.
 const (
 	ModeFAST = "FAST"
@@ -121,6 +125,9 @@ type Result struct {
 	Cover facts.Report `json:"cover"`
 	// SelfCorrected marks a weakest-requirement re-sample pass.
 	SelfCorrected bool `json:"self_corrected"`
+	// Widened counts files admitted mid-search by the widening pass (Sirchmunk
+	// ReAct 对齐): exploration may grow the candidate set, bounded.
+	Widened int `json:"widened,omitempty"`
 	// B9 budget accounting: LatencyMS is always filled; Tokens carries the
 	// upstream-reported total (0 on the offline stub path — the CLI fills it
 	// from the chat client after Ask returns).
@@ -144,6 +151,11 @@ type Engine struct {
 	HistoryRewriter HistoryRewriter
 	Sources         []source.Source
 	EscalateBelow   float64
+	// Widen, when set, lets the DEEP loop re-admit candidate files mid-search:
+	// coverage still open after self-correction → re-rank the FULL corpus by
+	// the query keywords and admit up to m not-yet-tried files (Sirchmunk
+	// ReAct 对齐；nil 关闭扩征，离线门可用).
+	Widen func(ctx context.Context, query string, exclude map[string]bool, m int) ([]source.Source, error)
 }
 
 // HistoryRewriter rewrites a follow-up query against history.
@@ -259,7 +271,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 
 	res.Escalated = true
 	res.Mode = ModeDEEP
-	deepAns, cover, loops, sc, err := e.runDeep(ctx, query, sources)
+	deepAns, cover, loops, wid, sc, err := e.runDeep(ctx, query, sources)
 	if err != nil {
 		return Result{}, err
 	}
@@ -267,6 +279,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	res.Answer = deepAns
 	res.Cover = cover
 	res.SelfCorrected = sc
+	res.Widened = wid
 	res.Citations = BuildCitations(query, deepAns, sources)
 	// Mark unresolved refs when DEEP still cannot pin a quote.
 	unresolved := false
@@ -292,7 +305,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 // runDeep is the ReAct-shaped loop with per-fact coverage (LENS B1/B2):
 // sample sources → evaluate fact coverage → bounded self-correction on the
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source) (fast.Answer, facts.Report, int, bool, error) {
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source) (fast.Answer, facts.Report, int, int, bool, error) {
 	fx := facts.Build(query)
 	// B6 oracle hints: "f1:描述" strings let a FactAware scorer emit the
 	// per-fact observation vector in the same scoring call.
@@ -367,12 +380,43 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		rep = facts.ReportFor(fx, kept)
 	}
 
+	// Widening: coverage still open OR no strong window found → re-admit
+	// files from the FULL corpus by fresh keyword rankings. The widening
+	// allowance is deliberately independent of MaxLoops: the initial
+	// admission usually spends the whole loop budget, which must not starve
+	// exploration (Sirchmunk ReAct 对齐). Covers alone cannot veto widening:
+	// a generous oracle can mark wrong-doc windows "complete".
+	widened := 0
+	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil {
+		exclude := map[string]bool{}
+		for _, s := range sources {
+			exclude[s.ID] = true
+		}
+		if extra, err := e.Widen(ctx, query, exclude, widenBudget); err == nil && len(extra) > 0 {
+			for _, s := range extra {
+				loops++
+				widened++
+				samples, err := newSampler().SampleBody(ctx, query, s.Body)
+				if err != nil {
+					continue
+				}
+				for _, sm := range samples {
+					if sm.Score >= 4 {
+						sm.Source = s.ID
+						kept = append(kept, sm)
+					}
+				}
+			}
+			rep = facts.ReportFor(fx, kept)
+		}
+	}
+
 	loops++
 	if bestSrc.ID == "" || len(kept) == 0 {
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
 			Summary: "深度检索仍证据不足",
-		}, rep, loops, selfCorrected, nil
+		}, rep, loops, widened, selfCorrected, nil
 	}
 	sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
 	if len(kept) > 8 {
@@ -415,7 +459,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		Confidence: conf, Summary: e.render(ctx, query, kept, b.String()),
 		Skipped: conf < 0.35,
 	}
-	return best, rep, loops, selfCorrected, nil
+	return best, rep, loops, widened, selfCorrected, nil
 }
 
 // render prefers the production Synthesizer (synthesize_roi) and degrades to
