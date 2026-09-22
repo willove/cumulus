@@ -163,7 +163,9 @@ func (t *Tokenizer) Encode(text string) []int {
 }
 
 // viterbi segments one piece by max score-sum (HF Unigram). Ties prefer the
-// longer piece: candidates relax longest-first with strict >.
+// longer piece: candidates relax longest-first with strict >. Unknown runes
+// fuse: a run of consecutive runes with no vocab match becomes ONE <unk>
+// (HF fuse_unk=true — verified against double-emoji fuzz cases).
 func (t *Tokenizer) viterbi(piece string) []int {
 	runes := []rune(piece)
 	n := len(runes)
@@ -172,20 +174,29 @@ func (t *Tokenizer) viterbi(piece string) []int {
 	steps := make([]vstep, n+1)
 	for i := 1; i <= n; i++ {
 		best[i] = -1e18
+		matched := false
 		for l := minInt(i, t.maxRune); l >= 1; l-- {
 			sub := string(runes[i-l : i])
 			sc, ok := t.score[sub]
 			if !ok {
 				continue
 			}
+			matched = true
 			if v := best[i-l] + sc; v > best[i] {
 				best[i] = v
 				steps[i] = vstep{start: int32(i - l), id: int32(t.id[sub])}
 			}
 		}
-		// A single rune always has a path: <unk> with the HF penalty.
-		if v := best[i-1] + unkScore; v > best[i] {
-			best[i] = v
+		if matched {
+			continue
+		}
+		// No vocab piece ends here: <unk>. Extend a run that is still open at
+		// i-1 (no extra cost), else start a new one.
+		if i >= 2 && steps[i-1].id == unkID {
+			best[i] = best[i-1]
+			steps[i] = steps[i-1]
+		} else {
+			best[i] = best[i-1] + unkScore
 			steps[i] = vstep{start: int32(i - 1), id: unkID}
 		}
 	}

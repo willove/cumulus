@@ -1,14 +1,22 @@
 package minilm
 
 // The forward pass is a BertModel encoder (config.json: hidden 384, 12 layers,
-// 12 heads × 64, intermediate 1536, gelu, eps 1e-12, absolute positions from
+// 12 heads × 32, intermediate 1536, gelu, eps 1e-12, absolute positions from
 // 0 — verified against the model's own position_ids buffer) followed by the
 // 1_Pooling config: mean pooling, L2 normalize.
+//
+// Performance model: a naive per-position matvec re-streams every weight
+// matrix once per token (~15GB of memory traffic for a 128-token document).
+// matmulRowsT instead blocks over output rows so a weight block stays
+// cache-resident across all positions, and runs blocks in parallel. The
+// per-element accumulation order is unchanged, so results stay bitwise
+// identical to the naive loop (locked by the reference tests).
 
 import (
 	"context"
 	"fmt"
 	"math"
+	"runtime"
 	"strconv"
 	"sync"
 )
@@ -21,6 +29,8 @@ const (
 	inter   = 1536
 	maxPos  = 512
 	lnEps   = 1e-12
+	qkvOut  = 3 * hidden
+	rowBloc = 64 // output rows per parallel block (worst block ≈ 64×1536×4B)
 	// EmbeddingDim is the model's output dimensionality.
 	EmbeddingDim = 384
 )
@@ -31,14 +41,9 @@ type NW struct {
 	B []float32
 }
 
-// qkv bundles one attention layer's three projections.
-type qkv struct {
-	Q, K, V NW
-}
-
 // Model is a loaded, ready-to-run encoder. The safetensors file stays mmapped;
-// word-embedding rows page in on demand (~384MB of the weight blob is the
-// embedding table and is touched sparsely).
+// the QKV projections are concatenated once at load (single fused matmul per
+// layer); word-embedding rows page in on demand.
 type Model struct {
 	tok *Tokenizer
 
@@ -47,18 +52,19 @@ type Model struct {
 	typEmb  []float32
 	embLN   NW
 
-	self  [layers]qkv
-	ao    [layers]NW // attention output dense
+	qkvW  [layers][]float32 // [qkvOut, hidden]
+	qkvB  [layers][]float32
+	ao    [layers]NW
 	aoLN  [layers]NW
-	iW    [layers][]float32 // intermediate weight [inter,hidden]
+	iW    [layers][]float32 // [inter, hidden]
 	iB    [layers][]float32
-	oW    [layers][]float32 // output dense weight [hidden,inter]
+	oW    [layers][]float32 // [hidden, inter]
 	oB    [layers][]float32
 	outLN [layers]NW
 }
 
-// Load opens the model dir (model.safetensors + unigram.json +
-// normalization_map.json) and binds the weight references.
+// Load opens the model dir (model.safetensors + unigram.json) and binds the
+// weight references.
 func Load(dir string) (*Model, error) {
 	st, err := openSafetensors(dir + "/model.safetensors")
 	if err != nil {
@@ -90,10 +96,12 @@ func Load(dir string) (*Model, error) {
 	m.embLN = nw("embeddings.LayerNorm")
 	for i := 0; i < layers; i++ {
 		base := "encoder.layer." + strconv.Itoa(i) + "."
-		m.self[i] = qkv{
-			Q: nw(base + "attention.self.query"),
-			K: nw(base + "attention.self.key"),
-			V: nw(base + "attention.self.value"),
+		q, k, v := nw(base+"attention.self.query"), nw(base+"attention.self.key"), nw(base+"attention.self.value")
+		m.qkvW[i] = make([]float32, 0, qkvOut*hidden)
+		m.qkvB[i] = make([]float32, 0, qkvOut)
+		for _, p := range []NW{q, k, v} {
+			m.qkvW[i] = append(m.qkvW[i], p.W...)
+			m.qkvB[i] = append(m.qkvB[i], p.B...)
 		}
 		m.ao[i] = nw(base + "attention.output.dense")
 		m.aoLN[i] = nw(base + "attention.output.LayerNorm")
@@ -109,11 +117,86 @@ func Load(dir string) (*Model, error) {
 // Tokenizer exposes the loaded tokenizer.
 func (m *Model) Tokenizer() *Tokenizer { return m.tok }
 
+// matmulRowsT computes y[p*out+o] = Σ_i x[p*in+i]·W[o*in+i] + b[o] for all
+// positions p. Blocked over output rows (weight blocks stay cache-resident
+// across positions), blocks fanned out across CPUs; disjoint y regions keep
+// it race-free, and the accumulation order per element matches a plain loop.
+func matmulRowsT(x, w, b []float32, L, out, in int, y []float32) {
+	blocks := (out + rowBloc - 1) / rowBloc
+	workers := runtime.GOMAXPROCS(0)
+	if blocks < workers {
+		workers = blocks
+	}
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for bl := worker; bl < blocks; bl += workers {
+				o0 := bl * rowBloc
+				o1 := o0 + rowBloc
+				if o1 > out {
+					o1 = out
+				}
+				for p := 0; p < L; p++ {
+					xp := x[p*in : p*in+in]
+					yp := y[p*out : p*out+out]
+					for o := o0; o < o1; o++ {
+						row := w[o*in : o*in+in]
+						var acc float32
+						for i := range xp {
+							acc += xp[i] * row[i]
+						}
+						yp[o] = acc + b[o]
+					}
+				}
+			}
+		}(worker)
+	}
+	wg.Wait()
+}
+
+// workspace is the per-encode scratch space (reused via sync.Pool; a full
+// batch allocates once instead of ~2.5MB per sequence). Every buffer is
+// fully overwritten before read except pool, which clears itself.
+type workspace struct {
+	h, qkv, ctxb, att, ff, sc, pool []float32
+}
+
+func newWorkspace(seq int) *workspace {
+	return &workspace{
+		h:    make([]float32, seq*hidden),
+		qkv:  make([]float32, seq*qkvOut),
+		ctxb: make([]float32, seq*hidden),
+		att:  make([]float32, seq*hidden),
+		ff:   make([]float32, seq*inter),
+		sc:   make([]float32, heads*seq),
+		pool: make([]float32, hidden),
+	}
+}
+
+var wsPool = sync.Pool{New: func() any { return newWorkspace(maxSeqTokens) }}
+
 // EncodeTokenVectors runs the encoder over token ids and returns the pooled,
 // L2-normalized 384-dim vector.
 func (m *Model) EncodeTokenVectors(ids []int) []float32 {
 	L := len(ids)
-	h := make([]float32, L*hidden)
+	ws := wsPool.Get().(*workspace)
+	if L > cap(ws.h)/hidden { // exported-path guard; tokenizer caps at 128
+		ws = newWorkspace(L)
+	}
+	h := ws.h[:L*hidden]
+	qkv := ws.qkv[:L*qkvOut]
+	ctxb := ws.ctxb[:L*hidden]
+	att := ws.att[:L*hidden]
+	ff := ws.ff[:L*inter]
+	sc := ws.sc[:heads*L]
+	defer func() {
+		if L <= cap(ws.h)/hidden {
+			wsPool.Put(ws)
+		}
+	}()
+
 	for p, id := range ids {
 		copy(h[p*hidden:p*hidden+hidden], m.wordEmb[id*hidden:(id+1)*hidden])
 		row := h[p*hidden : p*hidden+hidden]
@@ -129,29 +212,21 @@ func (m *Model) EncodeTokenVectors(ids []int) []float32 {
 		layerNorm(h[p*hidden:p*hidden+hidden], m.embLN.W, m.embLN.B, lnEps)
 	}
 
-	q := make([]float32, L*hidden)
-	k := make([]float32, L*hidden)
-	v := make([]float32, L*hidden)
-	ctxb := make([]float32, L*hidden)
-	sc := make([]float32, heads*L)
-	att := make([]float32, L*hidden)
-	ff := make([]float32, inter)
-
+	// Fused QKV buffer layout per position: [0:384]=Q, [384:768]=K, [768:1152]=V.
 	for l := 0; l < layers; l++ {
-		for p := 0; p < L; p++ {
-			x := h[p*hidden : p*hidden+hidden]
-			matvecRowMajor(x, m.self[l].Q.W, m.self[l].Q.B, hidden, hidden, q[p*hidden:p*hidden+hidden])
-			matvecRowMajor(x, m.self[l].K.W, m.self[l].K.B, hidden, hidden, k[p*hidden:p*hidden+hidden])
-			matvecRowMajor(x, m.self[l].V.W, m.self[l].V.B, hidden, hidden, v[p*hidden:p*hidden+hidden])
-		}
+		matmulRowsT(h, m.qkvW[l], m.qkvB[l], L, qkvOut, hidden, qkv)
+
 		scale := float32(1 / math.Sqrt(headDim))
 		for p := 0; p < L; p++ {
 			for hh := 0; hh < heads; hh++ {
 				o := hh * headDim
+				qo := p*qkvOut + o
+				kbase := hidden + o
+				vbase := 2*hidden + o
 				var maxv float32 = -1e30
 				for kk := 0; kk < L; kk++ {
-					qr := q[p*hidden+o : p*hidden+o+headDim]
-					kr := k[kk*hidden+o : kk*hidden+o+headDim]
+					qr := qkv[qo : qo+headDim]
+					kr := qkv[kk*qkvOut+kbase : kk*qkvOut+kbase+headDim]
 					var d float32
 					for j := 0; j < headDim; j++ {
 						d += qr[j] * kr[j]
@@ -172,35 +247,39 @@ func (m *Model) EncodeTokenVectors(ids []int) []float32 {
 				out := ctxb[p*hidden+o : p*hidden+o+headDim]
 				clear(out)
 				for kk := 0; kk < L; kk++ {
-					w := sc[hh*L+kk] * inv
-					vr := v[kk*hidden+o : kk*hidden+o+headDim]
+					wgt := sc[hh*L+kk] * inv
+					vr := qkv[kk*qkvOut+vbase : kk*qkvOut+vbase+headDim]
 					for d := 0; d < headDim; d++ {
-						out[d] += w * vr[d]
+						out[d] += wgt * vr[d]
 					}
 				}
 			}
 		}
+
+		matmulRowsT(ctxb, m.ao[l].W, m.ao[l].B, L, hidden, hidden, att)
+		for i := range h {
+			h[i] += att[i]
+		}
 		for p := 0; p < L; p++ {
-			x := h[p*hidden : p*hidden+hidden]
-			matvecRowMajor(ctxb[p*hidden:p*hidden+hidden], m.ao[l].W, m.ao[l].B, hidden, hidden, att[p*hidden:p*hidden+hidden])
-			for d := 0; d < hidden; d++ {
-				x[d] += att[p*hidden+d]
-			}
-			layerNorm(x, m.aoLN[l].W, m.aoLN[l].B, lnEps)
-			matvecRowMajor(x, m.iW[l], m.iB[l], inter, hidden, ff)
-			for d := 0; d < inter; d++ {
-				ff[d] = gelu(ff[d])
-			}
-			matvecRowMajor(ff, m.oW[l], m.oB[l], hidden, inter, att[p*hidden:p*hidden+hidden])
-			for d := 0; d < hidden; d++ {
-				x[d] += att[p*hidden+d]
-			}
-			layerNorm(x, m.outLN[l].W, m.outLN[l].B, lnEps)
+			layerNorm(h[p*hidden:p*hidden+hidden], m.aoLN[l].W, m.aoLN[l].B, lnEps)
+		}
+
+		matmulRowsT(h, m.iW[l], m.iB[l], L, inter, hidden, ff)
+		for i := range ff {
+			ff[i] = gelu(ff[i])
+		}
+		matmulRowsT(ff, m.oW[l], m.oB[l], L, hidden, inter, att)
+		for i := range h {
+			h[i] += att[i]
+		}
+		for p := 0; p < L; p++ {
+			layerNorm(h[p*hidden:p*hidden+hidden], m.outLN[l].W, m.outLN[l].B, lnEps)
 		}
 	}
 
 	// Mean pooling over all tokens (no padding in this path) + L2 normalize.
-	pool := make([]float32, hidden)
+	pool := ws.pool[:]
+	clear(pool)
 	for p := 0; p < L; p++ {
 		for d := 0; d < hidden; d++ {
 			pool[d] += h[p*hidden+d]
