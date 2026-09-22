@@ -1,0 +1,6 @@
+bin/
+data/
+*.local.json
+
+# security scanner state
+.mimosa/

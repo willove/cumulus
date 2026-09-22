@@ -1,0 +1,14 @@
+{
+  "name": "project-kb",
+  "title": "项目知识（多跳 + query_seq 主场）",
+  "corpus": [
+    {"file": "design.md", "key": "gw-design", "title": "网关改造设计"},
+    {"file": "runbook.md", "key": "oncall", "title": "值班 runbook"}
+  ],
+  "queries": [
+    {"q": "连接池上限是多少", "must_contain": ["128"]},
+    {"q": "调整连接池上限前要确认什么", "must_contain": ["capacity"]},
+    {"q": "出现 queue overflow 怎么处置", "must_contain": ["capacity"]},
+    {"q": "使用率告警但流量平稳说明什么", "must_contain": ["capacity"]}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "manual-qa",
+  "title": "手册问答（长文档采样主场）",
+  "corpus": [{"file": "corpus.md", "key": "manual", "title": "部署手册"}],
+  "queries": [
+    {"q": "连接池最大连接数是多少", "must_contain": ["128"]},
+    {"q": "系统部署在哪个机房", "must_contain": ["广州"]},
+    {"q": "连接池满了超过多少排队会拒绝", "must_contain": ["200"]},
+    {"q": "什么情况下会触发扩容评审", "must_contain": ["3000"]},
+    {"q": "连接池告警阈值是多少", "must_contain": ["80"]},
+    {"q": "部署手册", "expect_mode": "FILENAME_ONLY"}
+  ]
+}
