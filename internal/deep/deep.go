@@ -246,7 +246,12 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	}
 
 	// Gate: thin evidence, skipped, or open multi-hop requirement → DEEP.
-	need := base.Answer.Skipped || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 || !res.Cover.Complete
+	// A validated reuse hit (B8 priorStale passed) is exempt from the
+	// coverage clause: a NEW phrasing never covers the stored windows
+	// completely, and re-running DEEP on every cache hit would erase the
+	// savings reuse exists for (越问越快).
+	need := base.Answer.Skipped || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
+		(!res.Cover.Complete && !base.Reused)
 	if !need {
 		res.Citations.Legend = legend(res.Citations, false)
 		return res, nil
