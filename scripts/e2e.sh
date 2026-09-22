@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# e2e: gates A–L — ingest (A) + cluster reuse (B) + graph expansion (C) +
+# e2e: gates A–O — ingest (A) + cluster reuse (B) + graph expansion (C) +
 # DEEP citations (D) + multi-hop coverage (F) + ingest face/tiering (G) +
 # html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I) +
-# conflict detect (J) + B5/B6/B9 surfaces (K) + dynamic corpus γ(I) (L),
+# conflict detect (J) + B5/B6/B9 surfaces (K) + dynamic corpus γ(I) (L) +
+# changelog reconcile/sync cap (M) + six-modality synergy (N) +
+# eval-run offline face + resume (O),
 # against a REAL cumudb. Scorer/embedder are the offline stubs by design
 # (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
@@ -486,6 +488,34 @@ import json,sys
 r=json.load(sys.stdin); nb=r.get("neighbors") or []
 assert len(nb)==0, ("min-confidence must prune low-conf neighbors", len(nb))
 print("ok")' ; check "sixmod: structured confidence prune empties neighborhood (structured)" $?
+
+# --- Gate O: eval-run（R-E1 评测面：离线结构 + 续跑） ------------------------
+OID="$WORK/eval-items.jsonl"
+ORES="$WORK/eval-results.jsonl"
+printf '%s\n' \
+	'{"id":"o1","query":"照明系统主灯功率是多少","answer":"","gold_sources":["nowhere-a"]}' \
+	'{"id":"o2","query":"主灯不亮怎么排查","answer":"","gold_sources":["nowhere-b"]}' > "$OID"
+rm -f "$ORES"
+OOUT="$($A eval-run -file "$OID" -out "$ORES")"
+echo "$OOUT" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["n"]==2 and r["judged"] is False, r
+tx=r["system"]["taxonomy"]
+assert tx["correct"]+tx["retrieved_but_unanswered"]+tx["answered_but_wrong"]+tx["not_retrieved"]==2, tx
+assert r["closed_book"]["ev_rec"]==0, r["closed_book"]
+assert r["modes"] and r["mcnemar"]["n"]==2, r
+print("ok")' ; check "evalrun: offline report aggregates system+taxonomy+modes" $?
+N1="$(wc -l < "$ORES" | tr -d ' ')"
+[ "$N1" -eq 2 ] ; check "evalrun: one results line per item" $?
+OOUT2="$($A eval-run -file "$OID" -out "$ORES")"
+echo "$OOUT2" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["resumed"]==2 and r["n"]==2, ("resume must skip done ids", r)
+print("ok")' ; check "evalrun: resume skips already-recorded items" $?
+N2="$(wc -l < "$ORES" | tr -d ' ')"
+[ "$N2" -eq 2 ] ; check "evalrun: resume appends no duplicate lines" $?
 
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

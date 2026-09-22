@@ -5,3 +5,4 @@ data/
 # security scanner state
 .mimosa/
 .env
+var/

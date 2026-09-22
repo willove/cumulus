@@ -19,7 +19,6 @@ import (
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/llm"
-	"github.com/cumubase/ask/internal/mcs"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
@@ -43,6 +42,8 @@ Usage:
   ask cluster list | get <id>
   ask conflicts list | detect <clusterA> <clusterB>
   ask cites  list               # 簇→源证据边（ask_cites）
+  ask eval-run -file ITEMS.jsonl -out RESULTS.jsonl [-judge] [-prior] [-limit N]
+                                # LENS 式评测：真实管线+Closed-Book 对照+判官，可续跑
 
 Flags:
   -server URL    cumudb base URL (default http://127.0.0.1:8480)
@@ -236,44 +237,10 @@ func main() {
 		}
 		// Production path via aigate (D6): scorer/embedder/analyze/synthesize.
 		// Offline stubs keep the gates deterministic without AIGATE_BASE_URL.
-		var scorer mcs.Scorer = mcs.KeywordScorer{}
-		var emb cluster.Embedder = cluster.Local{N: 64}
-		var analyzer fast.Analyzer
-		var synth fast.Synthesizer
-		var expander fast.KeywordExpander
-		var rewriter deep.HistoryRewriter
-		var chatClient *llm.ChatClient
-		if base := os.Getenv("AIGATE_BASE_URL"); base != "" {
-			split := strings.Contains(strings.ToLower(base), "minimaxi.com")
-			if v := os.Getenv("AIGATE_REASONING_SPLIT"); v != "" {
-				split = v == "1" || strings.EqualFold(v, "true")
-			}
-			chat := &llm.ChatClient{
-				BaseURL:        base,
-				APIKey:         os.Getenv("AIGATE_API_KEY"),
-				Model:          envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
-				Caller:         "ask",
-				ReasoningSplit: split,
-			}
-			chatClient = chat
-			scorer = &llm.AigateScorer{Client: chat}
-			analyzer = &llm.AigateAnalyzer{Client: chat}
-			synth = &llm.AigateSynthesizer{Client: chat}
-			expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
-			rewriter = &llm.AigateHistoryRewriter{Client: chat}
-			// Embeddings switch only on an explicit AIGATE_EMBED_MODEL: the
-			// gateway's chat surface is the proven path, and a silent embed
-			// probe against a chat-only gateway would fail every search.
-			if os.Getenv("AIGATE_EMBED_MODEL") != "" {
-				emb = &llm.AigateEmbedder{
-					BaseURL: base,
-					APIKey:  os.Getenv("AIGATE_API_KEY"),
-					Model:   os.Getenv("AIGATE_EMBED_MODEL"),
-					N:       64,
-				}
-			}
-		}
-		_ = rewriter
+		stack := newProdStack()
+		scorer, emb := stack.scorer, stack.emb
+		analyzer, synth, expander, rewriter := stack.analyzer, stack.synth, stack.expander, stack.rewriter
+		chatClient := stack.chat
 		// L1 candidate prefilter: KNN over body_embed (opt-in; empty/error
 		// falls back to the full L0 set — 索引是缓存，不是契约). D7 lazy
 		// path: a missing index materializes once, bounded, then retries.
@@ -554,6 +521,24 @@ func main() {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(out)
 		return
+
+	case "eval-run":
+		// LENS 式真实语料评测（R-E1）：真实管线 + Closed-Book 对照 + 判官。
+		fs := flag.NewFlagSet("eval-run", flag.ExitOnError)
+		file := fs.String("file", "", "items jsonl (eval.Item: id/query/answer=reference/gold_sources)")
+		out := fs.String("out", "", "results jsonl (resumable; report aggregates the whole file)")
+		judgeOn := fs.Bool("judge", false, "LLM judges Correct against the reference (needs endpoint)")
+		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
+		limit := fs.Int("limit", 0, "max new items this run (0 = all remaining)")
+		_ = fs.Parse(rest)
+		if *file == "" || *out == "" {
+			fatal(fmt.Errorf("eval-run: -file and -out required"))
+		}
+		// Per-item deadlines inside evalRun; the shared ctx's whole-process
+		// budget must not cap a multi-item batch.
+		if err := evalRun(context.Background(), c, st, *file, *out, *judgeOn, *priorRank, *limit); err != nil {
+			fatal(err)
+		}
 
 	case "delete":
 		if len(rest) < 1 {

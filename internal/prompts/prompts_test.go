@@ -8,6 +8,7 @@ import (
 func TestAllAssetsLoad(t *testing.T) {
 	for _, name := range []string{
 		EvaluateSample, FastAnalyze, KeywordsMultilevel, HistoryRewrite, SynthesizeROI,
+		JudgeCorrect,
 	} {
 		body, err := Load(name)
 		if err != nil {
@@ -15,6 +16,18 @@ func TestAllAssetsLoad(t *testing.T) {
 		}
 		if len(body) < 40 {
 			t.Fatalf("%s too short", name)
+		}
+	}
+}
+
+func TestJudgeCorrectContract(t *testing.T) {
+	body, err := Load(JudgeCorrect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"{{query}}", "{{reference}}", "{{answer}}", "0–3", "7–9", "JSON"} {
+		if !strings.Contains(body, s) {
+			t.Fatalf("judge_correct missing %q", s)
 		}
 	}
 }

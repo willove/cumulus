@@ -19,6 +19,7 @@ const (
 	KeywordsMultilevel = "keywords_multilevel"
 	HistoryRewrite     = "history_rewrite"
 	SynthesizeROI      = "synthesize_roi"
+	JudgeCorrect       = "judge_correct"
 )
 
 // Load returns the raw markdown body of a prompt asset.
