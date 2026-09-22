@@ -65,3 +65,39 @@ func TestMcNemarEmptyDiscordant(t *testing.T) {
 		t.Fatalf("p=%v want 1 when no discordant pairs", m.P)
 	}
 }
+
+func TestFailureTaxonomy(t *testing.T) {
+	it := Item{ID: "q", Query: "x", Answer: "gold", Gold: []string{"src"}}
+	cases := []struct {
+		s    ItemScore
+		want string
+	}{
+		{ItemScore{Correct: true}, "correct"},
+		{ItemScore{EvRec: true, Answered: true}, "retrieved_but_unanswered"},
+		{ItemScore{Answered: true}, "answered_but_wrong"},
+		{ItemScore{}, "not_retrieved"},
+	}
+	for i, c := range cases {
+		if got := Classify(c.s); got != c.want {
+			t.Fatalf("case %d: %s want %s", i, got, c.want)
+		}
+	}
+	// Score must populate Answered so taxonomy counts work end-to-end.
+	answered := Score(it, Prediction{Answer: "no idea", SourceIDs: []string{"other"}, Refs: 0})
+	if !answered.Answered || answered.EvRec {
+		t.Fatalf("answered=%v evrec=%v", answered.Answered, answered.EvRec)
+	}
+	r := Aggregate([]ItemScore{
+		{Correct: true, Answered: true},
+		{EvRec: true, Answered: true},
+		{Answered: true},
+		{},
+	})
+	tx := r.Taxonomy
+	if tx.Correct != 1 || tx.RetrievedOnly != 1 || tx.AnsweredWrong != 1 || tx.NotRetrieved != 1 {
+		t.Fatalf("taxonomy=%+v", tx)
+	}
+	if tx.Correct+tx.RetrievedOnly+tx.AnsweredWrong+tx.NotRetrieved != r.N {
+		t.Fatalf("taxonomy classes must sum to N=%d", r.N)
+	}
+}

@@ -62,11 +62,9 @@ func main() {
 	args := os.Args[1:]
 	// Per-suite endpoint config: ./.env (or $ASK_ENV), operator's LLM_*
 	// convention aliased onto AIGATE_*. Already-set env always wins.
-	envFile := os.Getenv("ASK_ENV")
-	if envFile == "" {
-		envFile = ".env"
-	}
-	if err := loadDotEnv(envFile); err != nil {
+	// Per-suite endpoint config: ./.env (or $ASK_ENV), operator's LLM_*
+	// convention aliased onto AIGATE_*. Already-set env always wins.
+	if err := loadDotEnv(); err != nil {
 		fatal(err)
 	}
 	applyLLMAliases()
@@ -438,8 +436,8 @@ func main() {
 		base := os.Getenv("AIGATE_BASE_URL")
 		key := os.Getenv("AIGATE_API_KEY")
 		printJSON(map[string]any{
-			"env_file":        envFile,
-			"env_file_loaded": fileExists(envFile),
+			"env_file":        envFilePath(),
+			"env_file_loaded": fileExists(envFilePath()),
 			"base_url":        base,
 			"chat_model":      os.Getenv("AIGATE_CHAT_MODEL"),
 			"embed_model":     os.Getenv("AIGATE_EMBED_MODEL"),
@@ -548,6 +546,7 @@ func main() {
 		cbRep := eval.Aggregate(cb)
 		out := map[string]any{
 			"em": rep.EM, "ev_rec": rep.EvRec, "ground": rep.Ground, "n": rep.N,
+			"taxonomy":    rep.Taxonomy,
 			"closed_book": map[string]any{"em": cbRep.EM, "ev_rec": cbRep.EvRec, "ground": cbRep.Ground},
 			"mcnemar":     eval.Compare(scores, cb),
 		}

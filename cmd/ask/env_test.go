@@ -18,9 +18,10 @@ func TestLoadDotEnv(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("ASK_ENV", p)
 	t.Setenv("LLM_API_KEY", "") // clear; loader must not see a pre-set value
 	os.Unsetenv("LLM_API_KEY")
-	if err := loadDotEnv(p); err != nil {
+	if err := loadDotEnv(); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("LLM_BASE_URL"); got != "https://api.minimaxi.com/v1" {
@@ -40,8 +41,9 @@ func TestLoadDotEnvDoesNotOverride(t *testing.T) {
 	if err := os.WriteFile(p, []byte("LLM_BASE_URL=https://from-file\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("ASK_ENV", p)
 	t.Setenv("LLM_BASE_URL", "https://from-env")
-	if err := loadDotEnv(p); err != nil {
+	if err := loadDotEnv(); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("LLM_BASE_URL"); got != "https://from-env" {
@@ -50,8 +52,26 @@ func TestLoadDotEnvDoesNotOverride(t *testing.T) {
 }
 
 func TestLoadDotEnvMissingOK(t *testing.T) {
-	if err := loadDotEnv(filepath.Join(t.TempDir(), "nope")); err != nil {
+	t.Setenv("ASK_ENV", filepath.Join(t.TempDir(), "nope"))
+	if err := loadDotEnv(); err != nil {
 		t.Fatalf("missing .env must be a no-op: %v", err)
+	}
+}
+
+func TestLoadDotEnvRejectsTraversal(t *testing.T) {
+	for _, p := range []string{"../secrets.env", "a/../../etc/passwd", "../../.env"} {
+		t.Setenv("ASK_ENV", p)
+		if err := loadDotEnv(); err == nil {
+			t.Fatalf("traversal path %q must be rejected", p)
+		}
+	}
+}
+
+func TestCheckEnvPathAllowsAbsAndDevice(t *testing.T) {
+	for _, p := range []string{"/dev/null", "/abs/operators.env", ".env", "conf/base.env"} {
+		if err := checkEnvPath(p); err != nil {
+			t.Fatalf("%q must stay allowed: %v", p, err)
+		}
 	}
 }
 

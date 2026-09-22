@@ -33,15 +33,44 @@ type ItemScore struct {
 	Correct  bool   `json:"correct"`
 	EvRec    bool   `json:"ev_rec"`
 	Grounded bool   `json:"grounded"`
+	Answered bool   `json:"answered"` // a non-empty answer was produced at all
 }
 
 // Report is the aggregate evidence-quality scorecard.
 type Report struct {
-	N      int     `json:"n"`
-	EM     float64 `json:"em"`
-	EvRec  float64 `json:"ev_rec"`
-	Ground float64 `json:"ground"`
-	Notes  string  `json:"notes,omitempty"`
+	N        int      `json:"n"`
+	EM       float64  `json:"em"`
+	EvRec    float64  `json:"ev_rec"`
+	Ground   float64  `json:"ground"`
+	Taxonomy Taxonomy `json:"taxonomy"`
+	Notes    string   `json:"notes,omitempty"`
+}
+
+// Taxonomy is the LENS four-way mutually exclusive verdict (§6.1): every item
+// lands in exactly one class, so the fields sum to N. RetrievedOnly separates
+// "looked in the right place but answered badly" from never finding the
+// evidence at all.
+type Taxonomy struct {
+	Correct       int `json:"correct"`
+	RetrievedOnly int `json:"retrieved_but_unanswered"`
+	AnsweredWrong int `json:"answered_but_wrong"`
+	NotRetrieved  int `json:"not_retrieved"`
+}
+
+// Classify maps one item into the failure taxonomy. Correct wins over
+// everything; retrieved-but-wrong is its own class; wrong without gold
+// evidence splits by whether the system produced an answer at all.
+func Classify(s ItemScore) string {
+	switch {
+	case s.Correct:
+		return "correct"
+	case s.EvRec:
+		return "retrieved_but_unanswered"
+	case s.Answered:
+		return "answered_but_wrong"
+	default:
+		return "not_retrieved"
+	}
 }
 
 // Score scores one prediction against one gold item.
@@ -84,6 +113,7 @@ func Score(it Item, p Prediction) ItemScore {
 		Correct:  Correct(it.Answer, p.Answer),
 		EvRec:    ev,
 		Grounded: grounded,
+		Answered: !p.Skipped && strings.TrimSpace(p.Answer) != "",
 	}
 }
 
@@ -119,6 +149,16 @@ func Aggregate(items []ItemScore) Report {
 		}
 		if s.Grounded {
 			g++
+		}
+		switch Classify(s) {
+		case "correct":
+			r.Taxonomy.Correct++
+		case "retrieved_but_unanswered":
+			r.Taxonomy.RetrievedOnly++
+		case "answered_but_wrong":
+			r.Taxonomy.AnsweredWrong++
+		case "not_retrieved":
+			r.Taxonomy.NotRetrieved++
 		}
 	}
 	n := float64(len(items))
