@@ -42,6 +42,8 @@ type evalResult struct {
 	Conf    float64        `json:"conf,omitempty"`
 	Calls   int            `json:"calls,omitempty"`
 	Tokens  int64          `json:"tokens,omitempty"`
+	Err     string         `json:"err,omitempty"`
+	Cites   []string       `json:"cites,omitempty"` // citation business keys — per-item diagnosis
 	Eval    eval.ItemScore `json:"eval"`
 	Judge   string         `json:"judge,omitempty"`
 	CB      eval.ItemScore `json:"closed_book"`
@@ -63,7 +65,7 @@ type evalReport struct {
 // new item to outPath (resume: ids already present are skipped). The printed
 // report aggregates the whole file so the last batch of a chunked run shows
 // the full picture.
-func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, file, outPath string, judgeOn, prior bool, limit int) error {
+func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesColl, file, outPath string, judgeOn, prior, l1pre bool, limit int) error {
 	items, err := readEvalItems(file)
 	if err != nil {
 		return err
@@ -76,11 +78,20 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, file, outP
 	if err != nil {
 		return err
 	}
-	// Citations carry internal doc ids; gold_sources are business keys
-	// (ingest-jsonl titles). Map one onto the other for scoring.
 	keyByID := map[string]string{}
 	for _, s := range list {
 		keyByID[s.ID] = s.BusinessKey
+	}
+	// L1 prefilter (D7): materialize the body_embed index once (bounded
+	// backfill), then narrow candidates per item by query-vector KNN.
+	var embedFn ingest.EmbedderFn
+	if l1pre {
+		var dims int
+		var model string
+		embedFn, dims, model = embedderFor()
+		if _, err := st.EnsureEmbed(ctx, embedFn, dims, model, 64); err != nil {
+			return fmt.Errorf("ensure body_embed: %w", err)
+		}
 	}
 	stack := newProdStack()
 	fe := fast.New(stack.scorer)
@@ -118,7 +129,15 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, file, outP
 			break
 		}
 		ictx, cancel := context.WithTimeout(ctx, perItem)
-		rec := evalOne(ictx, dE, stack.chat, judgeOn, list, keyByID, it)
+		runList := list
+		if l1pre {
+			if narrowed, err := narrowByKNN(ctx, c, embedFn, sourcesColl, list, it.Query); err != nil {
+				fmt.Fprintf(os.Stderr, "eval-run %s: l1pre: %v\n", it.ID, err)
+			} else if len(narrowed) > 0 {
+				runList = narrowed
+			}
+		}
+		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, it)
 		cancel()
 		line, err := json.Marshal(rec)
 		if err != nil {
@@ -140,6 +159,25 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, file, outP
 	return nil
 }
 
+// narrowByKNN narrows the active-source list to the body_embed KNN hits for
+// one query. Index is deliberately omitted: with no usable ANN structure the
+// engine falls back to a filtered scan, which is the right operating point
+// for small corpora (索引是缓存：只影响快慢，不影响正确性).
+func narrowByKNN(ctx context.Context, c *client.Client, embedFn ingest.EmbedderFn, sourcesColl string, list []source.Source, query string) ([]source.Source, error) {
+	qv, err := embedFn(ctx, []string{query})
+	if err != nil || len(qv) != 1 {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	knn, err := c.KNN(ctx, sourcesColl, client.KNNRequest{
+		Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
+		Filter: map[string]any{"status": source.StatusActive},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return orderByKNN(list, knn.Documents), nil
+}
+
 // evalOne runs the system pipeline plus the closed-book contrast for one item.
 func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, it eval.Item) evalResult {
 	rec := evalResult{ID: it.ID}
@@ -150,13 +188,20 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 	res, err := dE.Ask(ctx, it.Query, list)
 	if err != nil {
 		rec.Mode = "error"
+		rec.Err = err.Error()
 	} else {
 		rec.Mode = res.Mode
 		rec.Loops = res.Loops
 		rec.Conf = res.Answer.Confidence
 		rec.Calls = res.Answer.LLMCalls
 	}
-	rec.Eval = eval.Score(it, predictionOf(res, keyByID))
+	pred := predictionOf(res, keyByID)
+	rec.Eval = eval.Score(it, pred)
+	for _, id := range pred.SourceIDs {
+		if !strings.HasPrefix(id, "src:") {
+			rec.Cites = append(rec.Cites, id)
+		}
+	}
 	if chat != nil {
 		rec.Tokens = chat.TotalTokens() - tokBefore
 	}

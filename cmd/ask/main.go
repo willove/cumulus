@@ -19,6 +19,7 @@ import (
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/llm"
+	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
@@ -529,6 +530,7 @@ func main() {
 		out := fs.String("out", "", "results jsonl (resumable; report aggregates the whole file)")
 		judgeOn := fs.Bool("judge", false, "LLM judges Correct against the reference (needs endpoint)")
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
+		l1pre := fs.Bool("l1pre", false, "narrow candidates per item via body_embed KNN (L1 cache)")
 		limit := fs.Int("limit", 0, "max new items this run (0 = all remaining)")
 		_ = fs.Parse(rest)
 		if *file == "" || *out == "" {
@@ -536,7 +538,7 @@ func main() {
 		}
 		// Per-item deadlines inside evalRun; the shared ctx's whole-process
 		// budget must not cap a multi-item batch.
-		if err := evalRun(context.Background(), c, st, *file, *out, *judgeOn, *priorRank, *limit); err != nil {
+		if err := evalRun(context.Background(), c, st, sources, *file, *out, *judgeOn, *priorRank, *l1pre, *limit); err != nil {
 			fatal(err)
 		}
 
@@ -558,6 +560,12 @@ func main() {
 // search: explicit AIGATE_EMBED_MODEL over AIGATE_BASE_URL, else the offline
 // Local hash embedder.
 func embedderFor() (ingest.EmbedderFn, int, string) {
+	// 纯 Go MiniLM（embed-notes §8）：ASK_EMBED=minilm 显式开启；权重直接
+	// 复用 Sirchmunk 的模型缓存，向量空间与其语义缓存索引一致（384 维）。
+	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
+		emb := minilm.New(minilm.DefaultDir())
+		return emb.Embed, emb.Dims(), "minilm-l12-384"
+	}
 	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" {
 		fe := &llm.AigateEmbedder{
 			BaseURL: base,

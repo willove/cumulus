@@ -378,7 +378,9 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	if err := s.c.CreateIndexRequest(ctx, s.sources, client.IndexRequest{
 		Name: "ask_body_embed", Field: "body_embed", Type: "vector",
 		Dims: dims, Metric: "cosine", Model: model,
-	}); err != nil {
+	}); err != nil && !strings.Contains(err.Error(), "INDEX_EXISTS") {
+		// Ensure semantics: an existing index (created by a prior run or the
+		// search -l1pre path) is success, not a conflict.
 		return 0, fmt.Errorf("ingest ensure body_embed index: %w", err)
 	}
 	if batch <= 0 {

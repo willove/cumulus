@@ -516,6 +516,17 @@ assert r["resumed"]==2 and r["n"]==2, ("resume must skip done ids", r)
 print("ok")' ; check "evalrun: resume skips already-recorded items" $?
 N2="$(wc -l < "$ORES" | tr -d ' ')"
 [ "$N2" -eq 2 ] ; check "evalrun: resume appends no duplicate lines" $?
+ORES2="$WORK/eval-results-l1.jsonl"
+OOUT3="$($A eval-run -file "$OID" -out "$ORES2" -l1pre 2>&1)"
+echo "$OOUT3" | python3 -c '
+import json,sys
+s=sys.stdin.read()
+try:
+    r=json.loads(s)
+except Exception:
+    raise SystemExit("l1pre gate non-JSON output: "+s[:400])
+assert r["n"]==2, ("l1pre report", r)
+print("ok")' ; check "evalrun: -l1pre narrows via body_embed (offline index materialized)" $?
 
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

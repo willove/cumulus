@@ -72,13 +72,21 @@ PY
 	;;
 step)
 	db_up
+	OUT="$STATE/results.jsonl"
+	EXTRA=""
+	if [ "${L1PRE:-0}" = "1" ]; then
+		OUT="$STATE/results_l1.jsonl"   # 对照组：body_embed KNN 收窄候选（ASK_EMBED=minilm）
+		EXTRA="-l1pre"
+	fi
 	"$STATE/ask" -server "$SRV" eval-run -file "$STATE/items.jsonl" \
-		-out "$STATE/results.jsonl" -judge -prior -limit "${LIMIT:-4}"
+		-out "$OUT" -judge -prior $EXTRA -limit "${LIMIT:-4}"
 	;;
 report)
 	db_up
 	# All items already recorded → resume-only pass; the aggregate is printed.
+	OUT="$STATE/results.jsonl"
+	if [ "${L1PRE:-0}" = "1" ]; then OUT="$STATE/results_l1.jsonl"; fi
 	"$STATE/ask" -server "$SRV" eval-run -file "$STATE/items.jsonl" \
-		-out "$STATE/results.jsonl" -limit 0
+		-out "$OUT" -limit 0
 	;;
 esac

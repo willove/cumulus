@@ -295,7 +295,11 @@ func (m *Model) EncodeTokenVectors(ids []int) []float32 {
 	for d := range pool {
 		pool[d] *= invN
 	}
-	return pool
+	// pool aliases the pooled workspace: copy before returning, or the next
+	// encode overwrites the caller's vector (batch results cross-contaminate).
+	out := make([]float32, hidden)
+	copy(out, pool)
+	return out
 }
 
 // Encode embeds texts (batch); each result is a 384-dim L2-normalized vector.
