@@ -47,11 +47,18 @@ func New(c *client.Client, sources, evidence string) *Store {
 	return &Store{c: c, sources: sources, evidence: evidence, jobs: "ask:job:"}
 }
 
+// MaxSyncBodyBytes is the synchronous put cap (§3.4.2): larger corpora must
+// go through the Job path (ingest-files / serve jobs), never block a request.
+const MaxSyncBodyBytes = 256 << 10
+
 // Put upserts one source. Same digest → unchanged. New digest under the same
 // business key → version+1, previous content marked stale.
 func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
 	if src.Body == "" {
 		return Result{}, fmt.Errorf("ingest: body is required")
+	}
+	if len(src.Body) > MaxSyncBodyBytes {
+		return Result{}, fmt.Errorf("ingest: body is %d bytes, over the %d synchronous cap — use ingest-files or the serve job path", len(src.Body), MaxSyncBodyBytes)
 	}
 	now := time.Now().UTC()
 	src.Digest = source.Digest(src.Body)
@@ -101,7 +108,7 @@ func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
 	}); err != nil {
 		return Result{}, fmt.Errorf("marking stale %s: %w", staleID, err)
 	}
-	if err := s.invalidateEvidence(ctx, staleID); err != nil {
+	if _, err := s.invalidateEvidence(ctx, staleID); err != nil {
 		return Result{}, err
 	}
 	return Result{ID: src.ID, Status: "updated", Version: src.Version, Digest: src.Digest, StaleID: staleID}, nil
@@ -116,7 +123,8 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	}); err != nil {
 		return fmt.Errorf("ingest delete %s: %w", id, err)
 	}
-	return s.invalidateEvidence(ctx, id)
+	_, err := s.invalidateEvidence(ctx, id)
+	return err
 }
 
 func (s *Store) Get(ctx context.Context, id string) (*source.Source, error) {
@@ -203,7 +211,8 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 }
 
 // Ensure declares the suite's collections (idempotent) — D7: collection shape
-// is declared once (ensure/scenario), never per ingest.
+// is declared once (ensure/scenario), never per ingest. ask_sources records a
+// changelog: downstream reconciliation (Reconcile) consumes it.
 func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
 	colls := []string{s.sources, s.evidence, "ask_clusters", "ask_weak_edges", "ask_conflicts"}
 	colls = append(colls, extra...)
@@ -219,7 +228,89 @@ func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
 		}
 		out = append(out, c)
 	}
+	if err := s.c.SetChangelog(ctx, s.sources, true); err != nil {
+		return out, fmt.Errorf("ingest ensure changelog on %s: %w", s.sources, err)
+	}
 	return out, nil
+}
+
+// ReconcileReport summarizes one downstream pass over the ask_sources
+// changelog (§3.4.2: 下游轮询消费，游标持久化，at-least-once + _id 幂等).
+type ReconcileReport struct {
+	Scanned        int    `json:"scanned"`
+	EvInvalidated  int    `json:"evidence_invalidated"`
+	ClustersMarked int    `json:"clusters_marked"`
+	Cursor         uint64 `json:"cursor"`
+}
+
+// Reconcile consumes ask_sources changes since the persisted cursor: sources
+// retired out-of-band (stale/deleted written without going through Put) get
+// their live evidence invalidated and clusters anchored on them marked 待复核.
+// Every action is idempotent, so at-least-once delivery is safe.
+func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
+	rep := ReconcileReport{}
+	cursorKey := "ask:reconcile:" + s.sources
+	cur := uint64(0)
+	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
+		cur, _ = strconv.ParseUint(string(raw), 10, 64)
+	}
+	rep.Cursor = cur
+	for {
+		page, err := s.c.Changes(ctx, s.sources, cur, 200)
+		if err != nil {
+			return rep, err
+		}
+		for _, ch := range page.Changes {
+			rep.Scanned++
+			src, err := s.getSource(ctx, ch.ID)
+			if err != nil || src == nil {
+				continue // physically gone: nothing left to reconcile
+			}
+			if src.Status == source.StatusActive {
+				continue // live write: put already handled its downstream
+			}
+			if n, err := s.invalidateEvidence(ctx, ch.ID); err == nil {
+				rep.EvInvalidated += n
+			}
+			if s.markClustersStale(ctx, ch.ID) {
+				rep.ClustersMarked++
+			}
+		}
+		cur = page.Cursor
+		rep.Cursor = cur
+		if err := s.c.KVPut(ctx, cursorKey, []byte(strconv.FormatUint(cur, 10)), 0); err != nil {
+			return rep, err
+		}
+		if page.Count == 0 || len(page.Changes) == 0 {
+			break
+		}
+	}
+	return rep, nil
+}
+
+// markClustersStale flags clusters anchored on a retired source 待复核
+// (emerging) — the reconcile-side trigger for the B8 re-validation.
+func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
+	res, err := s.c.Query(ctx, "ask_clusters", client.Query{
+		Filter: map[string]any{"source_id": docID},
+		Limit:  1000,
+	})
+	if err != nil {
+		return false
+	}
+	marked := false
+	for _, d := range res.Documents {
+		id, _ := d["_id"].(string)
+		if id == "" || d["lifecycle"] == "emerging" {
+			continue
+		}
+		if _, err := s.c.PatchDocument(ctx, "ask_clusters", id, map[string]any{
+			"$set": map[string]any{"lifecycle": "emerging"},
+		}); err == nil {
+			marked = true
+		}
+	}
+	return marked
 }
 
 // Reclaim physically removes retired sources ("保留是决策不是副作用"):
@@ -572,24 +663,28 @@ func renderTemplate(tmpl string, rec map[string]any) (string, error) {
 	return out, err
 }
 
-func (s *Store) invalidateEvidence(ctx context.Context, docID string) error {
+// invalidateEvidence retires every live evidence window of a source and
+// returns how many were patched.
+func (s *Store) invalidateEvidence(ctx context.Context, docID string) (int, error) {
 	res, err := s.c.Query(ctx, s.evidence, client.Query{
 		Filter: map[string]any{"doc_id": docID, "status": "live"},
 		Limit:  1000,
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
+	n := 0
 	for _, d := range res.Documents {
 		id, _ := d["_id"].(string)
 		if id == "" {
 			continue
 		}
 		if _, err := s.c.PatchDocument(ctx, s.evidence, id, map[string]any{"$set": map[string]any{"status": "stale"}}); err != nil {
-			return err
+			return n, err
 		}
+		n++
 	}
-	return nil
+	return n, nil
 }
 
 func (s *Store) findByBusiness(ctx context.Context, businessKey, title string) (*source.Source, error) {

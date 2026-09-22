@@ -35,6 +35,7 @@ Usage:
   ask get    <id>
   ask delete <id>
   ask ensure [-embed]           # 声明集合（-embed 兼补内容向量）
+  ask reconcile                 # 消费 ask_sources changelog：失效证据+标簇待复核
   ask env                       # 生效的端点配置（脱敏）
   ask reclaim [-stale]          # 物理回收 tombstone（-stale 兼收陈旧修订）
   ask job    [-job NAME]        # 摄取任务状态（queued/running/done/failed）
@@ -274,17 +275,30 @@ func main() {
 		}
 		_ = rewriter
 		// L1 candidate prefilter: KNN over body_embed (opt-in; empty/error
-		// falls back to the full L0 set — 索引是缓存，不是契约).
+		// falls back to the full L0 set — 索引是缓存，不是契约). D7 lazy
+		// path: a missing index materializes once, bounded, then retries.
 		if *l1pre {
-			if qv, err := emb.Embed(ctx, []string{*q}); err == nil && len(qv) == 1 {
-				if knn, err := c.KNN(ctx, sources, client.KNNRequest{
+			embedFn, dims, embedModel := embedderFor()
+			knnOnce := func() (*client.KNNResult, error) {
+				qv, err := embedFn(ctx, []string{*q})
+				if err != nil || len(qv) != 1 {
+					return nil, fmt.Errorf("embed: %w", err)
+				}
+				return c.KNN(ctx, sources, client.KNNRequest{
 					Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
 					Index:  "ask_body_embed",
 					Filter: map[string]any{"status": source.StatusActive},
-				}); err == nil && len(knn.Documents) > 0 {
-					if narrowed := orderByKNN(list, knn.Documents); len(narrowed) > 0 {
-						list = narrowed
-					}
+				})
+			}
+			knn, err := knnOnce()
+			if err != nil {
+				if _, berr := st.EnsureEmbed(ctx, embedFn, dims, embedModel, 64); berr == nil {
+					knn, err = knnOnce()
+				}
+			}
+			if err == nil && knn != nil && len(knn.Documents) > 0 {
+				if narrowed := orderByKNN(list, knn.Documents); len(narrowed) > 0 {
+					list = narrowed
 				}
 			}
 		}
@@ -429,6 +443,12 @@ func main() {
 			"api_key_len":     len(key),
 			"reasoning_split": strings.Contains(strings.ToLower(base), "minimaxi.com"),
 		})
+	case "reconcile":
+		rep, err := st.Reconcile(ctx)
+		if err != nil {
+			fatal(err)
+		}
+		printJSON(rep)
 	case "reclaim":
 		fs := flag.NewFlagSet("reclaim", flag.ExitOnError)
 		stale := fs.Bool("stale", false, "also reclaim stale revisions")
@@ -544,6 +564,23 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
+}
+
+// embedderFor resolves the content-vector embedder by the same rule as
+// search: explicit AIGATE_EMBED_MODEL over AIGATE_BASE_URL, else the offline
+// Local hash embedder.
+func embedderFor() (ingest.EmbedderFn, int, string) {
+	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" {
+		fe := &llm.AigateEmbedder{
+			BaseURL: base,
+			APIKey:  os.Getenv("AIGATE_API_KEY"),
+			Model:   os.Getenv("AIGATE_EMBED_MODEL"),
+			N:       64,
+		}
+		return fe.Embed, fe.Dims(), os.Getenv("AIGATE_EMBED_MODEL")
+	}
+	loc := cluster.Local{N: 64}
+	return loc.Embed, loc.Dims(), "local-hash-64"
 }
 
 // orderByKNN narrows the active-source list to the KNN hits (distance order).

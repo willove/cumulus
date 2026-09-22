@@ -8,14 +8,14 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层与知识簇生命周期；向量/全文/图/时序能力全部来自基座，模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B10 全部落地**（门 A–L）。设计 SSOT 见计划 v1.14。
+当前进度：**P0–P5 + LENS B1–B10 全部落地，§3.4.2/D7 承诺面收口**（门 A–M）。设计 SSOT 见计划 v1.15。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/ask
-make e2e                   # 门 A–L（真 cumudb，72 断言）
+make e2e                   # 门 A–M（真 cumudb，76 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
@@ -31,7 +31,8 @@ bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-r
 ./bin/ask get <id>
 ./bin/ask delete <id>
 ./bin/ask reclaim -stale                  # 物理回收 tombstone/陈旧修订
-./bin/ask ensure -embed                   # 兼补 body_embed 内容向量（L1 缓存，search -l1pre 读）
+./bin/ask ensure -embed                   # 兼补 body_embed 内容向量（L1 缓存，search -l1pre 读，缺索引首查惰性补建）
+./bin/ask reconcile                       # 消费 changelog：带外退役源→失效证据+标簇待复核
 ./bin/ask cluster list                    # 知识簇（ask_clusters）
 ./bin/ask conflicts list                  # 冲突边（ask_conflicts）
 ./bin/ask cites  list                     # 簇→源证据边（ask_cites）

@@ -425,5 +425,24 @@ print("ok")' ; check "B8 self-heal: cluster reuses again on the live source" $?
 B10="$($A search -q "供电容量上限500千瓦吗 以及 断开要等多久" -raw)"
 echo "$B10" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "latency_ms" in r and r.get("mode") in ("FAST","DEEP"), r.get("mode")' ; check "γ(I) modulated stop keeps accounting (B10)" $?
 
+# --- Gate M: changelog reconcile / sync cap (§3.4.2, D7) ----------------------
+RC1="$($A reconcile)"
+echo "$RC1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "cursor" in r and r.get("scanned",0)>=0, r' ; check "reconcile consumes the changelog with a persisted cursor" $?
+cat >"$WORK/st3.md" <<'MD'
+# 稳定手册
+供电容量上限 1200 千瓦，超载自动降载。
+MD
+P3="$($A put -title "稳定手册" -key st-doc -body-file "$WORK/st3.md")"
+ID3="$(echo "$P3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+$A delete "$ID3" >/dev/null   # tombstone: evidence invalidated inline, clusters NOT flagged
+RC2="$($A reconcile)"
+echo "$RC2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("scanned",0)>=1 and r.get("clusters_marked",0)>=1, r' ; check "reconcile flags clusters anchored on retired sources" $?
+RC3="$($A reconcile)"
+echo "$RC3" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("scanned",0)==0, r' ; check "reconcile is idempotent (cursor persisted)" $?
+python3 -c "print('超限'*140000)" >"$WORK/big.md"
+BIGFAIL=0
+$A put -title 超限 -key big -body-file "$WORK/big.md" >/dev/null 2>&1 || BIGFAIL=1
+[ "$BIGFAIL" = "1" ] ; check "sync put refuses bodies over the 256 KiB cap" $?
+
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]
