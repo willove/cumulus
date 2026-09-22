@@ -67,7 +67,8 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **Prompt 五类资产已全部进生产路径**（打分/意图/合成/级联降级/多轮改写）；离线桩与冻结回归是门的载体；
 - **`internal/prior`（LENS B4）已接线**：`search -prior` 五信号排序，默认 IDF 级联；
 - **hopTS 新鲜度剪枝**已接线（`search -hopts 168h`），默认关；
-- **R3 实测**（`go test ./internal/mcs -run TestR3AnchorProbe -v`）：CJK bigram 锚点命中率 **0.404**（23/57，噪声大→阶段①分层撒网臂必须保留）；答案入窗率 **0.714**（5/7）。
+- **R3 实测**（`go test ./internal/mcs -run TestR3AnchorProbe -v`）：CJK bigram 锚点命中率 **0.404**（23/57，噪声大→阶段①分层撒网臂必须保留）；答案入窗率 **0.714**（5/7）；
+- **R2 跨系统实测**（`bash scripts/r2-cluster-probe.sh`，指向外部 Sirchmunk）：同主题 10 措辞 Sirchmunk 裂 **4 簇** vs Gate B 改写族 ≤1；R5 阴性（无跨主题串台，G-pollute 素材用套内构造 fixture）；
 - 状态在 cumudb：`ask_sources` / `ask_evidence` / `ask_clusters` / `ask_weak_edges` / job 游标 KV；
 - 不做查询期扫本地文件树、不把二进制原件写入引擎、模型不进库；
 - 规模假设：源 ≤10⁴、簇 ≤10³（见计划 §7）。
