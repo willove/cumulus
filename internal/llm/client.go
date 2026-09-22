@@ -21,13 +21,18 @@ import (
 	"github.com/cumubase/ask/internal/prompts"
 )
 
-// ChatClient posts OpenAI-style chat completions (point at aigate in prod).
+// ChatClient posts OpenAI-style chat completions. Endpoint config is
+// per-suite (env/.env, internal integration) while the unified gateway is a
+// future work item — aigate stays locked for now.
 type ChatClient struct {
 	BaseURL    string
 	APIKey     string
 	Model      string
 	Caller     string
 	HTTPClient *http.Client
+	// ReasoningSplit asks a MiniMax-style endpoint to split chain-of-thought
+	// into message.reasoning_content (content stays the clean answer).
+	ReasoningSplit bool
 }
 
 func (c *ChatClient) http() *http.Client {
@@ -48,6 +53,12 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 			{"role": "user", "content": user},
 		},
 		"temperature": 0,
+	}
+	if c.ReasoningSplit {
+		// MiniMax-style opt-in: thinking lands in message.reasoning_content,
+		// content stays the clean answer. Servers that don't know the field
+		// ignore it.
+		body["reasoning_split"] = true
 	}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
@@ -77,7 +88,8 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 	var out struct {
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content          string `json:"content"`
+				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -87,7 +99,26 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("llm: empty choices")
 	}
-	return out.Choices[0].Message.Content, nil
+	// Models that inline their chain of thought (MiniMax-M3 without
+	// reasoning_split) must not leak it into the answer: downstream prompts
+	// expect parseable JSON, and think text with braces corrupts extraction.
+	content, _ := SplitThink(out.Choices[0].Message.Content)
+	if strings.TrimSpace(content) == "" {
+		content = strings.TrimSpace(out.Choices[0].Message.ReasoningContent)
+	}
+	return content, nil
+}
+
+// thinkRe matches an inline chain-of-thought block.
+var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
+
+// SplitThink separates an inline <think>…</think> block from the answer.
+// Unbalanced or absent blocks return the input unchanged.
+func SplitThink(content string) (clean, reasoning string) {
+	if m := thinkRe.FindStringIndex(content); m != nil {
+		return strings.TrimSpace(content[m[1]:]), strings.TrimSpace(thinkRe.FindString(content))
+	}
+	return content, ""
 }
 
 // AigateScorer scores samples via the evaluate_sample prompt.

@@ -35,6 +35,7 @@ Usage:
   ask get    <id>
   ask delete <id>
   ask ensure [-embed]           # 声明集合（-embed 兼补内容向量）
+  ask env                       # 生效的端点配置（脱敏）
   ask reclaim [-stale]          # 物理回收 tombstone（-stale 兼收陈旧修订）
   ask job    [-job NAME]        # 摄取任务状态（queued/running/done/failed）
   ask serve  [-listen ADDR]     # HTTP 摄取面（/health · /v1/ingest/*）
@@ -48,14 +49,26 @@ Flags:
   -evidence NAME evidence collection (default ask_evidence)
 
 Env:
-  AIGATE_BASE_URL    aigate API root INCLUDING /v1 (e.g. http://127.0.0.1:8481/v1)
-  AIGATE_API_KEY     bearer key for aigate
-  AIGATE_CHAT_MODEL  scorer/synthesis model (default mimo/cascade-pro; e.g. minimax/MiniMax-M3)
+  AIGATE_BASE_URL    upstream API root INCLUDING /v1 (e.g. https://api.minimaxi.com/v1)
+  AIGATE_API_KEY     bearer key for the upstream
+  AIGATE_CHAT_MODEL  scorer/synthesis model (e.g. MiniMax-M3 direct, minimax/MiniMax-M3 via gateway)
   AIGATE_EMBED_MODEL embedder model; unset = offline Local embedder even when AIGATE_BASE_URL is set
+  AIGATE_REASONING_SPLIT 1/0 force MiniMax reasoning_split (default: auto on minimaxi.com hosts)
+  ASK_ENV            path to the suite's .env (default ./.env); LLM_* keys alias onto AIGATE_*
 `
 
 func main() {
 	args := os.Args[1:]
+	// Per-suite endpoint config: ./.env (or $ASK_ENV), operator's LLM_*
+	// convention aliased onto AIGATE_*. Already-set env always wins.
+	envFile := os.Getenv("ASK_ENV")
+	if envFile == "" {
+		envFile = ".env"
+	}
+	if err := loadDotEnv(envFile); err != nil {
+		fatal(err)
+	}
+	applyLLMAliases()
 	server := "http://127.0.0.1:8480"
 	sources := "ask_sources"
 	evidence := "ask_evidence"
@@ -229,11 +242,16 @@ func main() {
 		var expander fast.KeywordExpander
 		var rewriter deep.HistoryRewriter
 		if base := os.Getenv("AIGATE_BASE_URL"); base != "" {
+			split := strings.Contains(strings.ToLower(base), "minimaxi.com")
+			if v := os.Getenv("AIGATE_REASONING_SPLIT"); v != "" {
+				split = v == "1" || strings.EqualFold(v, "true")
+			}
 			chat := &llm.ChatClient{
-				BaseURL: base,
-				APIKey:  os.Getenv("AIGATE_API_KEY"),
-				Model:   envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
-				Caller:  "ask",
+				BaseURL:        base,
+				APIKey:         os.Getenv("AIGATE_API_KEY"),
+				Model:          envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
+				Caller:         "ask",
+				ReasoningSplit: split,
 			}
 			scorer = &llm.AigateScorer{Client: chat}
 			analyzer = &llm.AigateAnalyzer{Client: chat}
@@ -392,6 +410,20 @@ func main() {
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)
 		}
+	case "env":
+		// Resolved endpoint config, masked — the per-suite .env face.
+		base := os.Getenv("AIGATE_BASE_URL")
+		key := os.Getenv("AIGATE_API_KEY")
+		printJSON(map[string]any{
+			"env_file":        envFile,
+			"env_file_loaded": fileExists(envFile),
+			"base_url":        base,
+			"chat_model":      os.Getenv("AIGATE_CHAT_MODEL"),
+			"embed_model":     os.Getenv("AIGATE_EMBED_MODEL"),
+			"api_key_set":     key != "",
+			"api_key_len":     len(key),
+			"reasoning_split": strings.Contains(strings.ToLower(base), "minimaxi.com"),
+		})
 	case "reclaim":
 		fs := flag.NewFlagSet("reclaim", flag.ExitOnError)
 		stale := fs.Bool("stale", false, "also reclaim stale revisions")

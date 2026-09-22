@@ -55,3 +55,35 @@ func TestParseHistoryRewriteJSON(t *testing.T) {
 		t.Fatal("must reject non-JSON")
 	}
 }
+
+// MiniMax-M3 inlines chain-of-thought without reasoning_split; the answer
+// must survive extraction, and think text with braces must not poison the
+// downstream JSON parse.
+func TestSplitThink(t *testing.T) {
+	raw := "<think>先分析 {\"score\": 9} 是不是陷阱。</think>\n\n{\"score\": 8, \"reasoning\": \"直接答案\"}"
+	clean, reasoning := SplitThink(raw)
+	if clean != `{"score": 8, "reasoning": "直接答案"}` {
+		t.Fatalf("clean wrong: %q", clean)
+	}
+	if reasoning == "" || !containsAll(reasoning, "陷阱") {
+		t.Fatalf("reasoning wrong: %q", reasoning)
+	}
+	plain := `{"score": 7, "reasoning": "无思考块"}`
+	c2, r2 := SplitThink(plain)
+	if c2 != plain || r2 != "" {
+		t.Fatalf("plain content must pass through: %q %q", c2, r2)
+	}
+}
+
+func containsAll(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || indexOf(s, sub) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

@@ -4,6 +4,8 @@
 # Usage: bash scenarios/run.sh [name ...]   (default: all)
 set -u
 cd "$(dirname "$0")/.."
+# Scenario runs are stub-mode too: isolate from the developer's .env.
+export ASK_ENV=/dev/null
 WORK="$(mktemp -d)"
 DB_PID=""
 PASS=0

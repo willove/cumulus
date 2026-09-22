@@ -65,7 +65,7 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **引用 `[?]`** = 未能精确回溯原文窗口（源已更新或定位越界）；多源样本逐源定位回原文；
 - **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、`history_rewrite` 的多轮会话载体（现为 CLI `-history` 显式传入）、六模协同 scenario（可选，未建）；
 - **Prompt 五类资产已全部进生产路径**（打分/意图/合成/级联降级/多轮改写）；离线桩与冻结回归是门的载体；
-- **端点两模式**：生产一律经 aigate（治理面：预算/计量/caller）；**调试可直连**（`AIGATE_BASE_URL=https://api.minimaxi.com/v1` + `AIGATE_CHAT_MODEL=MiniMax-M3`，`scripts/endpoint-probe.sh` 实测：FAST 67.4s / 复用 0.0s / DEEP 53.7s，≈904 tokens/窗、≈7186/合成）；embedder 仅在 `AIGATE_EMBED_MODEL` 显式指定时切换；
+- **端点配置在各套件内**（D6 决策更新 2026-09-22，aigate 暂锁、统一网关后期规划）：套件读 `./.env`（或 `$ASK_ENV`），沿用操作者 `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL_NAME` 约定（见 `.env.example`；已设环境变量优先，`ask env` 脱敏查看）。MiniMax 直连已适配：`reasoning_split` 自动（minimaxi 域，`AIGATE_REASONING_SPLIT` 强制）+ `<think>` 内联思维链剥离。实测：FAST 67.4s / 复用 0.0s / DEEP 53.7s，≈904 tokens/窗、≈7186/合成（`scripts/endpoint-probe.sh`）；embedder 仅在 `AIGATE_EMBED_MODEL` 显式指定时切换；
 - **`internal/prior`（LENS B4）已接线**：`search -prior` 五信号排序，默认 IDF 级联；
 - **hopTS 新鲜度剪枝**已接线（`search -hopts 168h`），默认关；
 - **R3 实测**（`go test ./internal/mcs -run TestR3AnchorProbe -v`）：CJK bigram 锚点命中率 **0.404**（23/57，噪声大→阶段①分层撒网臂必须保留）；答案入窗率 **0.714**（5/7）；

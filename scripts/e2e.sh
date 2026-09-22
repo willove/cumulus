@@ -6,6 +6,9 @@
 # stubs by design (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
 cd "$(dirname "$0")/.."
+# The gates are offline-stub territory: never let a developer's .env route
+# them at a live model (each search would cost real tokens and flake).
+export ASK_ENV=/dev/null
 WORK="$(mktemp -d)"
 DB_PID=""
 SERVE_PID=""
