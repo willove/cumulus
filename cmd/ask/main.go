@@ -48,10 +48,10 @@ Flags:
   -evidence NAME evidence collection (default ask_evidence)
 
 Env:
-  AIGATE_BASE_URL    set to route scorer/embedder/analyze/synthesize via aigate
+  AIGATE_BASE_URL    aigate API root INCLUDING /v1 (e.g. http://127.0.0.1:8481/v1)
   AIGATE_API_KEY     bearer key for aigate
-  AIGATE_CHAT_MODEL  scorer/synthesis model (default mimo/cascade-pro)
-  AIGATE_EMBED_MODEL embedder model (default text-embedding-3-small)
+  AIGATE_CHAT_MODEL  scorer/synthesis model (default mimo/cascade-pro; e.g. minimax/MiniMax-M3)
+  AIGATE_EMBED_MODEL embedder model; unset = offline Local embedder even when AIGATE_BASE_URL is set
 `
 
 func main() {
@@ -84,7 +84,21 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, rest := rest[0], rest[1:]
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// Offline gates finish in seconds; the model path makes ~13 sequential
+	// calls per query, so production mode gets a wider default. ASK_TIMEOUT
+	// (duration, e.g. 10m) overrides either way.
+	timeout := 60 * time.Second
+	if os.Getenv("AIGATE_BASE_URL") != "" {
+		timeout = 300 * time.Second
+	}
+	if v := os.Getenv("ASK_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			fatal(fmt.Errorf("ASK_TIMEOUT: %w", err))
+		}
+		timeout = d
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := client.New(server)
 	st := ingest.New(c, sources, evidence)
@@ -226,11 +240,16 @@ func main() {
 			synth = &llm.AigateSynthesizer{Client: chat}
 			expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
 			rewriter = &llm.AigateHistoryRewriter{Client: chat}
-			emb = &llm.AigateEmbedder{
-				BaseURL: base,
-				APIKey:  os.Getenv("AIGATE_API_KEY"),
-				Model:   envOr("AIGATE_EMBED_MODEL", "text-embedding-3-small"),
-				N:       64,
+			// Embeddings switch only on an explicit AIGATE_EMBED_MODEL: the
+			// gateway's chat surface is the proven path, and a silent embed
+			// probe against a chat-only gateway would fail every search.
+			if os.Getenv("AIGATE_EMBED_MODEL") != "" {
+				emb = &llm.AigateEmbedder{
+					BaseURL: base,
+					APIKey:  os.Getenv("AIGATE_API_KEY"),
+					Model:   os.Getenv("AIGATE_EMBED_MODEL"),
+					N:       64,
+				}
 			}
 		}
 		_ = rewriter
@@ -320,11 +339,12 @@ func main() {
 		if *embed {
 			dims := 64
 			var embedFn ingest.EmbedderFn
-			if base := os.Getenv("AIGATE_BASE_URL"); base != "" {
+			// Same rule as search: embeddings need the explicit model env.
+			if os.Getenv("AIGATE_EMBED_MODEL") != "" && os.Getenv("AIGATE_BASE_URL") != "" {
 				fe := &llm.AigateEmbedder{
-					BaseURL: base,
+					BaseURL: os.Getenv("AIGATE_BASE_URL"),
 					APIKey:  os.Getenv("AIGATE_API_KEY"),
-					Model:   envOr("AIGATE_EMBED_MODEL", "text-embedding-3-small"),
+					Model:   os.Getenv("AIGATE_EMBED_MODEL"),
 					N:       64,
 				}
 				embedFn, dims = fe.Embed, fe.Dims()
