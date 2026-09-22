@@ -385,5 +385,11 @@ assert isinstance(r, list) and r, r
 assert any(c.get("a") and c.get("b") for c in r), r
 print("ok")' ; check "conflicts list shows recorded edges (ask_conflicts)" $?
 
+# --- Gate K: B5 arms / B6 oracle surface / B9 accounting ----------------------
+echo "$S3" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; s=a.get("samples") or []; assert s and all(("arm" in w) for w in s), s[:1]' ; check "sample windows carry arm labels (B5)" $?
+echo "$S4" | python3 -c 'import json,sys; r=json.load(sys.stdin); v=r.get("latency_ms"); assert isinstance(v,int) and v>=0, v' ; check "result carries latency accounting (B9)" $?
+MH2="$($A search -q "路由器怎么配置 和 交换机怎么配置" -raw)"
+echo "$MH2" | python3 -c 'import json,sys; r=json.load(sys.stdin); c=r.get("cover") or {}; f=c.get("facts") or []; assert len(f)>=2 and all("covers_ok" in x or True for x in f), c' ; check "multi-hop cover report stable on paraphrase (B6 path guard)" $?
+
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

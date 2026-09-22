@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
@@ -33,6 +34,8 @@ type ChatClient struct {
 	// ReasoningSplit asks a MiniMax-style endpoint to split chain-of-thought
 	// into message.reasoning_content (content stays the clean answer).
 	ReasoningSplit bool
+
+	total atomic.Int64 // B9: cumulative upstream-reported tokens
 }
 
 func (c *ChatClient) http() *http.Client {
@@ -92,9 +95,15 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(payload, &out); err != nil {
 		return "", err
+	}
+	if out.Usage.TotalTokens > 0 {
+		c.total.Add(out.Usage.TotalTokens) // B9 budget accounting
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("llm: empty choices")
@@ -109,6 +118,11 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 	return content, nil
 }
 
+// TotalTokens reports the cumulative upstream-reported token usage of every
+// completed call through this client (B9 per-query accounting; the CLI reads
+// it after one search). Atomic — serve handlers may share the client.
+func (c *ChatClient) TotalTokens() int64 { return c.total.Load() }
+
 // thinkRe matches an inline chain-of-thought block.
 var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
 
@@ -121,35 +135,95 @@ func SplitThink(content string) (clean, reasoning string) {
 	return content, ""
 }
 
-// AigateScorer scores samples via the evaluate_sample prompt.
+// AigateScorer scores samples via the evaluate_sample prompt (v2: emits the
+// per-fact oracle vector when given fact hints — LENS B6).
 type AigateScorer struct {
 	Client *ChatClient
 }
 
-var jsonRe = regexp.MustCompile(`\{[\s\S]*\}`)
+// EvaluateResult is the evaluate_sample v2 JSON shape.
+type EvaluateResult struct {
+	Score     float64  `json:"score"`
+	Reasoning string   `json:"reasoning"`
+	Covers    []string `json:"covers"`
+}
+
+// ParseEvaluateJSON is exported for frozen prompt regression tests.
+func ParseEvaluateJSON(raw string) (EvaluateResult, error) {
+	var parsed EvaluateResult
+	if err := parseJSON(raw, &parsed); err != nil {
+		return EvaluateResult{}, err
+	}
+	return parsed, nil
+}
+
+// ParseScoreJSON keeps the v1 shape (score + reasoning) for frozen tests.
+func ParseScoreJSON(raw string) (float64, string, error) {
+	r, err := ParseEvaluateJSON(raw)
+	if err != nil {
+		return 0, "", err
+	}
+	return r.Score, r.Reasoning, nil
+}
 
 // Score implements mcs.Scorer (0–10).
 func (s *AigateScorer) Score(ctx context.Context, query string, sm mcs.Sample) (float64, string, error) {
+	r, err := s.evaluate(ctx, query, nil, sm)
+	if err != nil {
+		return 0, "", err
+	}
+	return r.Score, r.Reasoning, nil
+}
+
+// ScoreWithFacts implements mcs.FactAware (B6 oracle vector): covers are
+// clamped to the given fact ids.
+func (s *AigateScorer) ScoreWithFacts(ctx context.Context, query string, facts []string, sm mcs.Sample) (float64, string, []string, error) {
+	r, err := s.evaluate(ctx, query, facts, sm)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	allowed := map[string]bool{}
+	for _, f := range facts {
+		if i := strings.Index(f, ":"); i > 0 {
+			f = f[:i]
+		}
+		allowed[f] = true
+	}
+	var covers []string
+	for _, c := range r.Covers {
+		if allowed[c] {
+			covers = append(covers, c)
+		}
+	}
+	return r.Score, r.Reasoning, covers, nil
+}
+
+func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []string, sm mcs.Sample) (EvaluateResult, error) {
+	factsText := "（none）"
+	if len(facts) > 0 {
+		factsText = strings.Join(facts, "\n")
+	}
 	tmpl := prompts.MustRender(prompts.EvaluateSample, map[string]string{
 		"query":          query,
 		"sample_source":  sm.Source,
 		"sample_content": truncate(sm.Content, 2000),
+		"facts":          factsText,
 	})
 	raw, err := s.Client.Complete(ctx, tmpl)
 	if err != nil {
-		return 0, "", err
+		return EvaluateResult{}, err
 	}
-	score, why, err := ParseScoreJSON(raw)
+	r, err := ParseEvaluateJSON(raw)
 	if err != nil {
-		return 0, "unparseable", err
+		return EvaluateResult{}, err
 	}
-	if score < 0 {
-		score = 0
+	if r.Score < 0 {
+		r.Score = 0
 	}
-	if score > 10 {
-		score = 10
+	if r.Score > 10 {
+		r.Score = 10
 	}
-	return score, why, nil
+	return r, nil
 }
 
 // AigateEmbedder requests embeddings (OpenAI-compatible /embeddings).
@@ -405,6 +479,8 @@ var (
 	_ fast.KeywordExpander = (*AigateKeywordExpander)(nil)
 )
 
+var jsonRe = regexp.MustCompile(`\{[\s\S]*\}`)
+
 func parseJSON(raw string, v any) error {
 	m := jsonRe.FindString(raw)
 	if m == "" {
@@ -418,16 +494,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
-}
-
-// ParseScoreJSON is exported for frozen prompt regression tests.
-func ParseScoreJSON(raw string) (float64, string, error) {
-	var parsed struct {
-		Score     float64 `json:"score"`
-		Reasoning string  `json:"reasoning"`
-	}
-	if err := parseJSON(raw, &parsed); err != nil {
-		return 0, "", err
-	}
-	return parsed.Score, parsed.Reasoning, nil
 }

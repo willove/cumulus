@@ -114,6 +114,82 @@ func Evaluate(facts []Fact, samples []mcs.Sample) Report {
 	return rep
 }
 
+// hasCovers reports whether any sample carries oracle annotations (B6).
+func hasCovers(samples []mcs.Sample) bool {
+	for _, sm := range samples {
+		if len(sm.Covers) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// EvaluateOracle is the B6 oracle path: per-fact coverage comes from the
+// scorer's observation vector (sample.Covers), not keyword overlap — one
+// scoring call updated every fact. Facts no window claims stay open.
+func EvaluateOracle(facts []Fact, samples []mcs.Sample) Report {
+	rep := Report{Facts: facts, K: len(facts), Weakest: 1}
+	if len(facts) == 0 {
+		rep.Complete = false
+		rep.Weakest = 0
+		return rep
+	}
+	weakest := 1.0
+	for i := range facts {
+		f := &facts[i]
+		var best *mcs.Sample
+		for j := range samples {
+			sm := samples[j]
+			if sm.Score < CoverScore {
+				continue
+			}
+			claimed := false
+			for _, id := range sm.Covers {
+				if id == f.ID {
+					claimed = true
+					break
+				}
+			}
+			if !claimed {
+				continue
+			}
+			if best == nil || sm.Score > best.Score {
+				cp := sm
+				best = &cp
+			}
+		}
+		if best != nil {
+			f.Covered = true
+			f.Score = best.Score
+			f.SourceID = best.Source
+			f.Window = best
+		} else {
+			f.Covered = false
+			f.Score = 0
+			f.SourceID = ""
+			f.Window = nil
+			rep.Missing = append(rep.Missing, f.ID)
+			weakest = 0
+		}
+		if cv := f.Score / 10; cv < weakest {
+			weakest = cv
+		}
+	}
+	rep.Weakest = weakest
+	rep.Complete = len(rep.Missing) == 0
+	rep.Facts = facts
+	return rep
+}
+
+// ReportFor picks the oracle path when the scorer annotated covers (B6) and
+// falls back to the keyword path for plain scorers (offline stub).
+func ReportFor(facts []Fact, samples []mcs.Sample) Report {
+	if hasCovers(samples) {
+		return EvaluateOracle(facts, samples)
+	}
+	return Evaluate(facts, samples)
+}
+
 // NeedContinue is the budget-aware continue predicate (LENS §4.3): keep
 // exploring while some requirement is open and the loop budget remains.
 func NeedContinue(rep Report, loops, maxLoops int) bool {

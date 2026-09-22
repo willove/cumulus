@@ -8,15 +8,16 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层与知识簇生命周期；向量/全文/图/时序能力全部来自基座，模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B3 完成，B4 已接线**（门 A–J）。设计 SSOT 见计划 v1.9。
+当前进度：**P0–P5 + LENS B1–B6、B9 完成（对齐表剩 B7/B8/B10 触发型）**（门 A–K）。设计 SSOT 见计划 v1.13。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/ask
-make e2e                   # 门 A–J（真 cumudb，65 断言）
+make e2e                   # 门 A–K（真 cumudb，68 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
+bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
 ./bin/ask ensure                          # 声明集合（幂等）
 ./bin/ask put -title "部署手册" -key handbook -body-file doc.md

@@ -15,17 +15,27 @@ import (
 
 // Sample is one candidate window of a source body.
 type Sample struct {
-	Start     int     `json:"start"`
-	End       int     `json:"end"`
-	Content   string  `json:"content"`
-	Source    string  `json:"source"`
-	Score     float64 `json:"score"`
-	Reasoning string  `json:"reasoning"`
+	Start     int      `json:"start"`
+	End       int      `json:"end"`
+	Content   string   `json:"content"`
+	Source    string   `json:"source"`
+	Arm       string   `json:"arm,omitempty"`    // B5: lex | local | global
+	Covers    []string `json:"covers,omitempty"` // B6: fact ids this window supports
+	Score     float64  `json:"score"`
+	Reasoning string   `json:"reasoning"`
 }
 
 // Scorer rates one sample against the query (0-10 scale).
 type Scorer interface {
 	Score(ctx context.Context, query string, s Sample) (score float64, reasoning string, err error)
+}
+
+// FactAware is an optional Scorer extension (LENS B6 oracle vector): the
+// scorer sees the query's atomic fact ids and reports which ones the window
+// directly supports — one scoring call updates every fact's coverage, so the
+// call count does not grow with K.
+type FactAware interface {
+	ScoreWithFacts(ctx context.Context, query string, facts []string, s Sample) (score float64, reasoning string, covers []string, err error)
 }
 
 // KeywordScorer is a deterministic offline stub: score = keyword hit density
@@ -129,7 +139,18 @@ type Sampler struct {
 	Cfg    Config
 	Scorer Scorer
 	RNG    *rand.Rand
+	// FactHints, when set (as "f1:描述" strings), switches scoring to the
+	// FactAware oracle path (B6); nil keeps the plain scorer.
+	FactHints []string
+	// Weights are the arm weights after the last SampleBody run (B5 λ_t;
+	// visible for gates and probes).
+	Weights map[string]float64
 }
+
+// Arms are the complementary proposal families (LENS B5): lex anchors on the
+// query's own words, local neighborhoods (stratified/gaussian), global
+// uniform scatter over the whole body — the semantic blind-spot arm.
+var Arms = []string{"lex", "local", "global"}
 
 func New(cfg Config, scorer Scorer) *Sampler {
 	if cfg.Window <= 0 {
@@ -145,29 +166,28 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 		return nil, nil
 	}
 	if len(runes) <= s.Cfg.SmallFileRunes {
-		sm := Sample{Start: 0, End: len(runes), Content: body, Source: "full"}
-		sc, why, err := s.Scorer.Score(ctx, query, sm)
+		sm := Sample{Start: 0, End: len(runes), Content: body, Source: "full", Arm: "local"}
+		evs, err := s.evalAll(ctx, query, []Sample{sm})
 		if err != nil {
 			return nil, err
 		}
-		sm.Score, sm.Reasoning = sc, why
-		return []Sample{sm}, nil
+		return evs, nil
 	}
 
-	all := s.stage1(runes, query, body)
-	evaluated, err := s.evalAll(ctx, query, all)
+	// Round 0: full sweep — stratified grid + query anchors. The spread arm
+	// is what keeps anchors from being the only entrance (R3 conclusion).
+	evaluated, err := s.evalAll(ctx, query, s.stage1(runes, query, body))
 	if err != nil {
 		return nil, err
 	}
 	seeds := topSeeds(evaluated, s.Cfg.TopSeeds)
 
+	// Rounds 1..N: arm-proportional proposals. λ starts equal and follows
+	// each arm's yield of scoreable windows (B5 online weights); every arm
+	// keeps at least one slot — weights steer, they never silence.
+	λ := equalWeights()
 	for r := 0; r < s.Cfg.Rounds; r++ {
-		var batch []Sample
-		if r == 0 {
-			batch = s.stage1(runes, query, body)
-		} else {
-			batch = s.gaussian(runes, seeds)
-		}
+		batch := s.allocate(runes, query, seeds, λ)
 		if len(batch) == 0 {
 			continue
 		}
@@ -176,8 +196,10 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 			return nil, err
 		}
 		evaluated = append(evaluated, ev...)
+		λ = updateLambda(λ, ev)
 		seeds = topSeeds(evaluated, s.Cfg.TopSeeds)
 	}
+	s.Weights = λ
 
 	evaluated = dedup(evaluated)
 	sort.Slice(evaluated, func(i, j int) bool {
@@ -198,6 +220,76 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 	return out, nil
 }
 
+// allocate splits one round's budget across the three arms by λ.
+func (s *Sampler) allocate(runes []rune, query string, seeds []Sample, λ map[string]float64) []Sample {
+	k := s.Cfg.SamplesPerRound
+	if k < len(Arms) {
+		k = len(Arms)
+	}
+	budget := map[string]int{}
+	for _, arm := range Arms {
+		budget[arm] = 1
+	}
+	rest := k - len(Arms)
+	for _, arm := range armsByWeight(λ) {
+		if rest <= 0 {
+			break
+		}
+		budget[arm]++
+		rest--
+	}
+	var out []Sample
+	out = append(out, s.fuzzWindows(runes, query, budget["lex"])...)
+	out = append(out, s.gaussian(runes, seeds, budget["local"])...)
+	out = append(out, s.globalScatter(runes, budget["global"])...)
+	return out
+}
+
+// updateLambda nudges the arm weights toward this round's yield (B5 online
+// weights): utility = each arm's share of scoreable windows, EMA 0.5,
+// renormalized to sum 1.
+func updateLambda(λ map[string]float64, batch []Sample) map[string]float64 {
+	contrib := map[string]float64{}
+	total := 0.0
+	for _, sm := range batch {
+		if sm.Score >= 4 {
+			contrib[sm.Arm]++
+			total++
+		}
+	}
+	next := map[string]float64{}
+	sum := 0.0
+	for _, arm := range Arms {
+		u := 0.0
+		if total > 0 {
+			u = contrib[arm] / total
+		}
+		next[arm] = 0.5*λ[arm] + 0.5*u
+		sum += next[arm]
+	}
+	if sum <= 0 {
+		return equalWeights()
+	}
+	for _, arm := range Arms {
+		next[arm] /= sum
+	}
+	return next
+}
+
+func equalWeights() map[string]float64 {
+	λ := map[string]float64{}
+	for _, arm := range Arms {
+		λ[arm] = 1.0 / float64(len(Arms))
+	}
+	return λ
+}
+
+func armsByWeight(λ map[string]float64) []string {
+	sorted := append([]string(nil), Arms...)
+	sort.Slice(sorted, func(i, j int) bool { return λ[sorted[i]] > λ[sorted[j]] })
+	return sorted
+}
+
 func (s *Sampler) stage1(runes []rune, query, body string) []Sample {
 	n := len(runes)
 	half := s.Cfg.Window
@@ -207,8 +299,25 @@ func (s *Sampler) stage1(runes []rune, query, body string) []Sample {
 		center := (2*i + 1) * n / (2 * k)
 		out = append(out, window(runes, center, half, "stratified"))
 	}
+	out = append(out, s.fuzzWindows(runes, query, k)...)
+	return out
+}
+
+// fuzzWindows centers windows on the query's own words found in the body
+// (lex arm). runeIndexOf lands on the FIRST occurrence — dense distractor
+// padding pins these windows early, which is exactly the blind the global
+// arm covers (LENS: file-level hit ≠ in-file position).
+func (s *Sampler) fuzzWindows(runes []rune, query string, limit int) []Sample {
+	if limit <= 0 {
+		return nil
+	}
+	half := s.Cfg.Window
+	var out []Sample
 	for _, w := range Fields(query) {
-		if !strings.Contains(strings.ToLower(body), w) {
+		if len(out) >= limit {
+			break
+		}
+		if !strings.Contains(strings.ToLower(string(runes)), w) {
 			continue
 		}
 		center := runeIndexOf(runes, w)
@@ -217,12 +326,12 @@ func (s *Sampler) stage1(runes []rune, query, body string) []Sample {
 	return out
 }
 
-func (s *Sampler) gaussian(runes []rune, seeds []Sample) []Sample {
-	if len(seeds) == 0 {
-		return s.stage1(runes, "", string(runes))
+func (s *Sampler) gaussian(runes []rune, seeds []Sample, limit int) []Sample {
+	if limit <= 0 || len(seeds) == 0 {
+		return nil
 	}
 	var out []Sample
-	for i := 0; i < s.Cfg.SamplesPerRound; i++ {
+	for i := 0; i < limit; i++ {
 		seed := seeds[i%len(seeds)]
 		center := (seed.Start + seed.End) / 2
 		jitter := int(s.RNG.NormFloat64() * s.Cfg.Sigma)
@@ -231,9 +340,35 @@ func (s *Sampler) gaussian(runes []rune, seeds []Sample) []Sample {
 	return out
 }
 
+// globalScatter drops uniform-random windows over the whole body (B5 global
+// arm, LENS global proposals): the semantic blind-spot arm that ignores both
+// anchors and seeds. RNG is seeded in New, so draws stay reproducible for
+// gates.
+func (s *Sampler) globalScatter(runes []rune, limit int) []Sample {
+	if limit <= 0 {
+		return nil
+	}
+	n := len(runes)
+	var out []Sample
+	for i := 0; i < limit; i++ {
+		out = append(out, window(runes, s.RNG.Intn(n), s.Cfg.Window, "global"))
+	}
+	return out
+}
+
 func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sample, error) {
+	fa, _ := s.Scorer.(FactAware)
 	out := make([]Sample, 0, len(in))
 	for _, sm := range in {
+		if fa != nil && len(s.FactHints) > 0 {
+			sc, why, covers, err := fa.ScoreWithFacts(ctx, query, s.FactHints, sm)
+			if err != nil {
+				return nil, err
+			}
+			sm.Score, sm.Reasoning, sm.Covers = sc, why, covers
+			out = append(out, sm)
+			continue
+		}
 		sc, why, err := s.Scorer.Score(ctx, query, sm)
 		if err != nil {
 			return nil, err
@@ -257,11 +392,19 @@ func window(runes []rune, center, half int, source string) Sample {
 	if start > end {
 		start, end = 0, n
 	}
+	arm := "local"
+	switch source {
+	case "fuzz":
+		arm = "lex"
+	case "global":
+		arm = "global"
+	}
 	return Sample{
 		Start:   start,
 		End:     end,
 		Content: string(runes[start:end]),
 		Source:  source,
+		Arm:     arm,
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/facts"
@@ -115,10 +116,16 @@ type Result struct {
 	Persisted  bool                 `json:"persisted"`
 	Merged     bool                 `json:"merged"`
 	Neighbors  []graph.ExpandResult `json:"neighbors,omitempty"`
-	// Cover is the per-fact multi-hop coverage report (LENS B1/B2).
+	// Cover is the per-fact multi-hop coverage report (LENS B1/B2; B6 oracle
+	// vector when the scorer annotates covers).
 	Cover facts.Report `json:"cover"`
 	// SelfCorrected marks a weakest-requirement re-sample pass.
 	SelfCorrected bool `json:"self_corrected"`
+	// B9 budget accounting: LatencyMS is always filled; Tokens carries the
+	// upstream-reported total (0 on the offline stub path — the CLI fills it
+	// from the chat client after Ask returns).
+	Tokens    int64 `json:"tokens,omitempty"`
+	LatencyMS int64 `json:"latency_ms,omitempty"`
 }
 
 // Engine runs FAST and escalates into DEEP when confidence is thin.
@@ -168,7 +175,9 @@ func (e *Engine) scorer() mcs.Scorer {
 }
 
 // Ask runs the confidence-gated path (门 D: 置信不足必升级).
-func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (Result, error) {
+func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
+	started := time.Now()
+	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
 	if e.Sources == nil {
 		e.Sources = sources
 	}
@@ -189,7 +198,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{
+	res = Result{
 		Answer:     base.Answer,
 		ClusterID:  base.ClusterID,
 		ClusterVer: base.ClusterVer,
@@ -202,7 +211,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	}
 	res.Citations = BuildCitations(query, base.Answer, sources)
 	res.Conflicts = e.conflictsFor(ctx, base.ClusterID)
-	res.Cover = facts.Evaluate(facts.Build(query), base.Answer.Samples)
+	res.Cover = facts.ReportFor(facts.Build(query), base.Answer.Samples)
 
 	// Tier exits: non-search intents never escalate.
 	switch base.Answer.Mode {
@@ -255,6 +264,17 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source) (fast.Answer, facts.Report, int, bool, error) {
 	fx := facts.Build(query)
+	// B6 oracle hints: "f1:描述" strings let a FactAware scorer emit the
+	// per-fact observation vector in the same scoring call.
+	hints := make([]string, len(fx))
+	for i, f := range fx {
+		hints[i] = f.ID + ":" + f.Query
+	}
+	newSampler := func() *mcs.Sampler {
+		smp := mcs.New(mcs.DefaultConfig(), e.scorer())
+		smp.FactHints = hints
+		return smp
+	}
 	var best fast.Answer
 	loops := 0
 	var kept []mcs.Sample
@@ -268,8 +288,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if loops > MaxLoops {
 			break
 		}
-		smp := mcs.New(mcs.DefaultConfig(), e.scorer())
-		samples, err := smp.SampleBody(ctx, query, s.Body)
+		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		if err != nil {
 			continue
 		}
@@ -288,7 +307,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestSrc = s
 		}
 	}
-	rep := facts.Evaluate(fx, kept)
+	rep := facts.ReportFor(fx, kept)
 
 	// Self-correction: weakest requirement still open → one bounded re-sample.
 	selfCorrected := false
@@ -303,8 +322,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				if loops > MaxLoops {
 					break
 				}
-				smp := mcs.New(mcs.DefaultConfig(), e.scorer())
-				samples, err := smp.SampleBody(ctx, mq, s.Body)
+				samples, err := newSampler().SampleBody(ctx, mq, s.Body)
 				if err != nil {
 					continue
 				}
@@ -316,7 +334,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				}
 			}
 		}
-		rep = facts.Evaluate(fx, kept)
+		rep = facts.ReportFor(fx, kept)
 	}
 
 	loops++

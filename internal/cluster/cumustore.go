@@ -110,10 +110,18 @@ func (s *CumuStore) Delete(ctx context.Context, id string) error {
 func evidenceToAny(ev []mcs.Sample) []any {
 	out := make([]any, 0, len(ev))
 	for _, s := range ev {
-		out = append(out, map[string]any{
+		doc := map[string]any{
 			"start": s.Start, "end": s.End, "content": s.Content,
 			"source": s.Source, "score": s.Score, "reasoning": s.Reasoning,
-		})
+		}
+		// B5/B6 annotations ride along when present (omitempty shapes).
+		if s.Arm != "" {
+			doc["arm"] = s.Arm
+		}
+		if len(s.Covers) > 0 {
+			doc["covers"] = s.Covers
+		}
+		out = append(out, doc)
 	}
 	return out
 }

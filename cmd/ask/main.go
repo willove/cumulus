@@ -241,6 +241,7 @@ func main() {
 		var synth fast.Synthesizer
 		var expander fast.KeywordExpander
 		var rewriter deep.HistoryRewriter
+		var chatClient *llm.ChatClient
 		if base := os.Getenv("AIGATE_BASE_URL"); base != "" {
 			split := strings.Contains(strings.ToLower(base), "minimaxi.com")
 			if v := os.Getenv("AIGATE_REASONING_SPLIT"); v != "" {
@@ -253,6 +254,7 @@ func main() {
 				Caller:         "ask",
 				ReasoningSplit: split,
 			}
+			chatClient = chat
 			scorer = &llm.AigateScorer{Client: chat}
 			analyzer = &llm.AigateAnalyzer{Client: chat}
 			synth = &llm.AigateSynthesizer{Client: chat}
@@ -309,6 +311,9 @@ func main() {
 		res, err := dE.Ask(ctx, *q, list)
 		if err != nil {
 			fatal(err)
+		}
+		if chatClient != nil {
+			res.Tokens = chatClient.TotalTokens() // B9 per-query accounting
 		}
 		ans := res.Answer
 		if !res.Reused && len(ans.Samples) > 0 && ans.SourceID != "" && !ans.Skipped {
