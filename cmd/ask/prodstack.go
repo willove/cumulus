@@ -70,3 +70,7 @@ func newProdStack() prodStack {
 	}
 	return ps
 }
+
+// maxDeepLoops is the DEEP admission slice: loop budget × a small margin, so
+// the ranked head always contains the whole first exploration wave.
+const maxDeepLoops = deep.MaxLoops

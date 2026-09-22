@@ -283,13 +283,9 @@ func main() {
 		dE.Scorer = scorer
 		dE.Synth = synth
 		// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
-		dE.Widen = func(wctx context.Context, q string, exclude map[string]bool, m int) ([]source.Source, error) {
-			all, err := st.ActiveSources(wctx)
-			if err != nil {
-				return nil, err
-			}
-			return fe.WidenSources(wctx, q, all, exclude, m)
-		}
+		dE.Widen = widenFunc(fe, st, c, sources)
+		// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
+		dE.RankAdmission = rankFunc(fe, st, c, sources)
 		if *history != "" {
 			var hist []string
 			for _, h := range strings.Split(*history, "|") {

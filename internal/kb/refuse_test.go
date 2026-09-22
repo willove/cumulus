@@ -2,6 +2,7 @@ package kb
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/cumubase/ask/internal/cluster"
@@ -75,5 +76,29 @@ func TestNonRefusedAnswerStillPersists(t *testing.T) {
 	}
 	if r.Answer.Refused || !r.Persisted || r.ClusterID == "" {
 		t.Fatalf("non-refused answer must persist: %+v", r)
+	}
+}
+
+// failingSynth models the degradation fire: Synthesize errors, so the answer
+// path falls back to the deterministic template. The tell is the template
+// header, and with a production synth wired it must NOT persist.
+type failingSynth struct{}
+
+func (failingSynth) Synthesize(ctx context.Context, query string, samples []mcs.Sample) (string, error) {
+	return "", fmt.Errorf("llm: unavailable")
+}
+
+func TestDegradedTemplateDoesNotPersistWhenSynthWired(t *testing.T) {
+	ctx := context.Background()
+	fe := fast.New(mcs.KeywordScorer{Keywords: []string{"连接池", "128"}})
+	fe.Synth = failingSynth{}
+	e := New(fe, cluster.NewMemory(), cluster.Local{N: 64})
+	srcs := fixtureSources()
+	r, err := e.Ask(ctx, "连接池最大连接数是多少", srcs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Persisted || r.ClusterID != "" {
+		t.Fatalf("template fallback with wired synth must not persist (persisted=%v id=%s)", r.Persisted, r.ClusterID)
 	}
 }

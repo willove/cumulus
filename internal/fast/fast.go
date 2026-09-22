@@ -168,6 +168,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}
 	mean /= float64(len(kept))
 	conf := mcs.Confidence(mean, cov)
+	summary := e.render(ctx, query, best, kept)
 	return Answer{
 		Query:      query,
 		Mode:       ModeFAST,
@@ -176,9 +177,9 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		Samples:    kept,
 		Coverage:   cov,
 		Confidence: conf,
-		Summary:    e.render(ctx, query, best, kept),
+		Summary:    summary,
 		Skipped:    conf < 0.35,
-		Refused:    RefusedOf(e.Synth),
+		Refused:    RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
 	}, nil
 }
 
@@ -230,8 +231,12 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 	return out, nil
 }
 
-// render prefers the production Synthesizer and degrades to the deterministic
-// template on refusal/error (never blocks the answer path).
+// render prefers the production Synthesizer; on refusal/error it degrades to
+// the deterministic template, and the tell is readable from the summary: a
+// template summary starting with 【DEEP/Fast 摘要】 is scaffolding, not an
+// answer, so RefusedOf must report true for it. Without this, a refused LLM
+// run leaks a template-answer past the persistence gate (真机抓到:
+// 醉酒问题 LLM 拒答→模板代答→仍落簇).
 func (e *Engine) render(ctx context.Context, query string, src source.Source, samples []mcs.Sample) string {
 	if e.Synth != nil {
 		if s, err := e.Synth.Synthesize(ctx, query, samples); err == nil && strings.TrimSpace(s) != "" {
@@ -239,6 +244,26 @@ func (e *Engine) render(ctx context.Context, query string, src source.Source, sa
 		}
 	}
 	return synthesize(query, src, samples)
+}
+
+// templateDegraded reports whether s is the deterministic scaffold rather
+// than a synthesizer answer. The templates carry "摘要】" in their header
+// ("【摘要】" FAST, "【DEEP 摘要】" DEEP); a real synthesis never does.
+func templateDegraded(s string) bool {
+	return strings.HasPrefix(s, "【") && strings.Contains(s, "摘要】")
+}
+
+// RefusedOfSummary is the summary-side half of the refusal gate, ACTIVE ONLY
+// when a production synthesizer is wired (Synth != nil): a deterministic
+// template summary returned then means the synth refused/errored and the
+// answer path papered over it (真机抓到：醉酒问题 LLM 拒答→模板代答→仍
+// 落簇). Offline runs (nil Synth) legitimately build template answers for
+// the gates, so the tell does not apply there.
+func RefusedOfSummary(summary string, synth Synthesizer) bool {
+	if synth == nil {
+		return false
+	}
+	return templateDegraded(summary)
 }
 
 // RefusedOf reports whether the wired synthesizer refused its last run

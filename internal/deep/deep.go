@@ -8,6 +8,7 @@ package deep
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -151,6 +152,11 @@ type Engine struct {
 	HistoryRewriter HistoryRewriter
 	Sources         []source.Source
 	EscalateBelow   float64
+	// RankAdmission orders the sources before the DEEP loop explores them.
+	// nil → caller order (offline gates, small corpora). At 10k+ scale the
+	// caller order is arbitrary and burns the whole budget on the first
+	// files; the CLI wires the FAST tier's cascade here.
+	RankAdmission func(ctx context.Context, query string, sources []source.Source) ([]source.Source, error)
 	// Widen, when set, lets the DEEP loop re-admit candidate files mid-search:
 	// coverage still open after self-correction → re-rank the FULL corpus by
 	// the query keywords and admit up to m not-yet-tried files (Sirchmunk
@@ -177,6 +183,18 @@ func (e *Engine) effectiveQuery(ctx context.Context, query string) string {
 
 func New(k *kb.Engine, conflicts ConflictStore) *Engine {
 	return &Engine{KB: k, Conflicts: conflicts, EscalateBelow: EscalateBelow}
+}
+
+// rankAdmission orders sources before exploration (nil → untouched order).
+func (e *Engine) rankAdmission(ctx context.Context, query string, sources []source.Source) []source.Source {
+	if e.RankAdmission == nil {
+		return sources
+	}
+	out, err := e.RankAdmission(ctx, query, sources)
+	if err == nil && len(out) > 0 {
+		return out
+	}
+	return sources
 }
 
 func (e *Engine) scorer() mcs.Scorer {
@@ -318,12 +336,19 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		smp.FactHints = hints
 		return smp
 	}
+	// Admission order matters at scale: on a 10k-article corpus the caller's
+	// list is arbitrary (ingest order), so sampling it directly spends the
+	// whole budget on the first files that happen to be there. Rank first —
+	// the caller's fast engine carries the same cascade the FAST tier uses —
+	// then explore in relevance order (Sirchmunk Phase-1 对齐).
+	ranked := e.rankAdmission(ctx, query, sources)
+
 	var best fast.Answer
 	loops := 0
 	var kept []mcs.Sample
 	var bestSrc source.Source
 	bestScore := -1.0
-	for _, s := range sources {
+	for _, s := range ranked {
 		if s.Status != source.StatusActive {
 			continue
 		}
@@ -387,6 +412,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// exploration (Sirchmunk ReAct 对齐). Covers alone cannot veto widening:
 	// a generous oracle can mark wrong-doc windows "complete".
 	widened := 0
+	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
+		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v\n", len(kept), rep.Complete, bestScore, e.Widen != nil)
+	}
 	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil {
 		exclude := map[string]bool{}
 		for _, s := range sources {
@@ -453,12 +481,13 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			conf = 0.45
 		}
 	}
+	summary := e.render(ctx, query, kept, b.String())
 	best = fast.Answer{
 		Query: query, Mode: ModeDEEP, LLMCalls: loops,
 		SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
-		Confidence: conf, Summary: e.render(ctx, query, kept, b.String()),
+		Confidence: conf, Summary: summary,
 		Skipped: conf < 0.35,
-		Refused: fast.RefusedOf(e.Synth),
+		Refused: fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(summary, e.Synth),
 	}
 	return best, rep, loops, widened, selfCorrected, nil
 }
