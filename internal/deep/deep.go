@@ -405,8 +405,8 @@ func DetectConflict(ctx context.Context, st ConflictStore, a, b cluster.Cluster)
 	if a.ID == "" || b.ID == "" || a.ID == b.ID {
 		return Conflict{}, fmt.Errorf("deep: need two distinct clusters")
 	}
-	claimA := extractNumber(a.Content)
-	claimB := extractNumber(b.Content)
+	claimA := claimOf(a)
+	claimB := claimOf(b)
 	if claimA == "" || claimB == "" || claimA == claimB {
 		return Conflict{}, fmt.Errorf("deep: no divergent numeric claims")
 	}
@@ -423,6 +423,18 @@ func DetectConflict(ctx context.Context, st ConflictStore, a, b cluster.Cluster)
 	}
 	// Lifecycle: contested.
 	return c, nil
+}
+
+// claimOf pulls the divergent-claim number from the evidence windows first
+// (raw source text), falling back to the rendered summary — summary offsets
+// like "[0,21)" are not claims and must not win.
+func claimOf(c cluster.Cluster) string {
+	for _, sm := range c.Evidence {
+		if n := extractNumber(sm.Content); n != "" {
+			return n
+		}
+	}
+	return extractNumber(c.Content)
 }
 
 func extractNumber(s string) string {

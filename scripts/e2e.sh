@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# e2e: gates A–I — ingest (A) + cluster reuse (B) + graph expansion (C) +
+# e2e: gates A–J — ingest (A) + cluster reuse (B) + graph expansion (C) +
 # DEEP citations (D) + multi-hop coverage (F) + ingest face/tiering (G) +
-# html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I), against a
-# REAL cumudb. Scorer/embedder are the offline stubs by design (put never
-# blocks on a model). Summary line: ask-e2e: N ok, M fail
+# html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I) +
+# conflict detect (J), against a REAL cumudb. Scorer/embedder are the offline
+# stubs by design (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
 cd "$(dirname "$0")/.."
 WORK="$(mktemp -d)"
@@ -351,6 +351,36 @@ assert a.get("samples"), r
 blob="".join(s["content"] for s in a["samples"][:3])
 assert "128" in blob or "连接池" in blob, blob[:120]
 print("ok")' ; check "search -prior ranks via LENS B4 signals (localization holds)" $?
+
+# --- Gate J: conflict detect over real clusters -------------------------------
+# Two divergent-claim clusters on the same topic, then CLI detect + list.
+# Unique anchors (旧版/新版) pin each query to its own document.
+$A put -title "旧版连接池说明" -key pool-old -body "连接池最大 96，超时 30 秒。仅旧版硬件适用。" >/dev/null
+$A search -q "旧版连接池最大是多少" -raw >/dev/null
+$A put -title "新版连接池说明" -key pool-new -body "连接池上限最大 192，超时 30 秒。新版硬件默认值。" >/dev/null
+$A search -q "新版连接池上限是多少" -raw >/dev/null
+CID96="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" cluster list | python3 -c '
+import json,sys
+cs=json.load(sys.stdin)
+hits=[c for c in cs if "96" in (c.get("content") or "")]
+print(hits[0]["_id"] if hits else "")
+' 2>/dev/null)"
+CID192="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" cluster list | python3 -c '
+import json,sys
+cs=json.load(sys.stdin)
+hits=[c for c in cs if "192" in (c.get("content") or "")]
+print(hits[0]["_id"] if hits else "")
+' 2>/dev/null)"
+[ -n "$CID96" ] && [ -n "$CID192" ] ; check "two divergent-claim clusters exist (n=$CID96/$CID192)" $?
+CFD="$($A conflicts detect "$CID96" "$CID192")"
+echo "$CFD" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "96" in r["group"] and "192" in r["group"], r' ; check "conflicts detect records the divergent pair (CLI)" $?
+CFL2="$($A conflicts list)"
+echo "$CFL2" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert isinstance(r, list) and r, r
+assert any(c.get("a") and c.get("b") for c in r), r
+print("ok")' ; check "conflicts list shows recorded edges (ask_conflicts)" $?
 
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]
