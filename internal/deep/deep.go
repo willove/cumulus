@@ -458,6 +458,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
 		Confidence: conf, Summary: e.render(ctx, query, kept, b.String()),
 		Skipped: conf < 0.35,
+		Refused: fast.RefusedOf(e.Synth),
 	}
 	return best, rep, loops, widened, selfCorrected, nil
 }

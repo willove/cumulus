@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -348,6 +349,17 @@ func ParseAnalyzeJSON(raw string) (fast.Analysis, error) {
 // (citation-marked, refuse-capable).
 type AigateSynthesizer struct {
 	Client *ChatClient
+
+	mu      sync.Mutex
+	refused bool
+}
+
+// Refused reports whether the last Synthesize was a refusal
+// (synthesize_roi rejected the evidence). fast.RefusalReporter.
+func (s *AigateSynthesizer) Refused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refused
 }
 
 // Synthesize implements fast.Synthesizer.
@@ -371,7 +383,17 @@ func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, sample
 	if strings.TrimSpace(out.Summary) == "" {
 		return "", fmt.Errorf("llm: empty summary")
 	}
+	if out.Refuse {
+		s.setRefused(true)
+		defer s.setRefused(false)
+	}
 	return out.Summary, nil
+}
+
+func (s *AigateSynthesizer) setRefused(v bool) {
+	s.mu.Lock()
+	s.refused = v
+	s.mu.Unlock()
 }
 
 // SynthesizeResult is the synthesize_roi JSON shape.

@@ -37,6 +37,7 @@ type Answer struct {
 	Mode       string       `json:"mode"`
 	LLMCalls   int          `json:"llm_calls"`
 	Skipped    bool         `json:"skipped"`
+	Refused    bool         `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
 }
 
 // Analysis is the low-cost query analysis (fast_analyze contract): intent plus
@@ -59,6 +60,14 @@ type Analyzer interface {
 // deterministic template.
 type Synthesizer interface {
 	Synthesize(ctx context.Context, query string, samples []mcs.Sample) (string, error)
+}
+
+// RefusalReporter is the optional half of Synthesizer: it reports whether the
+// last synthesis REFUSED to answer (evidence insufficient). KB uses it to
+// refuse cluster persistence — a refused answer is not knowledge (Sirchmunk's
+// files_read=0 cluster is the cautionary case). Not implemented → false.
+type RefusalReporter interface {
+	Refused() bool
 }
 
 // KeywordExpander yields progressively finer keyword levels
@@ -169,6 +178,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		Confidence: conf,
 		Summary:    e.render(ctx, query, best, kept),
 		Skipped:    conf < 0.35,
+		Refused:    RefusedOf(e.Synth),
 	}, nil
 }
 
@@ -229,6 +239,15 @@ func (e *Engine) render(ctx context.Context, query string, src source.Source, sa
 		}
 	}
 	return synthesize(query, src, samples)
+}
+
+// RefusedOf reports whether the wired synthesizer refused its last run
+// (cross-package: DEEP persists its answers through the same gate).
+func RefusedOf(s Synthesizer) bool {
+	if r, ok := s.(RefusalReporter); ok {
+		return r.Refused()
+	}
+	return false
 }
 
 // Intent labels (fast_analyze contract).

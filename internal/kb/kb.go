@@ -146,6 +146,12 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if !cluster.RelevanceGate(query, cluster.Cluster{Content: ans.Summary}, 0.15) {
 		return finish(res), nil
 	}
+	// Refused synthesis (insufficient evidence) is not knowledge either:
+	// persisting it poisons reuse with a cached non-answer — the Sirchmunk
+	// "files_read=0, still saved" anti-pattern this suite refuses to copy.
+	if ans.Refused {
+		return finish(res), nil
+	}
 
 	// Create or merge (G-id / G-merge).
 	if target := e.pickMergeable(same, qe); target != nil {
