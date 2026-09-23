@@ -9,8 +9,10 @@ package minilm
 // matrix once per token (~15GB of memory traffic for a 128-token document).
 // matmulRowsT instead blocks over output rows so a weight block stays
 // cache-resident across all positions, and runs blocks in parallel. The
-// per-element accumulation order is unchanged, so results stay bitwise
-// identical to the naive loop (locked by the reference tests).
+// inner dot product uses four independent accumulators (ILP: the scalar
+// loop is latency-bound on a single dependency chain). Reordering moves
+// results by ~1e-6 relative; the reference tests lock cosine ≥ 0.999, not
+// bitwise identity.
 
 import (
 	"context"
@@ -143,11 +145,21 @@ func matmulRowsT(x, w, b []float32, L, out, in int, y []float32) {
 					yp := y[p*out : p*out+out]
 					for o := o0; o < o1; o++ {
 						row := w[o*in : o*in+in]
-						var acc float32
-						for i := range xp {
-							acc += xp[i] * row[i]
+						// Four independent accumulators break the
+						// add-dependency chain (the scalar loop is
+						// latency-bound, not throughput-bound).
+						var a0, a1, a2, a3 float32
+						i := 0
+						for ; i+4 <= in; i += 4 {
+							a0 += xp[i] * row[i]
+							a1 += xp[i+1] * row[i+1]
+							a2 += xp[i+2] * row[i+2]
+							a3 += xp[i+3] * row[i+3]
 						}
-						yp[o] = acc + b[o]
+						for ; i < in; i++ {
+							a0 += xp[i] * row[i]
+						}
+						yp[o] = (a0 + a1) + (a2 + a3) + b[o]
 					}
 				}
 			}
