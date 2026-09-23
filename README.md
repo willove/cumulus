@@ -8,14 +8,14 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层与知识簇生命周期；向量/全文/图/时序能力全部来自基座，模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览全部落地**（门 A–U，118 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）。设计 SSOT 见计划 v1.29。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览全部落地**（门 A–U，门限 118、现 119 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）。设计 SSOT 见计划 v1.29。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/ask
-make e2e                   # 门 A–U（真 cumudb，118 断言）
+make e2e                   # 门 A–U（真 cumudb，门限 118、现 119 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
@@ -48,6 +48,22 @@ bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-r
 ./bin/ask serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE) + 会话 REST + 内嵌工作台 /ui/
 ./bin/ask eval-demo                       # 证据质量评测协议演示（B3，离线确定性）
 ```
+
+## 免服务器：`-lite` 嵌入式存储（cumulite）
+
+默认路径连 cumudb 服务端（HTTP）。加 `-lite DIR` 即切到**嵌入式引擎**——进程内 Badger 单文件存储，**不连任何服务端、零网络**：
+
+```bash
+./bin/ask -lite ./store put -title "部署手册" -key handbook -body-file doc.md
+./bin/ask -lite ./store search -q "连接池最大连接数"    # 集合/KV/向量/changelog 同一引擎，语义照旧
+```
+
+- **同一条 Port 契约**：存储面收敛为 16 方法接口 `cumulite.Port`——HTTP 客户端（`*client.Client`，经 `internal/cumuport` 适配器在边界转换类型）与嵌入式引擎（`cumulite.Engine`）都满足它；`-lite` 缺席时行为逐字节不变，生产仍是 cumudb 服务端；
+- **cumulite 是独立仓库**（`../db-works/cumulite`，与 cumudb 零依赖；契约类型在其 `contract/` 包分叉维护），本仓只经 Port 消费，不为它改一行存储代码；
+- **适用**：离线 / 单机 / 评测 / 演示 / 灾备降级；ACL、审计、备份、SQL/AQL 等全面能力仍在服务端引擎侧；
+- **证据**：hermetic 回归 `cmd/ask/lite_test.go`——put/ensure/ensure-embed/reconcile/session/cluster/weak-edge 全链 + 一次真实 FAST search，进程内没有任何 cumudb 服务端；另有 20 查询离线 A/B 与真 cumudb 20/20 一致。
+
+运维注意（fsync、压缩、命名空间合成）见 cumulite README；设计 SSOT 与研究立档在本仓 `docs/`（本地私有，不入库）。
 
 ## 架构
 
