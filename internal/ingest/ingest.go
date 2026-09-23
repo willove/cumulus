@@ -500,42 +500,61 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 		texts, ids = nil, nil
 		return nil
 	}
-	res, e := s.c.Query(ctx, s.sources, client.Query{
-		Filter: map[string]any{"status": source.StatusActive},
-		Limit:  1000,
-	})
-	if e != nil {
-		return 0, e
-	}
-	for _, d := range res.Documents {
-		if _, ok := d["body_embed"]; ok {
-			continue
+	// Paginate: a corpus larger than one page used to be silently truncated
+	// (operator asked for a full backfill, got the first 1000). Same failure
+	// mode as the v1.19 ActiveSources truncation.
+	const page = 1000
+	for skip := 0; ; skip += page {
+		res, qe := s.c.Query(ctx, s.sources, client.Query{
+			Filter: map[string]any{"status": source.StatusActive},
+			Skip:   skip,
+			Limit:  page,
+		})
+		if qe != nil {
+			return 0, qe
 		}
-		id, _ := d["_id"].(string)
-		body, _ := d["body"].(string)
-		if id == "" || body == "" {
-			continue
-		}
-		texts = append(texts, trimRunes(body, 2000))
-		ids = append(ids, id)
-		if len(texts) >= batch {
-			if e := flush(); e != nil {
-				return len(texts) - batch, e
+		for _, d := range res.Documents {
+			if _, ok := d["body_embed"]; ok {
+				continue
 			}
+			id, _ := d["_id"].(string)
+			body, _ := d["body"].(string)
+			if id == "" || body == "" {
+				continue
+			}
+			texts = append(texts, trimRunes(body, 2000))
+			ids = append(ids, id)
+			if len(texts) >= batch {
+				if fe := flush(); fe != nil {
+					return len(texts) - batch, fe
+				}
+			}
+		}
+		if len(res.Documents) < page {
+			break
 		}
 	}
 	if e := flush(); e != nil {
 		return len(ids), e
 	}
 	// Report the true backfilled total (idempotent re-runs count everything).
-	res, e = s.c.Query(ctx, s.sources, client.Query{Limit: 1000})
-	if e != nil {
-		return 0, e
-	}
 	n = 0
-	for _, d := range res.Documents {
-		if v, ok := d["body_embed"]; ok && v != nil {
-			n++
+	for skip := 0; ; skip += page {
+		res, qe := s.c.Query(ctx, s.sources, client.Query{
+			Filter: map[string]any{"status": source.StatusActive},
+			Skip:   skip,
+			Limit:  page,
+		})
+		if qe != nil {
+			return 0, qe
+		}
+		for _, d := range res.Documents {
+			if v, ok := d["body_embed"]; ok && v != nil {
+				n++
+			}
+		}
+		if len(res.Documents) < page {
+			break
 		}
 	}
 	return n, nil
