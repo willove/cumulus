@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# e2e: gates A–O — ingest (A) + cluster reuse (B) + graph expansion (C) +
+# e2e: gates A–T — ingest (A) + cluster reuse (B) + graph expansion (C) +
 # DEEP citations (D) + multi-hop coverage (F) + ingest face/tiering (G) +
 # html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I) +
 # conflict detect (J) + B5/B6/B9 surfaces (K) + dynamic corpus γ(I) (L) +
 # changelog reconcile/sync cap (M) + six-modality synergy (N) +
-# eval-run offline face + resume (O),
+# eval-run offline face + resume (O) + search HTTP/SSE face (P) +
+# chat sessions (Q) + web UI (R) + namespace scoping (S) +
+# cluster tidy (T),
 # against a REAL cumudb. Scorer/embedder are the offline stubs by design
 # (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
@@ -344,9 +346,11 @@ echo "$PSJ" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get(
 SESSN="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
 echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "session show lists appended HTTP turn (P2)" $?
 
-# --- Gate R: web UI (P7 v0) ---------------------------------------------------
+# --- Gate R: web UI (P7 v0 + UI v1 簇浏览) -----------------------------------
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
 echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
+UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/ask/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
+echo "$UIA" | grep -q "知识簇浏览" ; check "web UI carries the cluster browse panel (UI v1)" $?
 SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
 echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?
 SLIST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions")"
@@ -573,6 +577,212 @@ except Exception:
     raise SystemExit("l1pre gate non-JSON output: "+s[:400])
 assert r["n"]==2, ("l1pre report", r)
 print("ok")' ; check "evalrun: -l1pre narrows via body_embed (offline index materialized)" $?
+
+# --- Gate S: namespace scoping (P3) — reuse/corpus/session isolation ----------
+# One tenant's namespace is a separate library: composite ns:coll identities
+# for collections, ns:<name>:ask:* for KV keys. Cross-ns visibility must be
+# zero — reuse included.
+NSFAIL1=0
+$A -ns 'bad:ns' put -title 坏命名空间 -key bad-ns -body "x" >/dev/null 2>&1 || NSFAIL1=1
+[ "$NSFAIL1" = "1" ] ; check "ns: a namespace with a colon is refused before any write" $?
+NSFAIL2=0
+$A -ns '_reserve' put -title 保留命名空间 -key bad-ns2 -body "x" >/dev/null 2>&1 || NSFAIL2=1
+[ "$NSFAIL2" = "1" ] ; check "ns: a leading-underscore namespace is refused (engine reserve)" $?
+
+$A -ns t1 ensure >/dev/null
+$A -ns t2 ensure >/dev/null
+cat >"$WORK/nsdoc.md" <<'MD'
+# 机房环境手册
+机柜压强上限 42 千帕，超过会触发告警。
+MD
+$A -ns t1 put -title "机房环境手册" -key rack-doc -body-file "$WORK/nsdoc.md" >/dev/null
+$A -ns t2 put -title "机房环境手册" -key rack-doc -body-file "$WORK/nsdoc.md" >/dev/null
+NST1="$($A -ns t1 search -q "机柜压强上限是多少" -raw)"
+echo "$NST1" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r["answer"]
+assert a.get("samples"), ("t1 must answer from its own corpus", r)
+assert r.get("cluster_id"), ("t1 must persist its own cluster", r)
+print("ok")' ; check "ns: a tenant searches and forms clusters inside its own namespace" $?
+NSD1="$($A search -q "机柜压强上限是多少" -raw)"
+echo "$NSD1" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r["answer"]
+blob="".join(s.get("content","") for s in a.get("samples") or [])
+assert "42" not in blob and "千帕" not in blob, ("default library must not see t1 corpus", blob[:120])
+print("ok")' ; check "ns: the default library never sees a tenant's sources" $?
+NST2="$($A -ns t2 search -q "机柜压强上限是多少" -raw)"
+echo "$NST2" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert not r.get("reused"), ("t2 must not reuse t1 cluster", r.get("reused"))
+assert r.get("cluster_id") and r["cluster_id"] != "", r
+print("ok")' ; check "ns: reuse never crosses namespaces (same topic, fresh cluster)" $?
+T1IDS="$($A -ns t1 cluster list | python3 -c 'import json,sys; print(" ".join(sorted(c["_id"] for c in json.load(sys.stdin))))')"
+T2IDS="$($A -ns t2 cluster list | python3 -c 'import json,sys; print(" ".join(sorted(c["_id"] for c in json.load(sys.stdin))))')"
+DIDS="$($A cluster list | python3 -c 'import json,sys; print(" ".join(sorted(c["_id"] for c in json.load(sys.stdin))))')"
+# Cluster IDs are deterministic from topic_key, so t1 and t2 answering the
+# same question legitimately produce the same _id — in their OWN collections.
+# Isolation is therefore asserted at the visibility level: the default library
+# sees neither tenant's clusters (and reuse refusal was asserted above).
+python3 - "$T1IDS" "$T2IDS" "$DIDS" <<'PY'
+import sys
+t1, t2, d = (set(x.split()) for x in sys.argv[1:4])
+assert t1, "t1 has no clusters"
+assert t2, "t2 has no clusters"
+assert not (t1 & d), ("default sees t1", t1 & d)
+assert not (t2 & d), ("default sees t2", t2 & d)
+print("ok")
+PY
+check "ns: the default library lists none of the tenants' clusters" $?
+NSSID="ns-$(date +%s)"
+$A -ns t1 search -q "机柜压强上限是多少" -session "$NSSID" -raw >/dev/null
+NSSHOW="$($A -ns t1 session show "$NSSID")"
+echo "$NSSHOW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==2, d' ; check "ns: a session lives inside its namespace" $?
+NSCROSS=0
+$A session show "$NSSID" >/dev/null 2>&1 && NSCROSS=1
+[ "$NSCROSS" = "0" ] ; check "ns: another namespace cannot load the session (KV scoping)" $?
+
+# HTTP face: per-request "ns" overrides the serve-level namespace (P3)。
+SPORT2="${E2E_SERVE_PORT2:-8600}"
+"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
+SERVE2_PID=$!
+SRV2=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT2/health" >/dev/null 2>&1 && { SRV2=1; break; }
+	sleep 0.2
+done
+[ "$SRV2" = "1" ] ; check "ns: serve (default library) comes up for the HTTP face" $?
+NSHTTP="$(curl -fsS -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少","ns":"t1"}')"
+echo "$NSHTTP" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r["answer"]
+blob="".join(s.get("content","") for s in a.get("samples") or [])
+assert "42" in blob or "千帕" in blob, ("per-request ns must see t1 corpus", blob[:120])
+print("ok")' ; check "ns: HTTP /v1/search honors a per-request ns override" $?
+NSHTTPDEF="$(curl -fsS -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少"}')"
+echo "$NSHTTPDEF" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r["answer"]
+blob="".join(s.get("content","") for s in a.get("samples") or [])
+assert "42" not in blob and "千帕" not in blob, ("default must not see t1 corpus", blob[:120])
+print("ok")' ; check "ns: HTTP /v1/search without ns stays in the default library" $?
+NSBADCODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"x","ns":"bad:ns"}')"
+[ "$NSBADCODE" = "400" ] ; check "ns: HTTP /v1/search refuses an illegal namespace with 400" $?
+kill "$SERVE2_PID" 2>/dev/null
+
+# --- Gate T: cluster tidy (P6) — cross-topic near-duplicate fold -----------
+# The write path only merges within a topic key (FindByTopic scope), so two
+# questions from different wordings survive as sibling clusters. Tidy is the
+# maintenance sweep that folds them. The default library holds several
+# cross-topic pairs already (旧版/新版连接池 etc.), so the gate runs in a
+# dedicated namespace (t3) where the constructed pair is the only candidate —
+# P3 scoping doubles as the clean room.
+$A -ns t3 ensure >/dev/null
+cat >"$WORK/quota.md" <<'MD'
+# 配额说明
+并发配额 256，突发配额 512。仅高峰期限流。
+MD
+$A -ns t3 put -title "配额说明" -key quota-doc -body-file "$WORK/quota.md" >/dev/null
+$A -ns t3 search -q "并发配额是多少" -raw >/dev/null
+$A -ns t3 search -q "并发配额上限是多少" -raw >/dev/null
+TIDS="$($A -ns t3 cluster list | python3 -c '
+import json,sys
+cs=json.load(sys.stdin)
+hits=[c for c in cs if any("并发配额" in q for q in (c.get("queries") or []))]
+# The winner is the cluster created by the FIRST query (searched earlier) —
+# its query set holds the exact earlier wording, not just any 并发配额 hit.
+w=[c for c in hits if any(q.strip()=="并发配额是多少" for q in (c.get("queries") or []))]
+l=[c for c in hits if any(q.strip()=="并发配额上限是多少" for q in (c.get("queries") or []))]
+assert len(w)==1 and len(l)==1, ("pair clusters", [c["_id"] for c in hits])
+print(w[0]["_id"], l[0]["_id"])
+')"
+TN="$(echo "$TIDS" | wc -w | tr -d ' ')"
+[ "$TN" -eq 2 ] ; check "tidy: two cross-topic sibling clusters survive the write path" $?
+TWIN="$(echo "$TIDS" | cut -d' ' -f1)"
+TLOSE="$(echo "$TIDS" | cut -d' ' -f2)"
+DBEFORE="$($A cluster list | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+TDRY="$($A -ns t3 cluster tidy -dry-run -theta 0.8 -max 1)"
+echo "$TDRY" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+assert r['scanned']==2 and r['dry_run'] is True, r
+assert len(r['pairs'])==1, ('one exemplar pair', r['pairs'])
+p=r['pairs'][0]
+assert p['winner']=='$TWIN' and p['loser']=='$TLOSE', ('pair must be the pinned one', p)
+assert p['sim']>=0.8, p
+assert 'lifecycle' in r and isinstance(r['lifecycle'], dict), r
+print('ok')" ; check "tidy: dry-run reports the pinned fold and changes nothing" $?
+TCOUNT="$($A -ns t3 cluster list | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$TCOUNT" = "2" ] ; check "tidy: dry-run leaves both clusters in place" $?
+TFOLD="$($A -ns t3 cluster tidy -theta 0.8 -max 1)"
+echo "$TFOLD" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+assert r['merged']==1 and len(r['pairs'])==1, r
+p=r['pairs'][0]
+assert p['winner']=='$TWIN' and p['loser']=='$TLOSE', p
+print('ok')" ; check "tidy: folds the pinned pair (older cluster wins)" $?
+TCOUNT2="$($A -ns t3 cluster list | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$TCOUNT2" = "1" ] ; check "tidy: the folded-away cluster is deleted" $?
+TW1="$($A -ns t3 cluster get "$TWIN")"
+echo "$TW1" | python3 -c '
+import json,sys
+c=json.load(sys.stdin)
+qs=c.get("queries") or []
+assert any("并发配额是多少" in q for q in qs) and any("并发配额上限是多少" in q for q in qs), qs
+assert c.get("version",0)>=2, c.get("version")
+print("ok")' ; check "tidy: the survivor carries both queries and a version bump" $?
+TAGAIN="$($A -ns t3 cluster tidy -theta 0.8)"
+echo "$TAGAIN" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+assert r['merged']==0 and not (r.get('pairs') or []), ('sweep must be idempotent', r)
+print('ok')" ; check "tidy: a second sweep folds nothing (idempotent)" $?
+DAFTER="$($A cluster list | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')"
+[ "$DAFTER" = "$DBEFORE" ] ; check "tidy: the tenant sweep never touches the default library" $?
+
+# --- Gate U: cluster browse REST face (P7 UI v1 后勤信半边) -----------------
+# The web workbench's cluster page reads these; list is ns-scoped like every
+# other face, detail carries the cluster's cite edges in one response.
+SPORT3="${E2E_SERVE_PORT3:-8601}"
+"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
+SERVE3_PID=$!
+SRV3=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT3/health" >/dev/null 2>&1 && { SRV3=1; break; }
+	sleep 0.2
+done
+[ "$SRV3" = "1" ] ; check "cluapi: serve comes up for the cluster face" $?
+UCLIST="$(curl -fsS "http://127.0.0.1:$SPORT3/v1/clusters?limit=5")"
+echo "$UCLIST" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["namespace"]=="" and isinstance(r["clusters"], list) and r["clusters"], r
+assert all(c.get("_id") and c.get("topic_key") for c in r["clusters"]), r["clusters"][:1]
+print("ok")' ; check "cluapi: GET /v1/clusters lists the default library (freshest first, capped)" $?
+UCID="$(echo "$UCLIST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["clusters"][0]["_id"])')"
+UCD="$(curl -fsS "http://127.0.0.1:$SPORT3/v1/clusters/$UCID")"
+echo "$UCD" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+c=r["cluster"]
+assert c["_id"]=="'"$UCID"'" and c.get("lifecycle"), r
+assert isinstance(r["cites"], list), r
+for e in r["cites"]:
+    assert e.get("_from")==c["_id"] and e.get("_to") and e.get("start",0) < e.get("end",0), e
+print("ok")' ; check "cluapi: GET /v1/clusters/{id} returns the cluster with its cite edges" $?
+UC404="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SPORT3/v1/clusters/Cdoesnotexist")"
+[ "$UC404" = "404" ] ; check "cluapi: an unknown cluster id answers 404" $?
+UCT="$(curl -fsS "http://127.0.0.1:$SPORT3/v1/clusters?ns=t1")"
+echo "$UCT" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["namespace"]=="t1", r
+ids=[c["_id"] for c in r["clusters"]]
+assert all("机柜压强" in q for c in r["clusters"] for q in (c.get("queries") or [])) or not ids, ("t1 only", ids)
+print("ok")' ; check "cluapi: ?ns= scopes the list to one tenant namespace (P3)" $?
+kill "$SERVE3_PID" 2>/dev/null
 
 echo "ask-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

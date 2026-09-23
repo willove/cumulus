@@ -300,13 +300,9 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return res, nil
 	}
 
-	// Gate: thin evidence, skipped, or open multi-hop requirement → DEEP.
-	// A validated reuse hit (B8 priorStale passed) is exempt from the
-	// coverage clause: a NEW phrasing never covers the stored windows
-	// completely, and re-running DEEP on every cache hit would erase the
-	// savings reuse exists for (越问越快).
-	need := base.Answer.Skipped || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
-		(!res.Cover.Complete && !base.Reused)
+	// Single-fact paraphrases may miss lexical coverage despite a validated prior.
+	need := base.Answer.Skipped || base.Answer.Refused || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
+		(!res.Cover.Complete && (!base.Reused || len(fx) > 1))
 	if !need {
 		res.Citations.Legend = legend(res.Citations, false)
 		return res, nil
@@ -337,14 +333,16 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	}
 	res.Citations.Legend = legend(res.Citations, unresolved)
 
-	// Persist DEEP result as cluster when solid enough.
-	if !deepAns.Skipped && deepAns.SourceID != "" {
-		sub, err := e.KB.Ask(ctx, query, sources)
-		if err == nil {
-			res.ClusterID = sub.ClusterID
-			res.Reused = sub.Reused
-		}
+	sub, err := e.KB.Persist(ctx, deepAns, sources)
+	if err != nil {
+		return Result{}, err
 	}
+	res.ClusterID = sub.ClusterID
+	res.ClusterVer = sub.ClusterVer
+	res.Persisted = sub.Persisted
+	res.Merged = sub.Merged
+	res.Reused = false
+	res.Sampled = len(deepAns.Samples)
 	return res, nil
 }
 
@@ -712,14 +710,10 @@ func BuildCitations(query string, ans fast.Answer, sources []source.Source) Cita
 		srcMap[s.ID] = s
 	}
 	i := 0
-	for _, sm := range ans.Samples {
+	for _, sm := range cluster.NormalizeEvidence(ans.SourceID, ans.Samples) {
 		i++
 		id := sm.Source
-		src, ok := srcMap[id]
-		if !ok {
-			id = ans.SourceID
-			src = srcMap[id]
-		}
+		src := srcMap[id]
 		body := []rune(src.Body)
 		r := Ref{
 			Index: i, SourceID: id, Title: src.Title,

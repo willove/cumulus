@@ -365,6 +365,7 @@ func (s *AigateSynthesizer) Refused() bool {
 
 // Synthesize implements fast.Synthesizer.
 func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, samples []mcs.Sample) (string, error) {
+	s.setRefused(false)
 	var ev strings.Builder
 	for i, sm := range samples {
 		fmt.Fprintf(&ev, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, truncate(sm.Content, 800))
@@ -384,10 +385,7 @@ func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, sample
 	if strings.TrimSpace(out.Summary) == "" {
 		return "", fmt.Errorf("llm: empty summary")
 	}
-	if out.Refuse {
-		s.setRefused(true)
-		defer s.setRefused(false)
-	}
+	s.setRefused(out.Refuse)
 	return out.Summary, nil
 }
 

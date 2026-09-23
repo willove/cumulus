@@ -53,6 +53,16 @@ func TestStalePriorFallsToL0AndSelfHeals(t *testing.T) {
 			t.Fatalf("stale prior must be marked 待复核: %+v", c.Lifecycle)
 		}
 	}
+	r3, err := e.Ask(ctx, "连接池最大连接数是多少", []source.Source{src2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r3.Reused || r3.Answer.Summary != r2.Answer.Summary || strings.Contains(r3.Answer.Summary, "128") {
+		t.Fatalf("healed reuse must contain only the fresh answer: %+v", r3)
+	}
+	if r3.Answer.Confidence != r2.Answer.Confidence || len(r3.Answer.Samples) != len(r2.Answer.Samples) {
+		t.Fatalf("healed reuse must preserve fresh confidence and all evidence: %+v", r3)
+	}
 }
 
 // A prior whose evidence still pins back stays reusable (control).

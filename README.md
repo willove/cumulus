@@ -8,16 +8,20 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层与知识簇生命周期；向量/全文/图/时序能力全部来自基座，模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同全部落地**（门 A–N）。设计 SSOT 见计划 v1.16。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览全部落地**（门 A–U，118 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）。设计 SSOT 见计划 v1.29。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/ask
-make e2e                   # 门 A–N（真 cumudb，79 断言）
+make e2e                   # 门 A–U（真 cumudb，118 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
+
+# 多租户：一切集合/会话按 -ns 分域（ns:ask_* 复合身份；缺省 = 默认库裸名）
+./bin/ask -ns tenant_a put -title "部署手册" -key handbook -body-file doc.md
+./bin/ask -ns tenant_a search -q "连接池最大连接数"
 
 ./bin/ask ensure                          # 声明集合（幂等）
 ./bin/ask put -title "部署手册" -key handbook -body-file doc.md
@@ -28,15 +32,20 @@ bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-r
 ./bin/ask job -job docs1                  # 摄取任务状态（queued/running/done/failed）
 ./bin/ask search -q "连接池最大连接数" [-hopts 168h] [-prior] [-l1pre]
 ./bin/ask search -q "那它最大是多少" -history "连接池最大连接数是多少|端口是多少"  # 多轮改写
+./bin/ask search -q "那它最大是多少" -session SID   # KV 会话（P2，优先于 -history）
 ./bin/ask get <id>
 ./bin/ask delete <id>
 ./bin/ask reclaim -stale                  # 物理回收 tombstone/陈旧修订
-./bin/ask ensure -embed                   # 兼补 body_embed 内容向量（L1 缓存，search -l1pre 读，缺索引首查惰性补建）
+./bin/ask ensure [-embed]                 # 声明集合（-embed 兼补内容向量）
 ./bin/ask reconcile                       # 消费 changelog：带外退役源→失效证据+标簇待复核
 ./bin/ask cluster list                    # 知识簇（ask_clusters）
+./bin/ask cluster tidy [-dry-run] [-theta 0.55] [-max N]
+                                 # 簇整理：跨题近邻 sibling 的显式折叠（older 存活，幂等）
 ./bin/ask conflicts list                  # 冲突边（ask_conflicts）
 ./bin/ask cites  list                     # 簇→源证据边（ask_cites）
-./bin/ask serve -listen 127.0.0.1:8484    # HTTP 摄取面（/health · /v1/ingest/*）
+./bin/ask session new | list | show <id> | rm <id>   # 会话（P2 KV）
+./bin/ask eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS 式评测（R-E1，可续跑）
+./bin/ask serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE) + 会话 REST + 内嵌工作台 /ui/
 ./bin/ask eval-demo                       # 证据质量评测协议演示（B3，离线确定性）
 ```
 
@@ -65,7 +74,7 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **离线 KeywordScorer 不是语义评分**——定位与门可断言，质量声明要换 aigate 端点后再测；
 - **摘要模板是确定性拼接**，不是生成式合成；生成段质量门按 R 轨收口，不设确定性线；
 - **引用 `[?]`** = 未能精确回溯原文窗口（源已更新或定位越界）；多源样本逐源定位回原文；
-- **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、`history_rewrite` 的多轮会话载体（现为 CLI `-history` 显式传入）、六模协同 scenario（可选，未建）；
+- **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、写入侧 LLM 自评质量门（端点档，只记录不设线）；Web UI 暂无 ns 选择器与评测记分牌页（沿用 serve 级 `-ns`；tidy 维护动作仍走 CLI，UI 只读）；
 - **Prompt 五类资产已全部进生产路径**（打分/意图/合成/级联降级/多轮改写）；离线桩与冻结回归是门的载体；
 - **端点配置在各套件内**（D6 决策更新 2026-09-22，aigate 暂锁、统一网关后期规划）：套件读 `./.env`（或 `$ASK_ENV`），沿用操作者 `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL_NAME` 约定（见 `.env.example`；已设环境变量优先，`ask env` 脱敏查看）。MiniMax 直连已适配：`reasoning_split` 自动（minimaxi 域，`AIGATE_REASONING_SPLIT` 强制）+ `<think>` 内联思维链剥离。实测：FAST 67.4s / 复用 0.0s / DEEP 53.7s，≈904 tokens/窗、≈7186/合成（`scripts/endpoint-probe.sh`）；embedder 仅在 `AIGATE_EMBED_MODEL` 显式指定时切换；
 - **`internal/prior`（LENS B4）已接线**：`search -prior` 五信号排序，默认 IDF 级联；

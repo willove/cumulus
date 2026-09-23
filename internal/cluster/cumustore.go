@@ -41,6 +41,9 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 		"created_at": c.CreatedAt.Format(time.RFC3339Nano),
 		"updated_at": c.UpdatedAt.Format(time.RFC3339Nano),
 	}
+	if len(c.TopicKeys) > 0 {
+		doc["topic_keys"] = c.TopicKeys
+	}
 	// Insert-or-replace by _id (content-stable id).
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
 		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)
@@ -63,8 +66,11 @@ func (s *CumuStore) Get(ctx context.Context, id string) (*Cluster, error) {
 
 func (s *CumuStore) FindByTopic(ctx context.Context, topicKey string) ([]Cluster, error) {
 	res, err := s.c.Query(ctx, s.coll, client.Query{
-		Filter: map[string]any{"topic_key": topicKey},
-		Limit:  100,
+		Filter: map[string]any{"$or": []map[string]any{
+			{"topic_key": topicKey},
+			{"topic_keys": map[string]any{"$in": []string{topicKey}}},
+		}},
+		Limit: 100,
 	})
 	if err != nil {
 		return nil, err

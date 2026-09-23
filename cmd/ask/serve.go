@@ -26,23 +26,34 @@ type sourceIn struct {
 	Lang  string         `json:"lang"`
 	Body  string         `json:"body"`
 	Meta  map[string]any `json:"meta"`
+	NS    string         `json:"ns"` // per-request namespace (P3); empty = serve's -ns
 }
 
 type jobIn struct {
 	Dir       string `json:"dir"`
 	Job       string `json:"job"`
 	Recursive bool   `json:"recursive"`
+	NS        string `json:"ns"` // per-request namespace (P3); empty = serve's -ns
 }
 
 // runServe exposes the HTTP faces: ingest (/health, POST /v1/ingest/sources,
 // POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (P1: POST
-// /v1/search, POST /v1/search/stream).
-func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl string, verbose bool) {
+// /v1/search, POST /v1/search/stream). serveNS is the default namespace for
+// every face; request bodies may override it per call (P3).
+func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl, serveNS string, verbose bool) {
 	mux := http.NewServeMux()
 
-	registerSearchFace(mux, c, st, sourcesColl, verbose)
-	registerSessionFace(mux, c)
+	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose)
+	registerSessionFace(mux, c, serveNS)
+	registerClusterFace(mux, c, serveNS)
 	registerWebFace(mux)
+
+	// scopedStore returns the default store, or a per-request store when the
+	// body asks for a different namespace than the server's own.
+	scopedStore := func(reqNS string) (*ingest.Store, error) {
+		stForReq, _, err := storeForNS(c, st, serveNS, reqNS, sourcesColl)
+		return stForReq, err
+	}
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())
@@ -60,6 +71,11 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 		}
 		var in sourceIn
 		if err := decode(r, &in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		rst, err := scopedStore(in.NS)
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -85,7 +101,7 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 		case "pdf":
 			body = ingest.ExtractPDF([]byte(body))
 		}
-		res, err := st.Put(r.Context(), source.New(in.Title, typ, in.URI, in.Key, lang, body, in.Meta))
+		res, err := rst.Put(r.Context(), source.New(in.Title, typ, in.URI, in.Key, lang, body, in.Meta))
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
@@ -105,6 +121,11 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
+			rst, err := scopedStore(in.NS)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
 			if in.Dir == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir required"})
 				return
@@ -121,7 +142,7 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
-			if err := st.PutJobDoc(r.Context(), in.Job, ingest.JobDoc{
+			if err := rst.PutJobDoc(r.Context(), in.Job, ingest.JobDoc{
 				State: "queued", Phase: "extracting", Total: total,
 			}); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -131,8 +152,8 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 			go func() {
 				bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 				defer cancel()
-				if _, err := st.IngestFiles(bg, in.Dir, in.Recursive, in.Job); err != nil {
-					_ = st.PutJobDoc(bg, in.Job, ingest.JobDoc{
+				if _, err := rst.IngestFiles(bg, in.Dir, in.Recursive, in.Job); err != nil {
+					_ = rst.PutJobDoc(bg, in.Job, ingest.JobDoc{
 						State: "failed", Phase: "upserting", Error: err.Error(),
 					})
 				}
@@ -148,7 +169,12 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "job id required"})
 				return
 			}
-			d, err := st.GetJobDoc(r.Context(), id)
+			rst, err := scopedStore(r.URL.Query().Get("ns"))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			d, err := rst.GetJobDoc(r.Context(), id)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return

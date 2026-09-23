@@ -5,6 +5,7 @@ package main
 // stream. `ask search -session <id>` folds the recent turns into the history
 // rewriter and appends the new turn afterwards; the HTTP /v1/search body
 // accepts the same "session" field. UI v1's ChatThreads reads the same keys.
+// P3: with -ns / "ns" the keys are scoped as ns:<name>:ask:session:<id>.
 
 import (
 	"context"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/cumudb/pkg/client"
 )
 
@@ -55,10 +57,11 @@ func newSessionID() string {
 }
 
 type sessionStore struct {
-	c *client.Client
+	c  *client.Client
+	ns string // P3: namespace scope — "" = default library KV keys
 }
 
-func (st sessionStore) key(id string) string { return sessionKeyPrefix + id }
+func (st sessionStore) key(id string) string { return ns.KV(st.ns, sessionKeyPrefix+id) }
 
 func (st sessionStore) load(ctx context.Context, id string) (*sessionDoc, error) {
 	raw, err := st.c.KVGet(ctx, st.key(id))
@@ -80,10 +83,12 @@ func (st sessionStore) save(ctx context.Context, d *sessionDoc) error {
 	return st.c.KVPut(ctx, st.key(d.ID), raw, 0)
 }
 
-// ensure loads the session or creates a fresh one titled by the first query.
+// ensure loads the session or, if absent, creates one titled by the first query.
 func (st sessionStore) ensure(ctx context.Context, id, title string) (*sessionDoc, error) {
 	if d, err := st.load(ctx, id); err == nil {
 		return d, nil
+	} else if !client.IsNotFound(err) {
+		return nil, err
 	}
 	now := time.Now().UnixMilli()
 	return &sessionDoc{ID: id, Title: title, CreatedAt: now, UpdatedAt: now}, nil
@@ -107,7 +112,7 @@ func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer 
 }
 
 func (st sessionStore) list(ctx context.Context) ([]*sessionDoc, error) {
-	keys, err := st.c.KVKeys(ctx, sessionKeyPrefix, 1000)
+	keys, err := st.c.KVKeys(ctx, ns.KV(st.ns, sessionKeyPrefix), 1000)
 	if err != nil {
 		return nil, err
 	}
@@ -131,16 +136,19 @@ func (st sessionStore) list(ctx context.Context) ([]*sessionDoc, error) {
 // a missing session yields an empty history (first turn).
 func sessionHistory(ctx context.Context, st sessionStore, id string, max int) ([]string, *sessionDoc, error) {
 	d, err := st.load(ctx, id)
-	if err != nil {
+	if client.IsNotFound(err) {
 		return nil, &sessionDoc{ID: id}, nil // first turn: create on append
+	}
+	if err != nil {
+		return nil, nil, err
 	}
 	return d.historyLines(max), d, nil
 }
 
 // --- CLI face ---------------------------------------------------------------
 
-func runSessionCLI(ctx context.Context, c *client.Client, args []string) {
-	st := sessionStore{c: c}
+func runSessionCLI(ctx context.Context, c *client.Client, args []string, namespace string) {
+	st := sessionStore{c: c, ns: namespace}
 	sub := "list"
 	if len(args) > 0 {
 		sub = args[0]

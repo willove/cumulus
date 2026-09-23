@@ -26,6 +26,7 @@ import (
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/llm"
+	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/prompts"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
@@ -66,7 +67,7 @@ type evalReport struct {
 // new item to outPath (resume: ids already present are skipped). The printed
 // report aggregates the whole file so the last batch of a chunked run shows
 // the full picture.
-func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesColl, file, outPath string, judgeOn, prior, l1pre bool, limit int) error {
+func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesColl, namespace, file, outPath string, judgeOn, prior, l1pre bool, limit int) error {
 	items, err := readEvalItems(file)
 	if err != nil {
 		return err
@@ -98,10 +99,10 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = prior
 	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
-	kbE := kb.New(fe, cluster.NewCumuStore(c, "ask_clusters"), stack.emb)
-	kbE.Edges = graph.NewCumuStore(c, "ask_weak_edges")
-	kbE.Cites = deep.NewCumuCiteStore(c, "ask_cites")
-	dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
+	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(namespace, "ask_clusters")), stack.emb)
+	kbE.Edges = graph.NewCumuStore(c, ns.Coll(namespace, "ask_weak_edges"))
+	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(namespace, "ask_cites"))
+	dE := deep.New(kbE, deep.NewCumuStore(c, ns.Coll(namespace, "ask_conflicts")))
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
 	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。

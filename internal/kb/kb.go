@@ -114,10 +114,11 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 				// self-heal complete.
 				c.Lifecycle = cluster.LifecycleStable
 			}
-			c.Evolve(query, e.querySetEmbed(ctx, *c))
+			c.Evolve(query, nil)
+			c.Embed = e.querySetEmbed(ctx, *c)
 			_ = e.Store.Save(ctx, *c)
 			// Reuse still surfaces the stored evidence windows (0 new samples).
-			samples := c.Evidence
+			samples := cluster.NormalizeEvidence(c.SourceID, c.Evidence)
 			cov := mcs.Coverage(query, samples)
 			return finish(Result{
 				Answer: fast.Answer{
@@ -137,55 +138,75 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
+	res, err := e.saveAnswer(ctx, ans, sources, same, qe, false)
+	if err != nil {
+		return res, err
+	}
+	return finish(res), nil
+}
+
+func (e *Engine) Persist(ctx context.Context, ans fast.Answer, sources []source.Source) (Result, error) {
 	res := Result{Answer: ans, Sampled: len(ans.Samples)}
-	if ans.Skipped || ans.SourceID == "" {
-		return finish(res), nil
+	if e.Store == nil || e.Embedder == nil || ans.Skipped || ans.Refused || ans.SourceID == "" {
+		return res, nil
 	}
+	qe, err := e.embed(ctx, ans.Query)
+	if err != nil {
+		return res, err
+	}
+	same, err := e.Store.FindByTopic(ctx, cluster.TopicKey(ans.Query))
+	if err != nil {
+		return res, err
+	}
+	return e.saveAnswer(ctx, ans, sources, same, qe, true)
+}
 
-	// G-pollute: refuse to persist a cluster that does not answer the query.
-	if !cluster.RelevanceGate(query, cluster.Cluster{Content: ans.Summary}, 0.15) {
-		return finish(res), nil
+func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []source.Source, same []cluster.Cluster, qe []float64, replace bool) (Result, error) {
+	ans.Samples = cluster.NormalizeEvidence(ans.SourceID, ans.Samples)
+	res := Result{Answer: ans, Sampled: len(ans.Samples)}
+	if ans.Skipped || ans.Refused || ans.SourceID == "" || !cluster.RelevanceGate(ans.Query, cluster.Cluster{Content: ans.Summary}, 0.15) {
+		return res, nil
 	}
-	// Refused synthesis (insufficient evidence) is not knowledge either:
-	// persisting it poisons reuse with a cached non-answer — the Sirchmunk
-	// "files_read=0, still saved" anti-pattern this suite refuses to copy.
-	if ans.Refused {
-		return finish(res), nil
+	key := cluster.TopicKey(ans.Query)
+	target := e.pickMergeable(same, qe)
+	if target == nil && replace {
+		if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
+			target = &existing[0]
+		}
 	}
-
-	// Create or merge (G-id / G-merge).
-	if target := e.pickMergeable(same, qe); target != nil {
-		target.Evolve(query, e.querySetEmbed(ctx, *target))
-		// B8 self-heal: a 待复核 (stale-prior) cluster re-anchors onto the
-		// live source — its dead evidence windows are replaced, not stacked.
-		wasStale := target.Lifecycle == cluster.LifecycleEmerging
+	if target != nil {
+		wasStale := e.priorStale(ctx, target, sources)
+		target.Evidence = cluster.NormalizeEvidence(target.SourceID, target.Evidence)
+		target.Evolve(ans.Query, nil)
+		target.Embed = e.querySetEmbed(ctx, *target)
+		if replace || wasStale {
+			target.Content = ans.Summary
+			target.Confidence = ans.Confidence
+			target.Evidence = ans.Samples
+		} else {
+			target.Content += "\n---\n" + ans.Summary
+			target.Confidence = (target.Confidence + ans.Confidence) / 2
+			target.Evidence = append(target.Evidence, ans.Samples...)
+		}
 		target.SourceID = ans.SourceID
-		// Fold the new answer in.
-		target.Content = target.Content + "\n---\n" + ans.Summary
-		target.Confidence = (target.Confidence + ans.Confidence) / 2
-		if len(ans.Samples) > 0 {
-			if wasStale {
-				target.Evidence = ans.Samples[:1]
-			} else {
-				target.Evidence = append(target.Evidence, ans.Samples[0])
-			}
-			e.writeCites(ctx, target.ID, ans.SourceID, ans.Samples[:1])
+		if wasStale {
+			target.Lifecycle = cluster.LifecycleEmerging
 		}
 		if err := e.Store.Save(ctx, *target); err != nil {
 			return res, err
 		}
+		e.writeCites(ctx, target.ID, ans.SourceID, ans.Samples)
 		res.Merged = true
 		res.ClusterID = target.ID
 		res.ClusterVer = target.Version
 		res.Persisted = true
-		return finish(res), nil
+		return res, nil
 	}
 
-	// Split-cap: if the topic already has DefaultSplitCap clusters, evolve the
-	// first instead of creating a sibling.
-	if existing := cluster.SplitCap(mustAll(e.Store, ctx), key, e.SplitCap); len(existing) > 0 {
+	if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
 		c := existing[0]
-		c.Evolve(query, e.querySetEmbed(ctx, c))
+		c.Evolve(ans.Query, nil)
+		c.Embed = e.querySetEmbed(ctx, c)
 		if err := e.Store.Save(ctx, c); err != nil {
 			return res, err
 		}
@@ -193,10 +214,10 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		res.ClusterVer = c.Version
 		res.Persisted = true
 		res.Merged = true
-		return finish(res), nil
+		return res, nil
 	}
 
-	c := cluster.New(key, query, ans.Summary, query, ans.SourceID, ans.Samples, qe, ans.Confidence)
+	c := cluster.New(key, ans.Query, ans.Summary, ans.Query, ans.SourceID, ans.Samples, qe, ans.Confidence)
 	if err := e.Store.Save(ctx, c); err != nil {
 		return res, err
 	}
@@ -204,7 +225,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	res.ClusterID = c.ID
 	res.ClusterVer = c.Version
 	res.Persisted = true
-	return finish(res), nil
+	return res, nil
 }
 
 func (e *Engine) edgeStore() graph.Store {
@@ -249,8 +270,8 @@ func (e *Engine) writeCites(ctx context.Context, clusterID, sourceID string, sam
 	if e.Cites == nil || sourceID == "" {
 		return
 	}
-	for _, sm := range samples {
-		_ = e.Cites.SaveCite(ctx, clusterID, sourceID, sm.Start, sm.End, sm.Score)
+	for _, sm := range cluster.NormalizeEvidence(sourceID, samples) {
+		_ = e.Cites.SaveCite(ctx, clusterID, sm.Source, sm.Start, sm.End, sm.Score)
 	}
 }
 
@@ -280,12 +301,12 @@ func (e *Engine) priorStale(ctx context.Context, c *cluster.Cluster, sources []s
 	for _, s := range sources {
 		byID[s.ID] = s
 	}
-	src, ok := byID[c.SourceID]
-	if !ok {
-		return true // source gone/updated to a new content address
-	}
-	runes := []rune(src.Body)
-	for _, ev := range c.Evidence {
+	for _, ev := range cluster.NormalizeEvidence(c.SourceID, c.Evidence) {
+		src, ok := byID[ev.Source]
+		if !ok {
+			return true
+		}
+		runes := []rune(src.Body)
 		if ev.Start < 0 || ev.End > len(runes) || ev.Start >= ev.End {
 			return true
 		}
@@ -332,32 +353,17 @@ func (e *Engine) embed(ctx context.Context, text string) ([]float64, error) {
 }
 
 // querySetEmbed recomputes the cluster embedding from its retained queries
-// (query-driven, not content-driven).
+// (query-driven, not content-driven); falls back to the stored embedding when
+// the embedder fails or the query set is empty.
 func (e *Engine) querySetEmbed(ctx context.Context, c cluster.Cluster) []float64 {
 	if len(c.Queries) == 0 {
 		return c.Embed
 	}
-	vs, err := e.Embedder.Embed(ctx, c.Queries)
+	qe, err := cluster.QuerySetEmbed(ctx, e.Embedder, c.Queries)
 	if err != nil {
 		return c.Embed
 	}
-	// Mean-pool.
-	dims := len(vs[0])
-	mean := make([]float64, dims)
-	for _, v := range vs {
-		for i, x := range v {
-			mean[i] += x
-		}
-	}
-	for i := range mean {
-		mean[i] /= float64(len(vs))
-	}
-	return mean
-}
-
-func mustAll(st cluster.Store, ctx context.Context) []cluster.Cluster {
-	all, _ := st.All(ctx)
-	return all
+	return qe
 }
 
 var _ = mcs.Sample{}

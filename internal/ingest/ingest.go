@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
@@ -29,22 +30,33 @@ type Result struct {
 	StaleID string `json:"stale_id,omitempty"`
 }
 
-// Store writes ask_sources and ask_evidence against cumudb.
+// Store writes ask_sources and ask_evidence against cumudb. Every identity it
+// touches is passed in already scoped (composite "ns:coll" identity for a
+// tenant, bare name for the default library); namespace only scopes the flat
+// KV keys the Store owns (job cursors, reconcile cursor) via ns.KV.
 type Store struct {
-	c        *client.Client
-	sources  string
-	evidence string
-	jobs     string
+	c         *client.Client
+	sources   string
+	evidence  string
+	clusters  string
+	namespace string
+	jobs      string
 }
 
-func New(c *client.Client, sources, evidence string) *Store {
+func New(c *client.Client, sources, evidence, clusters, namespace string) *Store {
 	if sources == "" {
 		sources = "ask_sources"
 	}
 	if evidence == "" {
 		evidence = "ask_evidence"
 	}
-	return &Store{c: c, sources: sources, evidence: evidence, jobs: "ask:job:"}
+	if clusters == "" {
+		clusters = "ask_clusters"
+	}
+	return &Store{
+		c: c, sources: sources, evidence: evidence, clusters: clusters,
+		namespace: namespace, jobs: ns.KV(namespace, "ask:job:"),
+	}
 }
 
 // MaxSyncBodyBytes is the synchronous put cap (§3.4.2): larger corpora must
@@ -223,7 +235,7 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 // is declared once (ensure/scenario), never per ingest. ask_sources records a
 // changelog: downstream reconciliation (Reconcile) consumes it.
 func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
-	colls := []string{s.sources, s.evidence, "ask_clusters", "ask_weak_edges", "ask_conflicts"}
+	colls := []string{s.sources, s.evidence, s.clusters}
 	colls = append(colls, extra...)
 	seen := map[string]bool{}
 	out := make([]string, 0, len(colls))
@@ -258,7 +270,7 @@ type ReconcileReport struct {
 // Every action is idempotent, so at-least-once delivery is safe.
 func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	rep := ReconcileReport{}
-	cursorKey := "ask:reconcile:" + s.sources
+	cursorKey := ns.KV(s.namespace, "ask:reconcile:"+s.sources)
 	cur := uint64(0)
 	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
 		cur, _ = strconv.ParseUint(string(raw), 10, 64)
@@ -300,7 +312,7 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 // markClustersStale flags clusters anchored on a retired source 待复核
 // (emerging) — the reconcile-side trigger for the B8 re-validation.
 func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
-	res, err := s.c.Query(ctx, "ask_clusters", client.Query{
+	res, err := s.c.Query(ctx, s.clusters, client.Query{
 		Filter: map[string]any{"source_id": docID},
 		Limit:  1000,
 	})
@@ -313,7 +325,7 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
 		if id == "" || d["lifecycle"] == "emerging" {
 			continue
 		}
-		if _, err := s.c.PatchDocument(ctx, "ask_clusters", id, map[string]any{
+		if _, err := s.c.PatchDocument(ctx, s.clusters, id, map[string]any{
 			"$set": map[string]any{"lifecycle": "emerging"},
 		}); err == nil {
 			marked = true

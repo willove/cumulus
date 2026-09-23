@@ -23,9 +23,41 @@ import (
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/llm"
+	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
+
+// firstNonEmpty picks the per-request override, falling back to the serve-level
+// namespace (empty both = default library).
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// storeForNS scopes the whole write/read side (L0 sources, L1 evidence, L2
+// clusters, KV job cursors) to one namespace: the serve-level store when the
+// request carries no override, a freshly composed store otherwise. Without
+// this, a per-request "ns" would read evidence from the default library while
+// writing clusters into the tenant's — corpus and cluster domains diverging.
+// serveSources is the serve-level sources identity the caller already resolved
+// (an explicit -sources full identity wins over -ns there) and is returned
+// unchanged when the request stays in the serve's namespace.
+func storeForNS(c *client.Client, st *ingest.Store, serveNS, reqNS, serveSources string) (*ingest.Store, string, error) {
+	if err := ns.Validate(reqNS); err != nil {
+		return nil, "", err
+	}
+	nsForReq := firstNonEmpty(reqNS, serveNS)
+	if nsForReq == serveNS {
+		return st, serveSources, nil
+	}
+	scoped := ingest.New(c,
+		ns.Coll(nsForReq, "ask_sources"), ns.Coll(nsForReq, "ask_evidence"),
+		ns.Coll(nsForReq, "ask_clusters"), nsForReq)
+	return scoped, ns.Coll(nsForReq, "ask_sources"), nil
+}
 
 // SearchOptions carries the CLI flags and HTTP body knobs on one shape.
 type SearchOptions struct {
@@ -35,6 +67,10 @@ type SearchOptions struct {
 	HopTS   time.Duration `json:"hopts,omitempty"`
 	MinHot  float64       `json:"minhot,omitempty"`
 	MinConf float64       `json:"minconf,omitempty"`
+	// Namespace scopes the L2 collections (P3): clusters, weak edges, cites and
+	// conflicts become "<ns>:ask_*" composite identities, so a reuse hit can
+	// never come from another tenant's namespace.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // searchStack is one fully-wired search pipeline (FAST/KB/DEEP + collaborators),
@@ -57,13 +93,13 @@ func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sou
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = opt.Prior
 	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
-	kbE := kb.New(fe, cluster.NewCumuStore(c, "ask_clusters"), stack.emb)
-	kbE.Edges = graph.NewCumuStore(c, "ask_weak_edges")
-	kbE.Cites = deep.NewCumuCiteStore(c, "ask_cites")
+	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_clusters")), stack.emb)
+	kbE.Edges = graph.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_weak_edges"))
+	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(opt.Namespace, "ask_cites"))
 	kbE.HopTS = opt.HopTS
 	kbE.MinHotness = opt.MinHot
 	kbE.MinConfidence = opt.MinConf
-	dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
+	dE := deep.New(kbE, deep.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_conflicts")))
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
@@ -121,6 +157,7 @@ type searchIn struct {
 	Prior   bool     `json:"prior"`
 	L1Pre   bool     `json:"l1pre"`
 	Stream  bool     `json:"stream"`
+	NS      string   `json:"ns"` // per-request namespace override (empty = serve's -ns)
 }
 
 // narrowL1Pre narrows candidates via body_embed KNN (D7: a missing index
@@ -155,20 +192,27 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 
 // registerSessionFace mounts the session REST endpoints the web UI reads:
 // POST /v1/sessions (new), GET /v1/sessions (list), GET/DELETE /v1/sessions/{id}.
-func registerSessionFace(mux *http.ServeMux, c *client.Client) {
-	st := sessionStore{c: c}
+// Per-request "ns" scopes the KV keys (P3); empty falls back to serveNS.
+func registerSessionFace(mux *http.ServeMux, c *client.Client, serveNS string) {
 	sessions := func(w http.ResponseWriter, r *http.Request) {
+		st := sessionStore{c: c}
 		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/sessions"), "/")
 		switch r.Method {
 		case http.MethodPost:
 			var in struct {
 				Title string `json:"title"`
 				ID    string `json:"id"`
+				NS    string `json:"ns"`
 			}
 			if err := decode(r, &in); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
+			if err := ns.Validate(in.NS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			st.ns = firstNonEmpty(in.NS, serveNS)
 			if in.ID == "" {
 				in.ID = newSessionID()
 			}
@@ -183,6 +227,12 @@ func registerSessionFace(mux *http.ServeMux, c *client.Client) {
 			}
 			writeJSON(w, http.StatusCreated, d)
 		case http.MethodGet:
+			reqNS := r.URL.Query().Get("ns")
+			if err := ns.Validate(reqNS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			st.ns = firstNonEmpty(reqNS, serveNS)
 			if id == "" {
 				all, err := st.list(r.Context())
 				if err != nil {
@@ -199,6 +249,15 @@ func registerSessionFace(mux *http.ServeMux, c *client.Client) {
 			}
 			writeJSON(w, http.StatusOK, d)
 		case http.MethodDelete:
+			var in struct {
+				NS string `json:"ns"`
+			}
+			_ = decode(r, &in)
+			if err := ns.Validate(in.NS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			st.ns = firstNonEmpty(in.NS, serveNS)
 			if id == "" {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "session id required"})
 				return
@@ -218,7 +277,8 @@ func registerSessionFace(mux *http.ServeMux, c *client.Client) {
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
-func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, sourcesColl string, verbose bool) {
+// Per-request "ns" overrides serveNS for this query only (P3).
+func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -234,10 +294,21 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "query required"})
 				return
 			}
-			opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History}
+			if err := ns.Validate(in.NS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			// Whole-stack scoping (P3): L0 corpus, L1 evidence, L2 cluster
+			// collections and KV keys all move to the request's namespace.
+			stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
+			if serr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": serr.Error()})
+				return
+			}
+			opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History, Namespace: firstNonEmpty(in.NS, serveNS)}
 			var sess *sessionStore
 			if in.Session != "" {
-				sess = &sessionStore{c: c}
+				sess = &sessionStore{c: c, ns: firstNonEmpty(in.NS, serveNS)}
 				hist, _, err := sessionHistory(r.Context(), *sess, in.Session, 6)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -248,7 +319,7 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 			if stream {
 				in.Stream = true
 			}
-			ss, err := newSearchStack(r.Context(), c, st, sourcesColl, opt)
+			ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return

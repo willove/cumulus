@@ -17,6 +17,7 @@ import (
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/minilm"
+	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
@@ -36,8 +37,9 @@ Usage:
   ask env                       # 生效的端点配置（脱敏）
   ask reclaim [-stale]          # 物理回收 tombstone（-stale 兼收陈旧修订）
   ask job    [-job NAME]        # 摄取任务状态（queued/running/done/failed）
-  ask serve  [-listen ADDR]     # HTTP 摄取面（/health · /v1/ingest/*）
-  ask cluster list | get <id>
+  ask serve  [-listen ADDR]     # HTTP 面：摄取 /v1/ingest/* + POST /v1/search(JSON) +
+                                #   /v1/search/stream(SSE) + 会话 REST + 工作台 /ui/
+  ask cluster list | get <id> | tidy [-dry-run] [-theta 0.55] [-max N]
   ask conflicts list | detect <clusterA> <clusterB>
   ask cites  list               # 簇→源证据边（ask_cites）
   ask session new | list | show <id> | rm <id>   # P2 会话（KV）
@@ -46,8 +48,11 @@ Usage:
 
 Flags:
   -server URL    cumudb base URL (default http://127.0.0.1:8480)
-  -sources NAME  sources collection (default ask_sources)
-  -evidence NAME evidence collection (default ask_evidence)
+  -sources NAME  sources collection (default ask_sources; full identity wins over -ns)
+  -evidence NAME evidence collection (default ask_evidence; full identity wins over -ns)
+  -ns NAME       namespace scope: suite collections become ns:ask_* composite
+                 identities and job/session KV keys become ns:<name>:ask:* —
+                 one tenant's reuse path never sees another's (default library = bare names)
 
 Env:
   AIGATE_BASE_URL    upstream API root INCLUDING /v1 (e.g. https://api.minimaxi.com/v1)
@@ -69,8 +74,9 @@ func main() {
 	}
 	applyLLMAliases()
 	server := "http://127.0.0.1:8480"
-	sources := "ask_sources"
-	evidence := "ask_evidence"
+	sources := ""
+	evidence := ""
+	namespace := ""
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -84,6 +90,9 @@ func main() {
 		case a == "-evidence" && i+1 < len(args):
 			evidence = args[i+1]
 			i++
+		case a == "-ns" && i+1 < len(args):
+			namespace = args[i+1]
+			i++
 		case a == "-h" || a == "--help":
 			fmt.Print(usage)
 			return
@@ -91,6 +100,22 @@ func main() {
 			rest = append(rest, a)
 		}
 	}
+	if err := ns.Validate(namespace); err != nil {
+		fatal(err)
+	}
+	// Namespace scoping (P3): an explicit -sources/-evidence is a full engine
+	// identity and wins verbatim; otherwise the suite's own collections are
+	// composed as "ns:coll" so one tenant's reuse path never sees another's.
+	if sources == "" {
+		sources = ns.Coll(namespace, "ask_sources")
+	}
+	if evidence == "" {
+		evidence = ns.Coll(namespace, "ask_evidence")
+	}
+	clustersColl := ns.Coll(namespace, "ask_clusters")
+	edgesColl := ns.Coll(namespace, "ask_weak_edges")
+	citesColl := ns.Coll(namespace, "ask_cites")
+	conflictsColl := ns.Coll(namespace, "ask_conflicts")
 	if len(rest) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -113,7 +138,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c := client.New(server)
-	st := ingest.New(c, sources, evidence)
+	st := ingest.New(c, sources, evidence, clustersColl, namespace)
 
 	switch cmd {
 	case "put":
@@ -231,7 +256,7 @@ func main() {
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
 		l1pre := fs.Bool("l1pre", false, "narrow candidates via body_embed KNN (L1 cache)")
 		_ = fs.Parse(rest)
-		opt := SearchOptions{Prior: *priorRank, L1Pre: *l1pre, HopTS: *hopts, MinHot: *minhot, MinConf: *minconf}
+		opt := SearchOptions{Prior: *priorRank, L1Pre: *l1pre, HopTS: *hopts, MinHot: *minhot, MinConf: *minconf, Namespace: namespace}
 		if *history != "" {
 			for _, h := range strings.Split(*history, "|") {
 				if h = strings.TrimSpace(h); h != "" {
@@ -241,7 +266,7 @@ func main() {
 		}
 		var sess *sessionStore
 		if *sessionID != "" {
-			sess = &sessionStore{c: c}
+			sess = &sessionStore{c: c, ns: namespace}
 			hist, _, herr := sessionHistory(ctx, *sess, *sessionID, 6)
 			if herr != nil {
 				fatal(herr)
@@ -303,7 +328,7 @@ func main() {
 		fs := flag.NewFlagSet("ensure", flag.ExitOnError)
 		embed := fs.Bool("embed", false, "also backfill body_embed vectors (L1)")
 		_ = fs.Parse(rest)
-		colls, err := st.Ensure(ctx)
+		colls, err := st.Ensure(ctx, edgesColl, citesColl, conflictsColl)
 		if err != nil {
 			fatal(err)
 		}
@@ -337,7 +362,7 @@ func main() {
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
 		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also ASK_VERBOSE=1)")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, server, sources, *verbose)
+		runServe(ctx, c, st, *listen, server, sources, namespace, *verbose)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {
@@ -345,7 +370,7 @@ func main() {
 		}
 		switch sub {
 		case "list":
-			all, err := deep.NewCumuCiteStore(c, "ask_cites").List(ctx)
+			all, err := deep.NewCumuCiteStore(c, citesColl).List(ctx)
 			if err != nil {
 				fatal(err)
 			}
@@ -384,7 +409,7 @@ func main() {
 		}
 		printJSON(map[string]any{"reclaimed": n})
 	case "cluster":
-		store := cluster.NewCumuStore(c, "ask_clusters")
+		store := cluster.NewCumuStore(c, clustersColl)
 		sub := "list"
 		if len(rest) > 0 {
 			sub = rest[0]
@@ -408,12 +433,29 @@ func main() {
 				fatal(fmt.Errorf("not found"))
 			}
 			printJSON(cl)
+		case "tidy":
+			// P6: cross-topic near-duplicate sweep. The write path only
+			// merges within a topic key, so paraphrases asked in genuinely
+			// different wordings survive as siblings; this folds them.
+			fs := flag.NewFlagSet("tidy", flag.ExitOnError)
+			dry := fs.Bool("dry-run", false, "report what would fold, change nothing")
+			theta := fs.Float64("theta", cluster.DefaultTidyTheta, "fold line (cosine)")
+			maxMerges := fs.Int("max", 0, "cap on folds this run (0 = unlimited)")
+			_ = fs.Parse(rest[1:])
+			// The winner's embed is recomputed from its merged query set —
+			// with the SAME embedder the search stack uses (minilm/aigate in
+			// production), never a different one, or reuse geometry drifts.
+			rep, err := cluster.Tidy(ctx, store, newProdStack().emb, *theta, *dry, *maxMerges)
+			if err != nil {
+				fatal(err)
+			}
+			printJSON(rep)
 		default:
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)
 		}
 	case "conflicts":
-		store := deep.NewCumuStore(c, "ask_conflicts")
+		store := deep.NewCumuStore(c, conflictsColl)
 		sub := "list"
 		if len(rest) > 0 {
 			sub = rest[0]
@@ -429,7 +471,7 @@ func main() {
 			if len(rest) < 3 {
 				fatal(fmt.Errorf("conflicts detect: two cluster ids required"))
 			}
-			cs := cluster.NewCumuStore(c, "ask_clusters")
+			cs := cluster.NewCumuStore(c, clustersColl)
 			a, err := cs.Get(ctx, rest[1])
 			if err != nil || a == nil {
 				fatal(fmt.Errorf("cluster %s: %v", rest[1], err))
@@ -479,7 +521,7 @@ func main() {
 		return
 
 	case "session":
-		runSessionCLI(ctx, c, rest)
+		runSessionCLI(ctx, c, rest, namespace)
 		return
 	case "eval-run":
 		// LENS 式真实语料评测（R-E1）：真实管线 + Closed-Book 对照 + 判官。
@@ -496,7 +538,7 @@ func main() {
 		}
 		// Per-item deadlines inside evalRun; the shared ctx's whole-process
 		// budget must not cap a multi-item batch.
-		if err := evalRun(context.Background(), c, st, sources, *file, *out, *judgeOn, *priorRank, *l1pre, *limit); err != nil {
+		if err := evalRun(context.Background(), c, st, sources, namespace, *file, *out, *judgeOn, *priorRank, *l1pre, *limit); err != nil {
 			fatal(err)
 		}
 

@@ -164,6 +164,7 @@ func TopicKey(query string) string {
 type Cluster struct {
 	ID         string          `json:"_id"`
 	TopicKey   string          `json:"topic_key"`
+	TopicKeys  []string        `json:"topic_keys,omitempty"` // aliases from folded clusters
 	Name       string          `json:"name"`
 	Content    string          `json:"content"`
 	Queries    []string        `json:"queries"`
@@ -199,11 +200,24 @@ func New(topicKey, name, content, query, sourceID string, evidence []mcs.Sample,
 		Lifecycle:  LifecycleEmerging,
 		Version:    1,
 		SourceID:   sourceID,
-		Evidence:   evidence,
+		Evidence:   NormalizeEvidence(sourceID, evidence),
 		Flags:      map[string]bool{},
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+}
+
+// NormalizeEvidence copies samples and replaces sampling-method source labels
+// with sourceID. Explicit document IDs and all other sample fields are retained.
+func NormalizeEvidence(sourceID string, samples []mcs.Sample) []mcs.Sample {
+	out := append([]mcs.Sample(nil), samples...)
+	for i := range out {
+		switch out[i].Source {
+		case "", "full", "stratified", "fuzz", "gaussian", "global":
+			out[i].Source = sourceID
+		}
+	}
+	return out
 }
 
 // Evolve merges a new successful query into the cluster (G-idem: same query is
@@ -293,7 +307,7 @@ func (s *Memory) Get(_ context.Context, id string) (*Cluster, error) {
 func (s *Memory) FindByTopic(_ context.Context, topicKey string) ([]Cluster, error) {
 	var out []Cluster
 	for _, c := range s.m {
-		if c.TopicKey == topicKey {
+		if c.TopicKey == topicKey || containsString(c.TopicKeys, topicKey) {
 			out = append(out, c)
 		}
 	}
@@ -322,7 +336,7 @@ func SplitCap(clusters []Cluster, topicKey string, cap int) []Cluster {
 	}
 	var out []Cluster
 	for _, c := range clusters {
-		if c.TopicKey != topicKey {
+		if c.TopicKey != topicKey && !containsString(c.TopicKeys, topicKey) {
 			continue
 		}
 		out = append(out, c)
