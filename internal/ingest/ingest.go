@@ -180,6 +180,41 @@ type EvidenceHit struct {
 	Snippet  string  `json:"snippet"`
 }
 
+// SourcesByIDs returns the ACTIVE sources with the given ids (unknown or
+// retired ids are skipped). G2: the reuse path validates a warm prior against
+// only the documents a cluster anchors on, instead of reading the whole
+// corpus (14k articles ≈ 2s of paged reads for a 0-sample answer).
+func (s *Store) SourcesByIDs(ctx context.Context, ids []string) ([]source.Source, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	const page = 500
+	var out []source.Source
+	for start := 0; start < len(ids); start += page {
+		end := start + page
+		if end > len(ids) {
+			end = len(ids)
+		}
+		res, err := s.c.Query(ctx, s.sources, client.Query{
+			Filter: map[string]any{"_id": map[string]any{"$in": ids[start:end]}},
+			Limit:  page,
+		})
+		if err != nil {
+			return out, err
+		}
+		for _, d := range res.Documents {
+			src, err := fromDoc(d)
+			if err != nil {
+				return out, err
+			}
+			if src.Status == source.StatusActive {
+				out = append(out, *src)
+			}
+		}
+	}
+	return out, nil
+}
+
 // ActiveEvidence returns live evidence windows scored at or above minScore,
 // newest first, capped at limit. Read-only; failures degrade to nil so the
 // prior's history arm simply stays empty.

@@ -28,15 +28,18 @@ type CiteStore interface {
 
 // Engine adds cluster reuse/evolve and graph expansion around FAST.
 type Engine struct {
-	Fast       *fast.Engine
-	Store      cluster.Store
-	Embedder   cluster.Embedder
-	Edges      graph.Store // optional; nil = no expansion
-	Cites      CiteStore   // optional; nil = no cite edges
-	ReuseTheta float64
-	MergeTheta float64
-	SplitCap   int
-	HopKNN     int
+	Fast     *fast.Engine
+	Store    cluster.Store
+	Embedder cluster.Embedder
+	Edges    graph.Store // optional; nil = no expansion
+	Cites    CiteStore   // optional; nil = no cite edges
+	// SourceReader narrows the B8 warm-prior validation to the documents a
+	// cluster anchors on (G2). nil = validation uses the caller's list.
+	SourceReader SourceReader
+	ReuseTheta   float64
+	MergeTheta   float64
+	SplitCap     int
+	HopKNN       int
 	// RejectedProposals counts AcceptFold refusals (Self-Index cost line:
 	// rejected proposals are spend, not free). Read by eval-run per item.
 	RejectedProposals int
@@ -47,6 +50,11 @@ type Engine struct {
 	// fields (D4 结构化剪枝; 0 = off).
 	MinHotness    float64
 	MinConfidence float64
+}
+
+// SourceReader fetches sources by id (implemented by ingest.Store).
+type SourceReader interface {
+	SourcesByIDs(ctx context.Context, ids []string) ([]source.Source, error)
 }
 
 func New(f *fast.Engine, st cluster.Store, emb cluster.Embedder) *Engine {
@@ -102,38 +110,8 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
-	if c := e.pickReusable(same, qe, query); c != nil {
-		// B8 warm-prior validation (LENS): a prior is only warm while it
-		// still matches the CURRENT corpus. Any evidence window that no
-		// longer pins back exactly (source updated/gone) disqualifies the
-		// prior — mark it 待复核 and fall through to L0, which self-heals
-		// the cluster through the merge path below.
-		if e.priorStale(ctx, c, sources) {
-			c.Lifecycle = cluster.LifecycleEmerging
-			_ = e.Store.Save(ctx, *c)
-		} else {
-			if c.Lifecycle == cluster.LifecycleEmerging {
-				// B8: the prior just validated against the current corpus —
-				// self-heal complete.
-				c.Lifecycle = cluster.LifecycleStable
-			}
-			c.Evolve(query, nil)
-			e.refreshEmbeds(ctx, c)
-			_ = e.Store.Save(ctx, *c)
-			// Reuse still surfaces the stored evidence windows (0 new samples).
-			samples := cluster.NormalizeEvidence(c.SourceID, c.Evidence)
-			cov := mcs.Coverage(query, samples)
-			return finish(Result{
-				Answer: fast.Answer{
-					Query: query, Mode: "FAST", Confidence: c.Confidence,
-					Summary: c.Content, SourceID: c.SourceID, LLMCalls: 0,
-					Samples:  samples,
-					Coverage: cov,
-				},
-				Reused: true, ClusterID: c.ID, ClusterVer: c.Version,
-				Sampled: 0, Persisted: true,
-			}), nil
-		}
+	if res, ok := e.reuseAttempt(ctx, query, qe, same, sources); ok {
+		return finish(res), nil
 	}
 
 	// Phase 0b (G1): cross-topic near hits are merge candidates only — never
@@ -152,6 +130,115 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return res, err
 	}
 	return finish(res), nil
+}
+
+// TryReuseNarrow is the G2 reuse attempt: the warm-prior validation runs
+// against ONLY the sources the candidate cluster anchors on (its evidence
+// windows + answer source), so a warm hit costs one small read instead of a
+// full-corpus page walk. Returns ok=false whenever the caller must fall back
+// to the full path (no reader wired, no candidate, prior stale against its
+// own anchors). On a reader error it also returns false — a failed narrow
+// read must not be mistaken for a stale prior.
+func (e *Engine) TryReuseNarrow(ctx context.Context, query string) (Result, []source.Source, bool, error) {
+	if e.Store == nil || e.Embedder == nil || e.SourceReader == nil {
+		return Result{}, nil, false, nil
+	}
+	qe, err := e.embed(ctx, query)
+	if err != nil {
+		return Result{}, nil, false, err
+	}
+	key := cluster.TopicKey(query)
+	same, err := e.Store.FindByTopic(ctx, key)
+	if err != nil {
+		return Result{}, nil, false, err
+	}
+	c := e.pickReusable(same, qe, query)
+	if c == nil {
+		return Result{}, nil, false, nil
+	}
+	narrow, err := e.SourceReader.SourcesByIDs(ctx, anchoredSourceIDs(*c))
+	if err != nil {
+		return Result{}, nil, false, nil // conservative: let the full path decide
+	}
+	res, ok := e.reuseAttemptWith(ctx, query, qe, same, c, narrow)
+	if !ok {
+		return Result{}, nil, false, nil
+	}
+	// finish() equivalent: graph links + neighbours over the narrow set.
+	prevID := e.lastClusterID(ctx)
+	if res.ClusterID != "" {
+		if prevID != "" && prevID != res.ClusterID {
+			_ = graph.LinkQuerySeq(ctx, e.edgeStore(), prevID, res.ClusterID)
+		}
+		res.PrevCluster = prevID
+		res.Neighbors = e.expand(ctx, res.ClusterID, qe, narrow)
+	}
+	return res, narrow, true, nil
+}
+
+// reuseAttempt is Phase 0a against the caller's source list.
+func (e *Engine) reuseAttempt(ctx context.Context, query string, qe []float64, same []cluster.Cluster, sources []source.Source) (Result, bool) {
+	c := e.pickReusable(same, qe, query)
+	if c == nil {
+		return Result{}, false
+	}
+	return e.reuseAttemptWith(ctx, query, qe, same, c, sources)
+}
+
+// reuseAttemptWith validates the chosen candidate against `validateAgainst`
+// (full corpus or the narrow anchor set) and, when warm, evolves + returns
+// the reuse result. A stale prior is marked 待复核 and reported as "no
+// reuse" — the L0 path self-heals it.
+func (e *Engine) reuseAttemptWith(ctx context.Context, query string, qe []float64, same []cluster.Cluster, c *cluster.Cluster, validateAgainst []source.Source) (Result, bool) {
+	// B8 warm-prior validation (LENS): a prior is only warm while it
+	// still matches the CURRENT corpus. Any evidence window that no
+	// longer pins back exactly (source updated/gone) disqualifies the
+	// prior — mark it 待复核 and fall through to L0, which self-heals
+	// the cluster through the merge path below.
+	if e.priorStale(ctx, c, validateAgainst) {
+		c.Lifecycle = cluster.LifecycleEmerging
+		_ = e.Store.Save(ctx, *c)
+		return Result{}, false
+	}
+	if c.Lifecycle == cluster.LifecycleEmerging {
+		// B8: the prior just validated against the current corpus —
+		// self-heal complete.
+		c.Lifecycle = cluster.LifecycleStable
+	}
+	c.Evolve(query, nil)
+	e.refreshEmbeds(ctx, c)
+	_ = e.Store.Save(ctx, *c)
+	// Reuse still surfaces the stored evidence windows (0 new samples).
+	samples := cluster.NormalizeEvidence(c.SourceID, c.Evidence)
+	cov := mcs.Coverage(query, samples)
+	return Result{
+		Answer: fast.Answer{
+			Query: query, Mode: "FAST", Confidence: c.Confidence,
+			Summary: c.Content, SourceID: c.SourceID, LLMCalls: 0,
+			Samples:  samples,
+			Coverage: cov,
+		},
+		Reused: true, ClusterID: c.ID, ClusterVer: c.Version,
+		Sampled: 0, Persisted: true,
+	}, true
+}
+
+// anchoredSourceIDs lists the documents a cluster's answer rests on: its
+// answer source plus every evidence window's source.
+func anchoredSourceIDs(c cluster.Cluster) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	add(c.SourceID)
+	for _, ev := range c.Evidence {
+		add(ev.Source)
+	}
+	return out
 }
 
 // crossTopicNear returns clusters outside this topic_key whose max-over-keys
@@ -297,11 +384,29 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 	for _, s := range sources {
 		fresh[s.ID] = s.UpdatedAt
 	}
+	// G2: a narrow reuse hit only carries the cluster's own anchors, so a
+	// neighbour's source may be missing from `fresh`. When structured/TS
+	// pruning is configured, read that one document instead of silently
+	// disabling the prune (Gate N regression).
+	var reader SourceReader
+	if e.SourceReader != nil && (e.HopTS > 0 || e.MinHotness > 0 || e.MinConfidence > 0) {
+		reader = e.SourceReader
+	}
 	ex := graph.NewExpander(e.Edges, e.Store)
 	ex.HopTS = e.HopTS
 	ex.Freshness = func(sourceID string) (time.Time, bool) {
-		t, ok := fresh[sourceID]
-		return t, ok
+		if t, ok := fresh[sourceID]; ok {
+			return t, true
+		}
+		if reader == nil {
+			return time.Time{}, false
+		}
+		got, err := reader.SourcesByIDs(ctx, []string{sourceID})
+		if err != nil || len(got) != 1 {
+			return time.Time{}, false
+		}
+		fresh[sourceID] = got[0].UpdatedAt
+		return got[0].UpdatedAt, true
 	}
 	hop := e.HopKNN
 	if hop <= 0 {

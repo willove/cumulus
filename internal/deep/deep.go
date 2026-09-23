@@ -320,13 +320,9 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if e.Sources == nil {
 		e.Sources = sources
 	}
-	thr := e.EscalateBelow
-	if thr <= 0 {
-		thr = EscalateBelow
-	}
 	query = e.effectiveQuery(ctx, query)
 	fx := facts.Build(query)
-	thr = e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
+	thr := e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
 
 	// FILENAME_ONLY tier (D5 附档): name/extension lookups answer before any
 	// retrieval, with 0 LLM calls.
@@ -339,6 +335,57 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
+	return e.afterBase(ctx, started, query, base, sources, thr, fx, nil)
+}
+
+// SourceLoader lazily materializes the full candidate corpus (G2: a warm
+// reuse must not pay the full-corpus read).
+type SourceLoader func(ctx context.Context) ([]source.Source, error)
+
+// AskLazy is Ask with a lazy full-corpus load. The warm-prior reuse attempt
+// runs FIRST against only the sources the candidate cluster anchors on; a
+// hit returns without ever calling load. A miss (or any escalation) loads
+// the corpus and continues on the normal path.
+func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (res Result, err error) {
+	started := time.Now()
+	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
+	if load == nil {
+		return Result{}, fmt.Errorf("deep: AskLazy requires a loader")
+	}
+	if e.Sources == nil {
+		// Keep the engine's cached corpus view honest; the lazy path fills
+		// it when (and only when) the corpus is actually needed.
+		_ = e.Sources
+	}
+	query = e.effectiveQuery(ctx, query)
+	fx := facts.Build(query)
+	thr := e.thresholdFor(fx)
+
+	if e.KB != nil {
+		if base, narrow, ok, err := e.KB.TryReuseNarrow(ctx, query); err != nil {
+			return Result{}, err
+		} else if ok {
+			e.Sources = nil // the narrow hit never materialized the corpus
+			return e.afterBase(ctx, started, query, base, narrow, thr, fx, load)
+		}
+	}
+	all, err := load(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	if e.Sources == nil {
+		e.Sources = all
+	}
+	return e.Ask(ctx, query, all)
+}
+
+// afterBase is the shared post-reuse path: citations, conflicts, cover, the
+// abstain gates and the DEEP escalation. `citeCorpus` is the source set
+// citation refs resolve against (the full corpus, or the narrow anchor set
+// on a G2 hit); `load` materializes the full corpus when DEEP actually
+// escalates (nil = caller already provided it).
+func (e *Engine) afterBase(ctx context.Context, started time.Time, query string, base kb.Result, citeCorpus []source.Source, thr float64, fx []facts.Fact, load SourceLoader) (res Result, err error) {
+	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
 	e.BudgetHit = false
 	res = Result{
 		Answer:     base.Answer,
@@ -351,7 +398,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		Neighbors:  base.Neighbors,
 		Mode:       ModeFAST,
 	}
-	res.Citations = BuildCitations(query, base.Answer, sources)
+	res.Citations = BuildCitations(query, base.Answer, citeCorpus)
 	res.Conflicts = e.conflictsFor(ctx, base.ClusterID)
 	res.Cover = facts.ReportFor(fx, base.Answer.Samples)
 
@@ -374,7 +421,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 				top = sm.Score
 			}
 		}
-		f := abstain.FromAnswer(query, len(sources), len(base.Answer.Samples), top,
+		f := abstain.FromAnswer(query, len(citeCorpus), len(base.Answer.Samples), top,
 			len(res.Cover.Missing), base.Answer.Confidence,
 			base.Answer.Skipped, base.Answer.Refused)
 		p, act := e.Abstain.Decide(f)
@@ -412,12 +459,24 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return res, nil
 	}
 
+	// G2: a narrow reuse hit that still needs DEEP must now pay for the
+	// corpus — load it exactly once, here (nil corpus = lazy path).
+	deepCorpus := citeCorpus
+	if len(deepCorpus) == 0 && load != nil {
+		if deepCorpus, err = load(ctx); err != nil {
+			return Result{}, err
+		}
+		if e.Sources == nil {
+			e.Sources = deepCorpus
+		}
+	}
+
 	res.Escalated = true
 	res.Mode = ModeDEEP
 	// 文档族亲缘: the FAST answer's source votes for its family — answers
 	// cluster within a family (11/13 failures were same-family near-misses).
-	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, sources)
-	deepAns, cover, loops, wid, sc, admitted, err := e.runDeep(ctx, query, sources, affinity)
+	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, deepCorpus)
+	deepAns, cover, loops, wid, sc, admitted, err := e.runDeep(ctx, query, deepCorpus, affinity)
 	if err != nil {
 		return Result{}, err
 	}
@@ -427,7 +486,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	res.SelfCorrected = sc
 	res.Widened = wid
 	res.Admitted = admitted
-	res.Citations = BuildCitations(query, deepAns, sources)
+	res.Citations = BuildCitations(query, deepAns, deepCorpus)
 	// Mark unresolved refs when DEEP still cannot pin a quote.
 	unresolved := false
 	for _, r := range res.Citations.Refs {
@@ -447,7 +506,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 				top = sm.Score
 			}
 		}
-		f := abstain.FromAnswer(query, len(sources), len(deepAns.Samples), top,
+		f := abstain.FromAnswer(query, len(deepCorpus), len(deepAns.Samples), top,
 			len(cover.Missing), deepAns.Confidence,
 			deepAns.Skipped, deepAns.Refused)
 		p, act := e.Abstain.Decide(f)
@@ -463,7 +522,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		}
 	}
 
-	sub, err := e.KB.Persist(ctx, deepAns, sources)
+	sub, err := e.KB.Persist(ctx, deepAns, deepCorpus)
 	if err != nil {
 		return Result{}, err
 	}

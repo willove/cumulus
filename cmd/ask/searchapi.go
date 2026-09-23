@@ -103,6 +103,8 @@ func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sou
 		}
 	}
 	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_clusters")), stack.emb)
+	// G2: warm-prior validation reads only the cluster's anchored docs.
+	kbE.SourceReader = st
 	kbE.Edges = graph.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_weak_edges"))
 	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(opt.Namespace, "ask_cites"))
 	kbE.HopTS = opt.HopTS
@@ -149,12 +151,12 @@ func refinerFor(chat *llm.ChatClient) *llm.AigateKeywordRefiner {
 	return &llm.AigateKeywordRefiner{Client: chat}
 }
 
-// runSearch executes one query and applies the CLI/HTTP shared side effects
-// (evidence marking, B9 token accounting).
-func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result, error) {
+// loadCandidates materializes the candidate corpus for one query (G2: kept
+// behind a loader so a warm reuse never pays the full-corpus read).
+func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]source.Source, error) {
 	list, err := ss.st.ActiveSources(ctx)
 	if err != nil {
-		return deep.Result{}, err
+		return nil, err
 	}
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
@@ -162,7 +164,15 @@ func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result,
 	if ss.opt.L1Pre {
 		list = ss.narrowL1Pre(ctx, list, query)
 	}
-	res, err := ss.dE.Ask(ctx, query, list)
+	return list, nil
+}
+
+// runSearch executes one query and applies the CLI/HTTP shared side effects
+// (evidence marking, B9 token accounting).
+func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result, error) {
+	res, err := ss.dE.AskLazy(ctx, query, func(ctx context.Context) ([]source.Source, error) {
+		return ss.loadCandidates(ctx, query)
+	})
 	if err != nil {
 		return deep.Result{}, err
 	}
