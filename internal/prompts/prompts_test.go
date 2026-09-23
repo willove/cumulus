@@ -8,7 +8,7 @@ import (
 func TestAllAssetsLoad(t *testing.T) {
 	for _, name := range []string{
 		EvaluateSample, FastAnalyze, KeywordsMultilevel, HistoryRewrite, SynthesizeROI,
-		JudgeCorrect, KeywordsRefine,
+		JudgeCorrect, KeywordsRefine, QueryAbstract, QueryFromAbstract,
 	} {
 		body, err := Load(name)
 		if err != nil {
@@ -88,5 +88,31 @@ func TestKeywordsRefineContract(t *testing.T) {
 		if !strings.Contains(body, s) {
 			t.Fatalf("keywords_refine missing %q", s)
 		}
+	}
+}
+
+// Self-Index A.2.1: call 1 abstracts the need from the raw query; call 2
+// must not see the raw original wording (only abstract + tried list).
+func TestQuerySimulatorTwoCallContract(t *testing.T) {
+	a, err := Load(QueryAbstract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"{{query}}", "JSON"} {
+		if !strings.Contains(a, s) {
+			t.Fatalf("query_abstract missing %q", s)
+		}
+	}
+	b, err := Load(QueryFromAbstract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"{{need}}", "{{tried}}", "queries", "JSON"} {
+		if !strings.Contains(b, s) {
+			t.Fatalf("query_from_abstract missing %q", s)
+		}
+	}
+	if strings.Contains(b, "{{query}}") {
+		t.Fatal("second call must not receive the raw original query (A.2.1 isolation)")
 	}
 }

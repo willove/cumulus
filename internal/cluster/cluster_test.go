@@ -57,7 +57,7 @@ func TestGMergeFoldsIntoExisting(t *testing.T) {
 		embedOf(t, e, "连接池最大连接数是多少"), 0.8)
 	paraphrase := "连接池最大连接数是多大"
 	qe := embedOf(t, e, paraphrase)
-	if !CanMerge(&base, qe, 0.5) {
+	if !CanMerge(&base, paraphrase, qe, 0.5) {
 		t.Fatalf("paraphrase must be mergeable; cos=%v", Cosine(base.Embed, qe))
 	}
 	base.Evolve(paraphrase, embedOf(t, e, stringsJoin(base.Queries)))
@@ -99,7 +99,7 @@ func TestGPolluteRejectsUnrelated(t *testing.T) {
 	c.Lifecycle = LifecycleDeprecated
 	e := Local{N: 8}
 	qe := embedOf(t, e, "缓存穿透")
-	if ShouldReuse(&c, qe, 0.1) {
+	if ShouldReuse(&c, "缓存穿透", qe, 0.1) {
 		t.Fatal("deprecated cluster must not reuse")
 	}
 }

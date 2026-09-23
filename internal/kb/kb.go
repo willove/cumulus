@@ -37,6 +37,9 @@ type Engine struct {
 	MergeTheta float64
 	SplitCap   int
 	HopKNN     int
+	// RejectedProposals counts AcceptFold refusals (Self-Index cost line:
+	// rejected proposals are spend, not free). Read by eval-run per item.
+	RejectedProposals int
 	// HopTS prunes expanded neighbors whose linked source is staler than this
 	// (D4 optional freshness pass 时序剪枝; 0 = off).
 	HopTS time.Duration
@@ -94,8 +97,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return res
 	}
 
-	// Phase 0: reuse within the same topic_key / aliases only (cross-topic
-	// near-duplicates are folded offline by `cluster tidy`, not at query time).
+	// Phase 0a: reuse within the same topic_key / aliases (max-over-keys).
 	same, err := e.Store.FindByTopic(ctx, key)
 	if err != nil {
 		return Result{}, err
@@ -134,16 +136,55 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		}
 	}
 
-	// L0 path.
+	// Phase 0b (G1): cross-topic near hits are merge candidates only — never
+	// returned as a reused answer (G-pollute). L0 still answers; saveAnswer
+	// folds into the strongest candidate when AcceptFold passes.
 	ans, err := e.Fast.Search(ctx, query, sources)
 	if err != nil {
 		return Result{}, err
 	}
-	res, err := e.saveAnswer(ctx, ans, sources, same, qe, false)
+	candidates := same
+	if cross := e.crossTopicNear(ctx, key, qe, query); len(cross) > 0 {
+		candidates = append(append([]cluster.Cluster(nil), same...), cross...)
+	}
+	res, err := e.saveAnswer(ctx, ans, sources, candidates, qe, false)
 	if err != nil {
 		return res, err
 	}
 	return finish(res), nil
+}
+
+// crossTopicNear returns clusters outside this topic_key whose max-over-keys
+// score clears ReuseTheta and that pass the G-pollute relevance gate. They
+// are offered to the merge path only — not to answer reuse.
+func (e *Engine) crossTopicNear(ctx context.Context, key string, qe []float64, query string) []cluster.Cluster {
+	all, err := e.Store.All(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []cluster.Cluster
+	for _, c := range all {
+		if c.TopicKey == key || containsTopicAlias(c, key) {
+			continue
+		}
+		if !cluster.ShouldReuse(&c, query, qe, e.ReuseTheta) {
+			continue
+		}
+		if !cluster.RelevanceGate(query, c, 0.15) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func containsTopicAlias(c cluster.Cluster, key string) bool {
+	for _, k := range c.TopicKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) Persist(ctx context.Context, ans fast.Answer, sources []source.Source) (Result, error) {
@@ -169,10 +210,21 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		return res, nil
 	}
 	key := cluster.TopicKey(ans.Query)
-	target := e.pickMergeable(same, qe)
+	target := e.pickMergeable(same, qe, ans.Query)
 	if target == nil && replace {
 		if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
 			target = &existing[0]
+		}
+	}
+	if target != nil {
+		// A2: fold only when Self-Index Specificity/Separation pass.
+		if ok, why := cluster.AcceptFold(*target, cluster.Cluster{
+			ID: "proposed", TopicKey: key, Queries: []string{ans.Query},
+			Content: ans.Summary,
+		}, same, 3); !ok {
+			_ = why
+			e.RejectedProposals++
+			target = nil
 		}
 	}
 	if target != nil {
@@ -266,13 +318,35 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 }
 
 // writeCites records cluster → source evidence windows (ask_cites). Best
-// effort: a cite failure never fails the search.
+// effort: a cite failure never fails the search. Also records co_occur edges
+// to sibling clusters anchored on the same source (ir-rag A4 profile).
 func (e *Engine) writeCites(ctx context.Context, clusterID, sourceID string, samples []mcs.Sample) {
 	if e.Cites == nil || sourceID == "" {
 		return
 	}
 	for _, sm := range cluster.NormalizeEvidence(sourceID, samples) {
 		_ = e.Cites.SaveCite(ctx, clusterID, sm.Source, sm.Start, sm.End, sm.Score)
+	}
+	e.linkCoOccur(ctx, clusterID, sourceID)
+}
+
+// linkCoOccur bumps co_occur between this cluster and any other cluster that
+// already anchors the same source (shared-evidence co-mention).
+func (e *Engine) linkCoOccur(ctx context.Context, clusterID, sourceID string) {
+	if e.Store == nil || e.Edges == nil || sourceID == "" {
+		return
+	}
+	all, err := e.Store.All(ctx)
+	if err != nil {
+		return
+	}
+	for _, c := range all {
+		if c.ID == clusterID {
+			continue
+		}
+		if c.SourceID == sourceID {
+			_ = graph.LinkCoOcur(ctx, e.edgeStore(), clusterID, c.ID)
+		}
 	}
 }
 
@@ -321,7 +395,7 @@ func (e *Engine) priorStale(ctx context.Context, c *cluster.Cluster, sources []s
 func (e *Engine) pickReusable(cs []cluster.Cluster, qe []float64, query string) *cluster.Cluster {
 	for i := range cs {
 		c := &cs[i]
-		if !cluster.ShouldReuse(c, qe, e.ReuseTheta) {
+		if !cluster.ShouldReuse(c, query, qe, e.ReuseTheta) {
 			continue
 		}
 		if !cluster.RelevanceGate(query, *c, 0.15) {
@@ -332,10 +406,10 @@ func (e *Engine) pickReusable(cs []cluster.Cluster, qe []float64, query string) 
 	return nil
 }
 
-func (e *Engine) pickMergeable(cs []cluster.Cluster, qe []float64) *cluster.Cluster {
+func (e *Engine) pickMergeable(cs []cluster.Cluster, qe []float64, query string) *cluster.Cluster {
 	for i := range cs {
 		c := &cs[i]
-		if cluster.CanMerge(c, qe, e.MergeTheta) {
+		if cluster.CanMerge(c, query, qe, e.MergeTheta) {
 			return c
 		}
 	}

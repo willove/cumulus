@@ -160,11 +160,33 @@ func TopicKey(query string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// Level names for multi-abstraction retrieval keys (Self-Index D.6): one
+// evidence unit carries keys at several abstraction levels so a rephrased
+// query can hit any of them via max-over-keys — never one vector for the
+// whole cluster.
+const (
+	KeyAnchor    = "anchor"    // 原文锚点短语 (fixed with the evidence span)
+	KeyScenario  = "scenario"  // 场景问句
+	KeyPrinciple = "principle" // 原理句
+	KeyOp        = "op"        // 操作短语
+)
+
+// LevelKey is one retrieval key at a named abstraction level. Evidence
+// 原文 spans are never rewritten into this field — only key text used for
+// matching (L0 keeps the body as source of truth).
+type LevelKey struct {
+	Level string `json:"level"`
+	Text  string `json:"text"`
+}
+
 // Cluster is one knowledge unit in ask_clusters.
 type Cluster struct {
-	ID         string          `json:"_id"`
-	TopicKey   string          `json:"topic_key"`
-	TopicKeys  []string        `json:"topic_keys,omitempty"` // aliases from folded clusters
+	ID        string   `json:"_id"`
+	TopicKey  string   `json:"topic_key"`
+	TopicKeys []string `json:"topic_keys,omitempty"` // aliases from folded clusters
+	// LevelKeys are multi-level retrieval keys (D.6). Identity stays TopicKey;
+	// these only feed max-over-keys scoring and are droppable (G-drop).
+	LevelKeys  []LevelKey      `json:"level_keys,omitempty"`
 	Name       string          `json:"name"`
 	Content    string          `json:"content"`
 	Queries    []string        `json:"queries"`
@@ -188,9 +210,11 @@ func New(topicKey, name, content, query, sourceID string, evidence []mcs.Sample,
 		tk = tk[:8]
 	}
 	id := "C" + tk
+	normEv := NormalizeEvidence(sourceID, evidence)
 	return Cluster{
 		ID:         id,
 		TopicKey:   topicKey,
+		LevelKeys:  DeriveLevelKeys(name, content, query, normEv),
 		Name:       name,
 		Content:    content,
 		Queries:    []string{query},
@@ -200,11 +224,87 @@ func New(topicKey, name, content, query, sourceID string, evidence []mcs.Sample,
 		Lifecycle:  LifecycleEmerging,
 		Version:    1,
 		SourceID:   sourceID,
-		Evidence:   NormalizeEvidence(sourceID, evidence),
+		Evidence:   normEv,
 		Flags:      map[string]bool{},
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+}
+
+// DeriveLevelKeys builds the D.6 key set without an LLM: scenario = the
+// query, op = interrogative-stripped query, anchor = top evidence snippet,
+// principle = content head. Evidence bodies are only read here as key text
+// sources — the stored Evidence spans themselves are not rewritten.
+func DeriveLevelKeys(name, content, query string, evidence []mcs.Sample) []LevelKey {
+	var out []LevelKey
+	seen := map[string]bool{}
+	add := func(level, text string) {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		if r := []rune(text); len(r) > 80 {
+			text = string(r[:80])
+		}
+		k := level + "\x00" + text
+		if seen[k] {
+			return
+		}
+		seen[k] = true
+		out = append(out, LevelKey{Level: level, Text: text})
+	}
+	add(KeyScenario, query)
+	add(KeyScenario, name)
+	if stripped := strings.TrimSpace(interrogativeRe.ReplaceAllString(query, "")); stripped != "" && stripped != query {
+		add(KeyOp, stripped)
+	}
+	for _, ev := range evidence {
+		if ev.Content != "" {
+			add(KeyAnchor, ev.Content)
+			break
+		}
+	}
+	if lines := strings.Split(content, "\n"); len(lines) > 0 {
+		add(KeyPrinciple, lines[0])
+	}
+	return out
+}
+
+// AllKeyTexts flattens level keys + retained queries for max-over-keys.
+// TopicKey/TopicKeys are identity hashes and are excluded (not lexical).
+func (c *Cluster) AllKeyTexts() []string {
+	out := make([]string, 0, len(c.LevelKeys)+len(c.Queries))
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, k := range c.LevelKeys {
+		add(k.Text)
+	}
+	for _, q := range c.Queries {
+		add(q)
+	}
+	add(c.Name)
+	return out
+}
+
+// addLevelKey appends a derived key when missing (Evolve / fold).
+func (c *Cluster) addLevelKey(level, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	for _, k := range c.LevelKeys {
+		if k.Level == level && k.Text == text {
+			return
+		}
+	}
+	c.LevelKeys = append(c.LevelKeys, LevelKey{Level: level, Text: text})
 }
 
 // NormalizeEvidence copies samples and replaces sampling-method source labels
@@ -221,13 +321,19 @@ func NormalizeEvidence(sourceID string, samples []mcs.Sample) []mcs.Sample {
 }
 
 // Evolve merges a new successful query into the cluster (G-idem: same query is
-// a no-op on the query list; hotness caps at 1.0).
+// a no-op on the query list; hotness caps at 1.0). The new wording is also
+// recorded as a scenario key so max-over-keys can hit it later even after
+// the query FIFO drops it.
 func (c *Cluster) Evolve(query string, embed []float64) bool {
 	changed := false
 	if !containsString(c.Queries, query) {
 		c.Queries = append(c.Queries, query)
 		if len(c.Queries) > MaxQueriesPerCluster {
 			c.Queries = c.Queries[len(c.Queries)-MaxQueriesPerCluster:]
+		}
+		c.addLevelKey(KeyScenario, query)
+		if stripped := strings.TrimSpace(interrogativeRe.ReplaceAllString(query, "")); stripped != "" && stripped != query {
+			c.addLevelKey(KeyOp, stripped)
 		}
 		changed = true
 	}
@@ -248,22 +354,50 @@ func (c *Cluster) Evolve(query string, embed []float64) bool {
 	return changed
 }
 
-// ShouldReuse reports whether query embedding is close enough to reuse
-// (G-pollute callers must still check answer-question relevance).
-func ShouldReuse(c *Cluster, queryEmbed []float64, theta float64) bool {
+// MaxKeyRel is max-over-keys lexical relevance of a query against every
+// level key / retained query (Self-Index s = max_k rel). Returned in [0,1].
+func MaxKeyRel(query string, c *Cluster) float64 {
+	m := 0.0
+	for _, text := range c.AllKeyTexts() {
+		if r := mcs.Coverage(query, []mcs.Sample{{Content: text}}); r > m {
+			m = r
+		}
+	}
+	return m
+}
+
+// ReuseScore is max(query-set embed cosine, max-over-keys lexical). The two
+// arms share a [0,1]-usable scale for Local/hash embeds and real embedders
+// alike; taking the max avoids fusion weights (D.6).
+func ReuseScore(c *Cluster, query string, queryEmbed []float64) float64 {
+	s := Cosine(c.Embed, queryEmbed)
+	if s < 0 {
+		s = 0
+	}
+	if k := MaxKeyRel(query, c); k > s {
+		return k
+	}
+	return s
+}
+
+// ShouldReuse reports whether the query is close enough to reuse under
+// max-over-keys (G-pollute callers must still check answer-question
+// relevance). Deprecated clusters never reuse.
+func ShouldReuse(c *Cluster, query string, queryEmbed []float64, theta float64) bool {
 	if c.Lifecycle == LifecycleDeprecated {
 		return false
 	}
-	return Cosine(c.Embed, queryEmbed) >= theta
+	return ReuseScore(c, query, queryEmbed) >= theta
 }
 
 // CanMerge reports whether a new hit should fold into c rather than spawn a
-// sibling (G-merge).
-func CanMerge(c *Cluster, queryEmbed []float64, mergeTheta float64) bool {
+// sibling (G-merge). Uses the same max-over-keys score as reuse so a
+// cross-topic near-duplicate with one strong key can still merge.
+func CanMerge(c *Cluster, query string, queryEmbed []float64, mergeTheta float64) bool {
 	if c.Lifecycle == LifecycleDeprecated {
 		return false
 	}
-	return Cosine(c.Embed, queryEmbed) >= mergeTheta
+	return ReuseScore(c, query, queryEmbed) >= mergeTheta
 }
 
 func containsString(xs []string, s string) bool {
@@ -355,6 +489,182 @@ func RelevanceGate(query string, c Cluster, minOverlap float64) bool {
 		minOverlap = 0.3
 	}
 	return mcs.Coverage(query, []mcs.Sample{{Content: c.Content + " " + strings.Join(c.Queries, " ")}}) >= minOverlap
+}
+
+// AcceptFold is the Self-Index validation pair (ir-rag A2, zero-LLM) that must
+// pass before loser key material is folded into winner. Unvalidated evolution
+// is net-negative (Self-Index ablation: no acceptance < baseline).
+//
+//	Specificity — each proposed key as a query must retrieve winner in topK.
+//	Separation  — each proposed key sits closer to the winner key set than to
+//	                any competitor key set.
+//
+// Additionally rejects **cross-topic** folds whose numeric claims diverge
+// (128 vs 256, 96 vs 192): those are conflicts to surface, not duplicates —
+// otherwise G1 write-path near-hits pollute conflict fixtures. Same-topic
+// folds still proceed: B8 self-heal must replace a stale claim with the
+// fresh one (replace path, not a union of both numbers).
+// Faithfulness (LLM, 0–3) is endpoint-only (P5), not run here.
+func AcceptFold(winner, loser Cluster, competitors []Cluster, topK int) (bool, string) {
+	if topK <= 0 {
+		topK = 3
+	}
+	if winner.TopicKey != loser.TopicKey {
+		if wa, wb := NumericClaim(winner), NumericClaim(loser); wa != "" && wb != "" && wa != wb {
+			return false, "claims: cross-topic divergent claims " + wa + " vs " + wb
+		}
+	}
+	proposed := proposedKeys(loser)
+	if len(proposed) == 0 {
+		return true, ""
+	}
+	winKeys := keySet(winner)
+	var compKeys [][]string
+	corpus := []Cluster{winner}
+	for _, c := range competitors {
+		if c.ID == winner.ID || c.ID == loser.ID {
+			continue
+		}
+		corpus = append(corpus, c)
+		if ks := keySet(c); len(ks) > 0 {
+			compKeys = append(compKeys, ks)
+		}
+	}
+	for _, k := range proposed {
+		if k == "" {
+			continue
+		}
+		if !specificityOK(k, winner, corpus, topK) {
+			return false, "specificity: key would not retrieve winner within topK"
+		}
+		if !separationOK(k, winKeys, compKeys) {
+			return false, "separation: key closer to competitor keys than to winner"
+		}
+	}
+	return true, ""
+}
+
+// NumericClaim pulls the first decimal number from evidence windows (raw
+// text), falling back to content. Empty when no claim is present — callers
+// treat empty as "compatible".
+func NumericClaim(c Cluster) string {
+	for _, sm := range c.Evidence {
+		if n := firstNumber(sm.Content); n != "" {
+			return n
+		}
+	}
+	return firstNumber(c.Content)
+}
+
+func firstNumber(s string) string {
+	var digits []rune
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+			continue
+		}
+		if len(digits) > 0 {
+			return string(digits)
+		}
+	}
+	return string(digits)
+}
+
+func proposedKeys(loser Cluster) []string {
+	var ks []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			ks = append(ks, s)
+		}
+	}
+	add(loser.TopicKey)
+	for _, k := range loser.TopicKeys {
+		add(k)
+	}
+	for _, q := range loser.Queries {
+		add(q)
+	}
+	for _, lk := range loser.LevelKeys {
+		add(lk.Text)
+	}
+	return ks
+}
+
+func keySet(c Cluster) []string {
+	var ks []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			ks = append(ks, s)
+		}
+	}
+	add(c.TopicKey)
+	for _, k := range c.TopicKeys {
+		add(k)
+	}
+	for _, q := range c.Queries {
+		add(q)
+	}
+	for _, lk := range c.LevelKeys {
+		add(lk.Text)
+	}
+	return ks
+}
+
+func specificityOK(key string, winner Cluster, corpus []Cluster, topK int) bool {
+	type scored struct {
+		id  string
+		rel float64
+	}
+	rank := make([]scored, 0, len(corpus))
+	for _, c := range corpus {
+		rank = append(rank, scored{id: c.ID, rel: keyRel(key, c)})
+	}
+	sort.Slice(rank, func(i, j int) bool {
+		if rank[i].rel != rank[j].rel {
+			return rank[i].rel > rank[j].rel
+		}
+		return rank[i].id < rank[j].id
+	})
+	for i, r := range rank {
+		if r.id == winner.ID {
+			return i < topK
+		}
+	}
+	return false
+}
+
+func separationOK(key string, winKeys []string, compKeys [][]string) bool {
+	win := maxKeyRel(key, winKeys)
+	for _, set := range compKeys {
+		if maxKeyRel(key, set) > win {
+			return false
+		}
+	}
+	return true
+}
+
+func maxKeyRel(key string, keys []string) float64 {
+	m := 0.0
+	for _, k := range keys {
+		if r := keyRel(key, Cluster{Content: k, Queries: []string{k}}); r > m {
+			m = r
+		}
+	}
+	return m
+}
+
+// keyRel is offline relevance of a key against a cluster's surface text
+// (token coverage). Production may swap embedder-based rel; gates use this.
+func keyRel(key string, c Cluster) float64 {
+	text := c.Content + " " + c.Name + " " + strings.Join(c.Queries, " ") + " " + c.TopicKey + " " + strings.Join(c.TopicKeys, " ")
+	for _, lk := range c.LevelKeys {
+		text += " " + lk.Text
+	}
+	return mcs.Coverage(key, []mcs.Sample{{Content: text}})
 }
 
 // Ensure unused import of source stays meaningful for future cites typing.

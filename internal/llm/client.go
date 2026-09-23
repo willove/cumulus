@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
+	"github.com/cumubase/ask/internal/facts"
 	"github.com/cumubase/ask/internal/fast"
 	"github.com/cumubase/ask/internal/mcs"
 	"github.com/cumubase/ask/internal/prompts"
@@ -491,6 +492,75 @@ func ParseMultilevelJSON(raw string, levels int) ([][]string, error) {
 		out = append(out, parsed[fmt.Sprintf("level_%d", i)])
 	}
 	return out, nil
+}
+
+// AigateQuerySimulator implements Self-Index A.2.1 two-call isolation:
+// call 1 abstracts the information need from the raw query; call 2 writes
+// complementary queries from the abstract only (never sees the original
+// wording — prevents copy-the-source leakage). Results pass Jaccard
+// dissimilarity against the origin and already-tried queries.
+type AigateQuerySimulator struct {
+	Client *ChatClient
+	// Tau is the Jaccard keep threshold (candidates with Jac < tau survive).
+	// 0 → facts.FilterDissimilar default 0.5.
+	Tau float64
+}
+
+// Complement returns 0–N rephrasings distinct from origin+tried.
+func (s *AigateQuerySimulator) Complement(ctx context.Context, origin string, tried []string) ([]string, error) {
+	if s == nil || s.Client == nil || strings.TrimSpace(origin) == "" {
+		return nil, nil
+	}
+	raw1, err := s.Client.Complete(ctx, prompts.MustRender(prompts.QueryAbstract, map[string]string{
+		"query": origin,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	need, err := ParseQueryAbstractJSON(raw1)
+	if err != nil || strings.TrimSpace(need) == "" {
+		return nil, err
+	}
+	domain := strings.TrimSpace(os.Getenv("ASK_DOMAIN_HINT"))
+	if domain == "" {
+		domain = "未指定——按通用书面文档处理"
+	}
+	seen := append([]string{}, tried...)
+	raw2, err := s.Client.Complete(ctx, prompts.MustRender(prompts.QueryFromAbstract, map[string]string{
+		"need":   need,
+		"tried":  strings.Join(seen, "、"),
+		"domain": domain,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	cands, err := ParseQueryListJSON(raw2)
+	if err != nil {
+		return nil, err
+	}
+	return facts.FilterDissimilar(origin, tried, cands, s.Tau), nil
+}
+
+// ParseQueryAbstractJSON is exported for frozen prompt regression tests.
+func ParseQueryAbstractJSON(raw string) (string, error) {
+	var parsed struct {
+		Need string `json:"need"`
+	}
+	if err := parseJSON(raw, &parsed); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(parsed.Need), nil
+}
+
+// ParseQueryListJSON is exported for frozen prompt regression tests.
+func ParseQueryListJSON(raw string) ([]string, error) {
+	var parsed struct {
+		Queries []string `json:"queries"`
+	}
+	if err := parseJSON(raw, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Queries, nil
 }
 
 // AigateHistoryRewriter folds dialogue/cluster history into a standalone

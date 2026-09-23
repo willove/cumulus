@@ -15,9 +15,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cumubase/ask/internal/abstain"
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/eval"
@@ -36,20 +39,52 @@ import (
 const judgePass = 7.0
 
 // evalResult is one per-item line in the results JSONL.
+// Token fields are split (LENS Remark 2 / ir-rag 3.2): search vs judge are
+// independent cost centers; judge never rides on the search budget.
 type evalResult struct {
-	ID      string         `json:"id"`
-	Mode    string         `json:"mode,omitempty"`
-	Loops   int            `json:"loops,omitempty"`
-	Widened int            `json:"widened,omitempty"`
-	Conf    float64        `json:"conf,omitempty"`
-	Calls   int            `json:"calls,omitempty"`
-	Tokens  int64          `json:"tokens,omitempty"`
-	Err     string         `json:"err,omitempty"`
-	Cites   []string       `json:"cites,omitempty"` // citation business keys — per-item diagnosis
-	Eval    eval.ItemScore `json:"eval"`
-	Judge   string         `json:"judge,omitempty"`
-	CB      eval.ItemScore `json:"closed_book"`
-	CBJudge string         `json:"cb_judge,omitempty"`
+	ID      string  `json:"id"`
+	Mode    string  `json:"mode,omitempty"`
+	Loops   int     `json:"loops,omitempty"`
+	Widened int     `json:"widened,omitempty"`
+	Conf    float64 `json:"conf,omitempty"`
+	Calls   int     `json:"calls,omitempty"`
+	Tokens  int64   `json:"tokens,omitempty"` // search path only (pre-judge)
+	// SearchTokens aliases the search-path spend; JudgeTokens is judge_correct
+	// (system arm + closed-book arm when both run). Total = Search+Judge.
+	SearchTokens int64 `json:"search_tokens,omitempty"`
+	JudgeTokens  int64 `json:"judge_tokens,omitempty"`
+	// RejectedProposals counts AcceptFold refusals on the write path for this
+	// item (Self-Index cost accounting includes rejected proposals).
+	RejectedProposals int            `json:"rejected_proposals,omitempty"`
+	Err               string         `json:"err,omitempty"`
+	Cites             []string       `json:"cites,omitempty"` // citation business keys — per-item diagnosis
+	Eval              eval.ItemScore `json:"eval"`
+	Judge             string         `json:"judge,omitempty"`
+	CB                eval.ItemScore `json:"closed_book"`
+	CBJudge           string         `json:"cb_judge,omitempty"`
+	// Admission ceiling (ir-rag 1.5 / LENS Remark 1): did gold enter the
+	// ranked/widen universe this run actually scored?
+	GoldInAdmitted bool `json:"gold_in_admitted,omitempty"`
+	// GoldInCorpus: gold business_key exists among active sources at run time.
+	GoldInCorpus bool `json:"gold_in_corpus,omitempty"`
+	// AbstainP / AbstainAction echo the zero-LLM head when wired (3.1).
+	AbstainP      float64 `json:"abstain_p,omitempty"`
+	AbstainAction string  `json:"abstain_action,omitempty"`
+}
+
+// NRBreakdown splits not_retrieved items into admission-ceiling vs
+// post-admission failure (ir-rag 1.5). Fields only count items whose
+// taxonomy class is not_retrieved.
+type NRBreakdown struct {
+	NotRetrieved int `json:"not_retrieved"`
+	// GoldMissingFromCorpus: gold key never present in active sources.
+	GoldMissingFromCorpus int `json:"gold_missing_from_corpus"`
+	// GoldNotAdmitted: gold in corpus but outside ranked/widen scored set
+	// (Remark 1 ceiling — more LLM ranking cannot buy it back).
+	GoldNotAdmitted int `json:"gold_not_admitted"`
+	// GoldAdmittedNoCite: gold was scored but EvRec still false (wrong window
+	// kept / citation mapping), i.e. discovery reached it and failed later.
+	GoldAdmittedNoCite int `json:"gold_admitted_no_cite"`
 }
 
 // evalReport is the aggregate scorecard printed after every run.
@@ -61,6 +96,13 @@ type evalReport struct {
 	Modes      map[string]int `json:"modes"`
 	Resumed    int            `json:"resumed"`
 	Judged     bool           `json:"judged"`
+	Frozen     eval.Frozen    `json:"frozen"`
+	// Cost split (3.2): search_tokens / judge_tokens / rejected_proposals.
+	SearchTokens      int64 `json:"search_tokens"`
+	JudgeTokens       int64 `json:"judge_tokens"`
+	RejectedProposals int   `json:"rejected_proposals"`
+	// NotRetrieved admission breakdown (1.5).
+	NRBreakdown NRBreakdown `json:"nr_breakdown"`
 }
 
 // evalRun processes items against the live pipeline and appends one line per
@@ -71,6 +113,10 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	items, err := readEvalItems(file)
 	if err != nil {
 		return err
+	}
+	var itemsRaw []byte
+	if raw, rerr := os.ReadFile(file); rerr == nil {
+		itemsRaw = raw
 	}
 	done, err := readDoneIDs(outPath)
 	if err != nil {
@@ -105,6 +151,23 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	dE := deep.New(kbE, deep.NewCumuStore(c, ns.Coll(namespace, "ask_conflicts")))
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
+	// Independent search token budget (3.2 / LENS Remark 2).
+	if stack.chat != nil {
+		dE.TokensUsed = stack.chat.TotalTokens
+		if v := os.Getenv("ASK_SEARCH_TOKEN_BUDGET"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				dE.TokenBudget = n
+			}
+		}
+		if os.Getenv("ASK_ABSTAIN") == "1" {
+			dE.Abstain = abstain.Default()
+		}
+		if os.Getenv("ASK_QUERY_SIM") == "1" {
+			dE.QuerySim = &llm.AigateQuerySimulator{Client: stack.chat}
+		}
+	} else if os.Getenv("ASK_ABSTAIN") == "1" {
+		dE.Abstain = abstain.Default()
+	}
 	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
 	var refiner *llm.AigateKeywordRefiner
 	if stack.chat != nil {
@@ -165,8 +228,33 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	if err != nil {
 		return err
 	}
-	printJSON(aggregateResults(all, judgeOn && stack.chat != nil, resumed))
+	{
+		r := aggregateResults(all, judgeOn && stack.chat != nil, resumed)
+		// A6: bind the scorecard to items + corpus (active sources) + config
+		// so an ablation row cannot silently change the sample set.
+		r.Frozen = eval.Freeze(itemsRaw, corpusFingerprint(list), []byte(evalConfig(prior, l1pre, judgeOn, namespace)), 0)
+		printJSON(r)
+	}
 	return nil
+}
+
+// corpusFingerprint is a deterministic sha over sorted source IDs and bodies.
+func corpusFingerprint(list []source.Source) []byte {
+	cp := append([]source.Source(nil), list...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i].ID < cp[j].ID })
+	var b []byte
+	for _, s := range cp {
+		b = append(b, s.ID...)
+		b = append(b, 0)
+		b = append(b, s.Body...)
+		b = append(b, 0)
+	}
+	return b
+}
+
+// evalConfig captures knobs that change which path ran (prior/L1/judge/ns).
+func evalConfig(prior, l1pre, judge bool, namespace string) string {
+	return fmt.Sprintf("prior=%v;l1pre=%v;judge=%v;ns=%s", prior, l1pre, judge, namespace)
 }
 
 // narrowByKNN narrows the active-source list to the body_embed KNN hits for
@@ -189,11 +277,18 @@ func narrowByKNN(ctx context.Context, c *client.Client, embedFn ingest.EmbedderF
 }
 
 // evalOne runs the system pipeline plus the closed-book contrast for one item.
+// Token accounting is split: search spend is sealed before any judge call so
+// judge/closed-book tokens never inflate the search budget (3.2).
+// keyByID maps internal IDs → business keys for Ev.Rec and admission checks.
 func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, it eval.Item) evalResult {
 	rec := evalResult{ID: it.ID}
 	var tokBefore int64
+	rejBefore := 0
 	if chat != nil {
 		tokBefore = chat.TotalTokens()
+	}
+	if dE.KB != nil {
+		rejBefore = dE.KB.RejectedProposals
 	}
 	res, err := dE.Ask(ctx, it.Query, list)
 	if err != nil {
@@ -205,6 +300,44 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 		rec.Widened = res.Widened
 		rec.Conf = res.Answer.Confidence
 		rec.Calls = res.Answer.LLMCalls
+		rec.AbstainP = res.AbstainP
+		rec.AbstainAction = res.AbstainAction
+	}
+	// 1.5: was gold in the active corpus, and was it among scored sources?
+	corpusKeys := map[string]bool{}
+	for _, s := range list {
+		if s.BusinessKey != "" {
+			corpusKeys[s.BusinessKey] = true
+		}
+	}
+	admittedKeys := map[string]bool{}
+	for _, id := range res.Admitted {
+		if k := keyByID[id]; k != "" {
+			admittedKeys[k] = true
+		}
+	}
+	for _, g := range it.Gold {
+		if g == "" {
+			continue
+		}
+		if corpusKeys[g] || corpusKeys[strings.ToLower(g)] {
+			rec.GoldInCorpus = true
+		}
+		if admittedKeys[g] || admittedKeys[strings.ToLower(g)] {
+			rec.GoldInAdmitted = true
+		}
+		// Cites may already carry business keys.
+		for _, c := range res.Citations.Refs {
+			if k := keyByID[c.SourceID]; k == g {
+				rec.GoldInAdmitted = true
+			}
+		}
+	}
+	if dE.KB != nil {
+		rec.RejectedProposals = dE.KB.RejectedProposals - rejBefore
+		if rec.RejectedProposals < 0 {
+			rec.RejectedProposals = 0
+		}
 	}
 	pred := predictionOf(res, keyByID)
 	rec.Eval = eval.Score(it, pred)
@@ -214,9 +347,11 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 		}
 	}
 	if chat != nil {
-		rec.Tokens = chat.TotalTokens() - tokBefore
+		rec.SearchTokens = chat.TotalTokens() - tokBefore
+		rec.Tokens = rec.SearchTokens
 	}
 	if judgeOn && chat != nil {
+		j0 := chat.TotalTokens()
 		if ok, why, jerr := judgeAnswer(ctx, chat, it.Query, it.Answer, res.Answer.Summary); jerr != nil {
 			fmt.Fprintf(os.Stderr, "eval-run %s: judge: %v\n", it.ID, jerr)
 		} else if ok {
@@ -225,20 +360,25 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 		} else {
 			rec.Judge = why
 		}
+		rec.JudgeTokens += chat.TotalTokens() - j0
 	}
 	// Closed-book contrast: answer from model memory only, no retrieval.
+	// CB generation tokens are neither search nor judge — left out of the
+	// split so SearchTokens stays a pure retrieval cost line.
 	cbAns := ""
 	if chat != nil {
 		cbAns, _ = chat.Complete(ctx, "仅凭你自己的记忆回答下面的问题，不要编造；不知道就只回答「不知道」。问题："+it.Query)
 	}
 	rec.CB = eval.ClosedBook(it, cbAns)
 	if judgeOn && chat != nil && strings.TrimSpace(cbAns) != "" {
+		j0 := chat.TotalTokens()
 		if ok, why, jerr := judgeAnswer(ctx, chat, it.Query, it.Answer, cbAns); jerr == nil {
 			if ok {
 				rec.CB.Correct = true
 			}
 			rec.CBJudge = why
 		}
+		rec.JudgeTokens += chat.TotalTokens() - j0
 	}
 	return rec
 }
@@ -369,6 +509,21 @@ func aggregateResults(lines []evalResult, judged bool, resumed int) evalReport {
 		sys = append(sys, r.Eval)
 		cb = append(cb, r.CB)
 		rep.Modes[r.Mode]++
+		rep.SearchTokens += r.SearchTokens
+		rep.JudgeTokens += r.JudgeTokens
+		rep.RejectedProposals += r.RejectedProposals
+		// 1.5: only items that land in not_retrieved feed the admission split.
+		if eval.Classify(r.Eval) == "not_retrieved" {
+			rep.NRBreakdown.NotRetrieved++
+			switch {
+			case !r.GoldInCorpus:
+				rep.NRBreakdown.GoldMissingFromCorpus++
+			case !r.GoldInAdmitted:
+				rep.NRBreakdown.GoldNotAdmitted++
+			default:
+				rep.NRBreakdown.GoldAdmittedNoCite++
+			}
+		}
 	}
 	rep.N = len(lines)
 	rep.System = eval.Aggregate(sys)

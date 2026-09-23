@@ -25,6 +25,14 @@ type Sample struct {
 	Reasoning string   `json:"reasoning"`
 }
 
+// ScoreFailed marks an observation failure (LLM error / unparseable) — it must
+// never be conflated with "judged irrelevant" (score 0). Failed samples are
+// excluded from kept/covers/confidence (ir-rag A3).
+const ScoreFailed = -1.0
+
+// Failed reports whether the sample's score is an observation failure.
+func (s Sample) Failed() bool { return s.Score < 0 }
+
 // Scorer rates one sample against the query (0-10 scale).
 type Scorer interface {
 	Score(ctx context.Context, query string, s Sample) (score float64, reasoning string, err error)
@@ -363,7 +371,10 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 		if fa != nil && len(s.FactHints) > 0 {
 			sc, why, covers, err := fa.ScoreWithFacts(ctx, query, s.FactHints, sm)
 			if err != nil {
-				return nil, err
+				// A3: observation failure ≠ judged irrelevant.
+				sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
+				out = append(out, sm)
+				continue
 			}
 			sm.Score, sm.Reasoning, sm.Covers = sc, why, covers
 			out = append(out, sm)
@@ -371,7 +382,9 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 		}
 		sc, why, err := s.Scorer.Score(ctx, query, sm)
 		if err != nil {
-			return nil, err
+			sm.Score, sm.Reasoning = ScoreFailed, "scorer error: "+err.Error()
+			out = append(out, sm)
+			continue
 		}
 		sm.Score, sm.Reasoning = sc, why
 		out = append(out, sm)

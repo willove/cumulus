@@ -23,9 +23,10 @@ const DefaultTidyTheta = 0.55
 
 // TidyPair records one fold (or, in dry-run, one fold that would happen).
 type TidyPair struct {
-	Winner string  `json:"winner"` // surviving cluster (older CreatedAt wins)
-	Loser  string  `json:"loser"`  // folded cluster, deleted unless dry-run
-	Sim    float64 `json:"sim"`    // cosine that triggered the fold
+	Winner string  `json:"winner"`       // surviving cluster (older CreatedAt wins)
+	Loser  string  `json:"loser"`        // folded cluster, deleted unless dry-run
+	Sim    float64 `json:"sim"`          // pure cosine that cleared theta
+	Co     float64 `json:"co,omitempty"` // co_occur profile weight (A4; ranking only)
 }
 
 // TidyReport summarizes one sweep. Lifecycle counts are the population
@@ -34,6 +35,7 @@ type TidyPair struct {
 type TidyReport struct {
 	Scanned           int            `json:"scanned"`
 	Merged            int            `json:"merged"`
+	Rejected          int            `json:"rejected"` // AcceptFold refused (A2)
 	SkippedContested  int            `json:"skipped_contested"`
 	SkippedDeprecated int            `json:"skipped_deprecated"`
 	Lifecycle         map[string]int `json:"lifecycle"`
@@ -76,7 +78,15 @@ func QuerySetEmbed(ctx context.Context, emb Embedder, queries []string) ([]float
 // clusters are never folded (a conflict edge or a retire decision outranks a
 // cosine); they are counted, not silently skipped. maxMerges bounds the work
 // (0 = unlimited).
+// Tidy is the compatibility wrapper (no co_occur preference).
 func Tidy(ctx context.Context, st Store, emb Embedder, theta float64, dryRun bool, maxMerges int) (TidyReport, error) {
+	return TidyWithCo(ctx, st, emb, theta, dryRun, maxMerges, nil)
+}
+
+// TidyWithCo is Tidy plus an optional co_occur weight hook (ir-rag A4):
+// pairs with a co-retrieval profile rank above bare cosine ties so diagnosis
+// stays comparative, not single-document.
+func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryRun bool, maxMerges int, coWeight func(a, b string) float64) (TidyReport, error) {
 	rep := TidyReport{Lifecycle: map[string]int{}, DryRun: dryRun}
 	if theta <= 0 {
 		theta = DefaultTidyTheta
@@ -103,6 +113,7 @@ func Tidy(ctx context.Context, st Store, emb Embedder, theta float64, dryRun boo
 		alive[c.ID] = true
 	}
 	sort.Slice(work, func(i, j int) bool { return work[i].ID < work[j].ID })
+	rejectedPair := map[string]bool{}
 
 	for {
 		if maxMerges > 0 && rep.Merged >= maxMerges {
@@ -120,12 +131,21 @@ func Tidy(ctx context.Context, st Store, emb Embedder, theta float64, dryRun boo
 				if !alive[work[j].ID] {
 					continue
 				}
+				if rejectedPair[pairKey(work[i].ID, work[j].ID)] {
+					continue
+				}
 				sim := Cosine(work[i].Embed, work[j].Embed)
 				if sim < theta {
 					continue
 				}
 				w, l := orderByAge(work[i], work[j])
 				cand := &TidyPair{Winner: w.ID, Loser: l.ID, Sim: sim}
+				if coWeight != nil {
+					if cw := coWeight(w.ID, l.ID); cw > 0 {
+						// Profile-backed pairs win cosine ties and near-ties.
+						cand.Co = cw
+					}
+				}
 				if best == nil || betterPair(*cand, *best) {
 					best, bestWI, bestLI = cand, i, j
 				}
@@ -135,6 +155,13 @@ func Tidy(ctx context.Context, st Store, emb Embedder, theta float64, dryRun boo
 			break
 		}
 		winner, loser := orderByAge(work[bestWI], work[bestLI])
+		// A2: unvalidated evolution is net-negative — refuse the fold.
+		if ok, why := AcceptFold(winner, loser, work, 3); !ok {
+			_ = why
+			rejectedPair[pairKey(best.Winner, best.Loser)] = true
+			rep.Rejected++
+			continue
+		}
 		rep.Pairs = append(rep.Pairs, *best)
 		if dryRun {
 			break // one exemplar pair is enough to show what would happen
@@ -158,16 +185,31 @@ func Tidy(ctx context.Context, st Store, emb Embedder, theta float64, dryRun boo
 	return rep, nil
 }
 
-// betterPair orders candidates: higher sim first, then smaller winner id,
-// then smaller loser id.
+func pairKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + "|" + b
+}
+
+// betterPair orders candidates: higher (cosine + co bonus) first, then pure
+// sim, then smaller winner id, then smaller loser id.
 func betterPair(a, b TidyPair) bool {
-	if a.Sim != b.Sim {
-		return a.Sim > b.Sim
+	rank := func(p TidyPair) (float64, float64, string, string) {
+		return p.Sim + 0.05*p.Co, p.Sim, p.Winner, p.Loser
 	}
-	if a.Winner != b.Winner {
-		return a.Winner < b.Winner
+	ar, as, aw, al := rank(a)
+	br, bs, bw, bl := rank(b)
+	if ar != br {
+		return ar > br
 	}
-	return a.Loser < b.Loser
+	if as != bs {
+		return as > bs
+	}
+	if aw != bw {
+		return aw < bw
+	}
+	return al < bl
 }
 
 // orderByAge picks the survivor: older CreatedAt wins (stable accumulation),
@@ -209,6 +251,13 @@ func foldInto(winner, loser *Cluster) {
 		}
 	}
 	winner.TopicKeys = aliases
+
+	// Multi-level keys: survivor keeps its own; loser's derived keys are
+	// additive (max-over-keys only benefits from a larger set). Identity
+	// TopicKey of the loser is already folded into TopicKeys above.
+	for _, lk := range loser.LevelKeys {
+		winner.addLevelKey(lk.Level, lk.Text)
+	}
 
 	// Legacy samples carry sampling methods, not document IDs. Normalize both
 	// sides before comparing spans, without mutating either input evidence slice.

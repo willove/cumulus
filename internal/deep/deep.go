@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cumubase/ask/internal/abstain"
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/facts"
 	"github.com/cumubase/ask/internal/fast"
@@ -142,9 +143,20 @@ type Result struct {
 	Session string `json:"session,omitempty"`
 	// B9 budget accounting: LatencyMS is always filled; Tokens carries the
 	// upstream-reported total (0 on the offline stub path — the CLI fills it
-	// from the chat client after Ask returns).
+	// from the chat client after Ask returns). BudgetHit marks an independent
+	// token-budget stop (judge tokens never enter TokenBudget).
 	Tokens    int64 `json:"tokens,omitempty"`
 	LatencyMS int64 `json:"latency_ms,omitempty"`
+	BudgetHit bool  `json:"budget_hit,omitempty"`
+	// Admitted lists source IDs this Ask actually scored (admission + widen
+	// + self-correct). ir-rag 1.5: not-retrieved gold outside this set is a
+	// Remark-1 ceiling, not a synthesis failure.
+	Admitted []string `json:"admitted,omitempty"`
+	// AbstainP is the zero-LLM abstention head's fail probability when wired
+	// (ir-rag 3.1). Recorded only; thresholds are operator-owned.
+	AbstainP float64 `json:"abstain_p,omitempty"`
+	// AbstainAction is "" | "deep" | "refuse" — what the head recommended.
+	AbstainAction string `json:"abstain_action,omitempty"`
 }
 
 // Engine runs FAST and escalates into DEEP when confidence is thin.
@@ -176,6 +188,43 @@ type Engine struct {
 	// Widen re-admits candidate files mid-search under the same contract
 	// (Sirchmunk ReAct 对齐；nil 关闭扩征，离线门可用).
 	Widen func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error)
+	// TokenBudget is an independent stop (LENS Def 3 / Remark 2): when > 0
+	// and TokensUsed is wired, the DEEP loop checks remaining budget before
+	// scoring each admitted file. Judge tokens never enter this budget.
+	TokenBudget int64
+	TokensUsed  func() int64
+	// BudgetHit reports the last Ask stopped because TokenBudget was spent.
+	BudgetHit bool
+	// Abstain is an optional zero-LLM failure head (ir-rag 3.1 / RCS idea).
+	// nil = off (no behavior change). When set, features from the current
+	// search state produce p_fail; "deep" forces escalation, "refuse" marks
+	// the answer refused (and must not persist knowledge).
+	Abstain *abstain.Head
+	// QuerySim is an optional two-call complementary-query generator
+	// (Self-Index A.2.1 / ir-rag 2.4). nil = self-correction uses only
+	// MissingQueries. Non-nil: complements join the resample pool after
+	// Jaccard filtering against origin + tried fact queries.
+	QuerySim QuerySimulator
+}
+
+// QuerySimulator produces complementary phrasings without seeing the raw
+// original in the second call (A.2.1 isolation). Implemented by
+// llm.AigateQuerySimulator in production; offline stubs in tests.
+type QuerySimulator interface {
+	Complement(ctx context.Context, origin string, tried []string) ([]string, error)
+}
+
+// admissionIDs returns the sorted-stable list of source IDs the loop tried.
+func admissionIDs(tried map[string]bool) []string {
+	if len(tried) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tried))
+	for id := range tried {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // HistoryRewriter rewrites a follow-up query against history.
@@ -287,6 +336,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
+	e.BudgetHit = false
 	res = Result{
 		Answer:     base.Answer,
 		ClusterID:  base.ClusterID,
@@ -312,8 +362,33 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	// Single-fact paraphrases may miss lexical coverage despite a validated prior.
 	need := base.Answer.Skipped || base.Answer.Refused || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
 		(!res.Cover.Complete && (!base.Reused || len(fx) > 1))
+	// Zero-LLM abstention head (ir-rag 3.1): structural features only; nil
+	// head keeps the historical escalate/refuse gates unchanged.
+	if e.Abstain != nil {
+		top := 0.0
+		for _, sm := range base.Answer.Samples {
+			if sm.Score > top {
+				top = sm.Score
+			}
+		}
+		f := abstain.FromAnswer(query, len(sources), len(base.Answer.Samples), top,
+			len(res.Cover.Missing), base.Answer.Confidence,
+			base.Answer.Skipped, base.Answer.Refused)
+		p, act := e.Abstain.Decide(f)
+		res.AbstainP, res.AbstainAction = p, act
+		if act == "deep" {
+			need = true
+		}
+		if act == "refuse" && !need {
+			// Head already sure this is a fail — do not trust a thin FAST hit.
+			need = true
+		}
+	}
 	if !need {
 		res.Citations.Legend = legend(res.Citations, false)
+		if base.Answer.SourceID != "" {
+			res.Admitted = []string{base.Answer.SourceID}
+		}
 		return res, nil
 	}
 
@@ -322,7 +397,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	// 文档族亲缘: the FAST answer's source votes for its family — answers
 	// cluster within a family (11/13 failures were same-family near-misses).
 	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, sources)
-	deepAns, cover, loops, wid, sc, err := e.runDeep(ctx, query, sources, affinity)
+	deepAns, cover, loops, wid, sc, admitted, err := e.runDeep(ctx, query, sources, affinity)
 	if err != nil {
 		return Result{}, err
 	}
@@ -331,6 +406,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	res.Cover = cover
 	res.SelfCorrected = sc
 	res.Widened = wid
+	res.Admitted = admitted
 	res.Citations = BuildCitations(query, deepAns, sources)
 	// Mark unresolved refs when DEEP still cannot pin a quote.
 	unresolved := false
@@ -342,6 +418,31 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	}
 	res.Citations.Legend = legend(res.Citations, unresolved)
 
+	// Abstention after a full search: refuse means "do not treat this as
+	// knowledge" — skip Persist so G-pollute stays clean.
+	if e.Abstain != nil {
+		top := 0.0
+		for _, sm := range deepAns.Samples {
+			if sm.Score > top {
+				top = sm.Score
+			}
+		}
+		f := abstain.FromAnswer(query, len(sources), len(deepAns.Samples), top,
+			len(cover.Missing), deepAns.Confidence,
+			deepAns.Skipped, deepAns.Refused)
+		p, act := e.Abstain.Decide(f)
+		res.AbstainP, res.AbstainAction = p, act
+		if act == "refuse" {
+			res.Answer.Refused = true
+			if strings.TrimSpace(res.Answer.Summary) == "" || res.Answer.Skipped {
+				res.Answer.Summary = "证据不足，暂不作答"
+				res.Answer.Skipped = true
+			}
+			res.BudgetHit = e.BudgetHit
+			return res, nil
+		}
+	}
+
 	sub, err := e.KB.Persist(ctx, deepAns, sources)
 	if err != nil {
 		return Result{}, err
@@ -352,22 +453,166 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	res.Merged = sub.Merged
 	res.Reused = false
 	res.Sampled = len(deepAns.Samples)
+	res.BudgetHit = e.BudgetHit
 	return res, nil
 }
 
 // topKeeps sorts kept windows by score and truncates to the synthesis budget.
+// Failed observations are dropped; overlapping/adjacent windows on the same
+// source are merged first (GrepRAG §5.6: information density > rerank).
 func topKeeps(kept []mcs.Sample) []mcs.Sample {
-	sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
-	if len(kept) > maxKeepWindows {
-		kept = kept[:maxKeepWindows]
+	return topKeepsWith(kept, nil)
+}
+
+// topKeepsWith is topKeeps plus optional body-aware boundary expansion (A5).
+func topKeepsWith(kept []mcs.Sample, sources []source.Source) []mcs.Sample {
+	live := kept[:0:0]
+	for _, sm := range kept {
+		if sm.Failed() {
+			continue
+		}
+		live = append(live, sm)
 	}
-	return kept
+	sort.Slice(live, func(i, j int) bool { return live[i].Score > live[j].Score })
+	live = consolidateWindows(live)
+	if sources != nil {
+		live = expandWindows(live, sources)
+		live = consolidateWindows(live)
+	}
+	sort.Slice(live, func(i, j int) bool { return live[i].Score > live[j].Score })
+	if len(live) > maxKeepWindows {
+		live = live[:maxKeepWindows]
+	}
+	return live
+}
+
+// mergeGap is the maximum rune gap between two windows on the same source
+// before they stop being "adjacent" (GrepRAG merges overlapping OR adjacent
+// slices into one continuous block).
+const mergeGap = 1
+
+// consolidateWindows merges overlapping or adjacent windows on the same
+// source into continuous spans (GrepRAG structure-aware dedup). Score takes
+// the max, covers are unioned. Input need not be sorted; output is by
+// (source, start). Content keeps the longest original slice — citations still
+// pin (source, start, end).
+func consolidateWindows(kept []mcs.Sample) []mcs.Sample {
+	if len(kept) <= 1 {
+		return kept
+	}
+	work := append([]mcs.Sample(nil), kept...)
+	sort.Slice(work, func(i, j int) bool {
+		if work[i].Source != work[j].Source {
+			return work[i].Source < work[j].Source
+		}
+		if work[i].Start != work[j].Start {
+			return work[i].Start < work[j].Start
+		}
+		return work[i].End < work[j].End
+	})
+	out := work[:0]
+	for _, sm := range work {
+		if len(out) == 0 {
+			out = append(out, sm)
+			continue
+		}
+		last := &out[len(out)-1]
+		if last.Source != sm.Source || sm.Start > last.End+mergeGap {
+			out = append(out, sm)
+			continue
+		}
+		if sm.End > last.End {
+			last.End = sm.End
+		}
+		if sm.Start < last.Start {
+			last.Start = sm.Start
+		}
+		if sm.Score > last.Score {
+			last.Score = sm.Score
+			if sm.Arm != "" {
+				last.Arm = sm.Arm
+			}
+		}
+		last.Covers = unionStrings(last.Covers, sm.Covers)
+		if len(sm.Content) > len(last.Content) {
+			last.Content = sm.Content
+		}
+		if len(sm.Reasoning) > len(last.Reasoning) {
+			last.Reasoning = sm.Reasoning
+		}
+	}
+	return out
+}
+
+// expandWindows grows each kept span by expandMargin runes against the live
+// body (LENS §4.4 / GrepRAG: expand boundaries for readable continuous blocks
+// while the span stays the source of truth for citations).
+const expandMargin = 24
+
+func expandWindows(kept []mcs.Sample, sources []source.Source) []mcs.Sample {
+	if len(kept) == 0 || len(sources) == 0 {
+		return kept
+	}
+	byID := map[string]source.Source{}
+	for _, s := range sources {
+		byID[s.ID] = s
+	}
+	out := append([]mcs.Sample(nil), kept...)
+	for i := range out {
+		src, ok := byID[out[i].Source]
+		if !ok {
+			continue
+		}
+		runes := []rune(src.Body)
+		start := out[i].Start - expandMargin
+		if start < 0 {
+			start = 0
+		}
+		end := out[i].End + expandMargin
+		if end > len(runes) {
+			end = len(runes)
+		}
+		if start >= end {
+			continue
+		}
+		if start != out[i].Start || end != out[i].End {
+			out[i].Start, out[i].End = start, end
+			out[i].Content = string(runes[start:end])
+		}
+	}
+	return out
+}
+
+func unionStrings(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // runDeep is the ReAct-shaped loop with per-fact coverage (LENS B1/B2):
 // sample sources → evaluate fact coverage → bounded self-correction on the
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, error) {
+// Returns admitted source IDs (every file the loop scored) for ir-rag 1.5
+// not-retrieved decomposition.
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, error) {
 	if affinity == nil {
 		affinity = map[string]bool{}
 	}
@@ -435,6 +680,17 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			break
 		}
 		tried[s.ID] = true
+		// Independent token stop (LENS Def 3): check BEFORE scoring this
+		// file so an exhausted budget never starts another oracle batch.
+		if e.TokenBudget > 0 && e.TokensUsed != nil {
+			if used := e.TokensUsed(); used >= e.TokenBudget {
+				e.BudgetHit = true
+				if e.Verbose != nil {
+					e.Verbose("token budget hit: used=%d budget=%d", used, e.TokenBudget)
+				}
+				break
+			}
+		}
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		if err != nil {
 			if e.Verbose != nil {
@@ -483,8 +739,19 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 		correctUsed := 0
+		// 2.4: MissingQueries first, then two-call complements (Jaccard-filtered)
+		// so self-correction is not locked to the original wording.
+		mqs := facts.MissingQueries(fx, rep)
+		if e.QuerySim != nil {
+			triedQ := make([]string, 0, len(mqs)+1)
+			triedQ = append(triedQ, query)
+			triedQ = append(triedQ, mqs...)
+			if extra, err := e.QuerySim.Complement(ctx, query, triedQ); err == nil && len(extra) > 0 {
+				mqs = append(mqs, facts.FilterDissimilar(query, triedQ, extra, 0)...)
+			}
+		}
 	outer_correct:
-		for _, mq := range facts.MissingQueries(fx, rep) {
+		for _, mq := range mqs {
 			for _, s := range order {
 				if correctUsed >= correctBudget {
 					break outer_correct
@@ -564,15 +831,15 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 
 	loops++
 	if bestSrc.ID == "" || len(kept) == 0 {
-		kept = topKeeps(kept)
+		kept = topKeepsWith(kept, sources)
 		rep = report(kept)
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
 			Summary: "深度检索仍证据不足",
-		}, rep, loops, widened, selfCorrected, nil
+		}, rep, loops, widened, selfCorrected, admissionIDs(tried), nil
 	}
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
-	kept = topKeeps(kept)
+	kept = topKeepsWith(kept, sources)
 	rep = report(kept)
 	cov := mcs.Coverage(query, kept)
 	mean := 0.0
@@ -658,7 +925,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				}
 			}
 			if widened > 0 {
-				kept = topKeeps(kept)
+				kept = topKeepsWith(kept, sources)
 				rep = report(kept)
 				cov = mcs.Coverage(query, kept)
 				mean = 0.0
@@ -695,7 +962,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 	}
-	return best, rep, loops, widened, selfCorrected, nil
+	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), nil
 }
 
 // render prefers the production Synthesizer (synthesize_roi) and degrades to
@@ -757,26 +1024,7 @@ func DetectConflict(ctx context.Context, st ConflictStore, a, b cluster.Cluster)
 // (raw source text), falling back to the rendered summary — summary offsets
 // like "[0,21)" are not claims and must not win.
 func claimOf(c cluster.Cluster) string {
-	for _, sm := range c.Evidence {
-		if n := extractNumber(sm.Content); n != "" {
-			return n
-		}
-	}
-	return extractNumber(c.Content)
-}
-
-func extractNumber(s string) string {
-	var digits []rune
-	for _, r := range s {
-		if r >= '0' && r <= '9' {
-			digits = append(digits, r)
-			continue
-		}
-		if len(digits) > 0 {
-			return string(digits)
-		}
-	}
-	return string(digits)
+	return cluster.NumericClaim(c)
 }
 
 // BuildCitations maps answer samples back to source spans (门 D: 引用可点回原文).

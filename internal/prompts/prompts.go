@@ -21,6 +21,8 @@ const (
 	SynthesizeROI      = "synthesize_roi"
 	JudgeCorrect       = "judge_correct"
 	KeywordsRefine     = "keywords_refine"
+	QueryAbstract      = "query_abstract"
+	QueryFromAbstract  = "query_from_abstract"
 )
 
 // Load returns the raw markdown body of a prompt asset.

@@ -85,15 +85,23 @@ func TestTidyPreservesMultiSourceEvidenceAndTopicReuse(t *testing.T) {
 	a := source.New("A", "md", "", "a", "zh", "连接池最大 128。", nil)
 	b := source.New("B", "md", "", "b", "zh", "连接池上限 128。", nil)
 	q1, q2 := "连接池最大连接数是多少", "连接池最大连接数上限是多少"
+	// Seed two sibling clusters (one source each) with G1 write-path fold
+	// off, so THIS test owns the multi-source union via tidy. ReuseTheta=2
+	// empties crossTopicNear; each new topic still creates its own cluster.
+	e.ReuseTheta = 2.0
 	for i, q := range []string{q1, q2} {
 		r, err := e.Ask(ctx, q, []source.Source{[]source.Source{a, b}[i]})
 		if err != nil || !r.Persisted {
 			t.Fatalf("fixture must persist: %+v, %v", r, err)
 		}
+		if r.Merged {
+			t.Fatalf("seed must not cross-merge (ReuseTheta=2): %+v", r)
+		}
 	}
+	e.ReuseTheta = DefaultReuseTheta
 	rep, err := cluster.Tidy(ctx, st, emb, 0, false, 0)
 	if err != nil || rep.Merged != 1 {
-		t.Fatalf("expected a fold: %+v, %v", rep, err)
+		t.Fatalf("expected a tidy fold: %+v, %v", rep, err)
 	}
 	for _, q := range []string{q1, q2, q1, q2} {
 		r, err := e.Ask(ctx, q, []source.Source{a, b})

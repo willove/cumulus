@@ -14,6 +14,7 @@ import (
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/eval"
+	"github.com/cumubase/ask/internal/graph"
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/minilm"
@@ -445,7 +446,9 @@ func main() {
 			// The winner's embed is recomputed from its merged query set —
 			// with the SAME embedder the search stack uses (minilm/aigate in
 			// production), never a different one, or reuse geometry drifts.
-			rep, err := cluster.Tidy(ctx, store, newProdStack().emb, *theta, *dry, *maxMerges)
+			edgeStore := graph.NewCumuStore(c, edgesColl)
+			co := func(a, b string) float64 { return graph.CoOccurWeight(ctx, edgeStore, a, b) }
+			rep, err := cluster.TidyWithCo(ctx, store, newProdStack().emb, *theta, *dry, *maxMerges, co)
 			if err != nil {
 				fatal(err)
 			}

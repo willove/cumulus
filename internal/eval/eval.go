@@ -5,6 +5,8 @@
 package eval
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"strings"
 )
@@ -36,6 +38,35 @@ type ItemScore struct {
 	Answered bool   `json:"answered"` // a non-empty answer was produced at all
 }
 
+// Frozen binds a scoreboard to the exact artifacts it ran on (LENS A.6):
+// items / corpus / config checksums so an ablation row cannot silently change
+// the sample set (ir-rag A6).
+type Frozen struct {
+	ItemsSHA  string `json:"items_sha"`
+	CorpusSHA string `json:"corpus_sha,omitempty"`
+	ConfigSHA string `json:"config_sha,omitempty"`
+	OrderSeed int    `json:"order_seed,omitempty"`
+}
+
+// HashBytes returns the sha256 hex digest of b (empty input → empty string).
+func HashBytes(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// Freeze builds the artifact-binding header for a run.
+func Freeze(itemsRaw, corpusRaw, configRaw []byte, orderSeed int) Frozen {
+	return Frozen{
+		ItemsSHA:  HashBytes(itemsRaw),
+		CorpusSHA: HashBytes(corpusRaw),
+		ConfigSHA: HashBytes(configRaw),
+		OrderSeed: orderSeed,
+	}
+}
+
 // Report is the aggregate evidence-quality scorecard.
 type Report struct {
 	N        int      `json:"n"`
@@ -43,6 +74,7 @@ type Report struct {
 	EvRec    float64  `json:"ev_rec"`
 	Ground   float64  `json:"ground"`
 	Taxonomy Taxonomy `json:"taxonomy"`
+	Frozen   *Frozen  `json:"frozen,omitempty"`
 	Notes    string   `json:"notes,omitempty"`
 }
 

@@ -216,7 +216,7 @@ func TestWidenExcludeOnlyTried(t *testing.T) {
 		return []source.Source{last}, nil
 	}
 
-	_, _, _, widened, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	_, _, _, widened, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestSelfCorrectAfterFullAdmissionBudget(t *testing.T) {
 	e.RankAdmission = func(_ context.Context, _ string, sources []source.Source, _ map[string]bool) ([]source.Source, error) {
 		return sources, nil
 	}
-	_, _, _, _, selfCorrected, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	_, _, _, _, selfCorrected, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,16 +258,18 @@ func TestCoverRecomputedAfterTopKeeps(t *testing.T) {
 		t.Fatalf("want K>=2, got %+v", fx)
 	}
 	var kept []mcs.Sample
+	// Distinct sources (and non-overlapping spans) so consolidateWindows keeps
+	// them as separate blocks — only then does the top-8 cut drop the tail.
 	for i := 0; i < maxKeepWindows; i++ {
 		kept = append(kept, mcs.Sample{
-			Start: i, End: i + 1, Source: "s1", Score: 9,
+			Start: 0, End: 1, Source: fmt.Sprintf("s%d", i), Score: 9,
 			Content: "连接池最大是多少 词面命中。",
 			Covers:  []string{fx[0].ID},
 		})
 	}
-	// Unique support for f2 lives only on the 9th (lowest-score) window.
+	// Unique support for f2 lives only on the 9th (lowest-score) block.
 	kept = append(kept, mcs.Sample{
-		Start: maxKeepWindows, End: maxKeepWindows + 1, Source: "s2", Score: 4,
+		Start: 0, End: 1, Source: "s-low", Score: 4,
 		Content: "超时多久 单独一窗。",
 		Covers:  []string{fx[1].ID},
 	})
@@ -276,6 +278,9 @@ func TestCoverRecomputedAfterTopKeeps(t *testing.T) {
 		t.Fatalf("precondition: full pool must cover both facts: %+v", before)
 	}
 	top := topKeeps(kept)
+	if len(top) != maxKeepWindows {
+		t.Fatalf("want truncation to %d blocks, got %d", maxKeepWindows, len(top))
+	}
 	after := facts.ReportForOracle(fx, top)
 	if after.Complete {
 		t.Fatalf("D2: after truncating the only f2 window, Cover must be incomplete: %+v", after)

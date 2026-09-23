@@ -12,10 +12,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/cumubase/ask/internal/abstain"
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/fast"
@@ -104,6 +106,23 @@ func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sou
 	dE.Synth = stack.synth
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl)
+	// Independent search token budget (3.2): judge never draws from this.
+	if stack.chat != nil {
+		dE.TokensUsed = stack.chat.TotalTokens
+		if v := os.Getenv("ASK_SEARCH_TOKEN_BUDGET"); v != "" {
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				dE.TokenBudget = n
+			}
+		}
+	}
+	// Opt-in zero-LLM abstention head (3.1): default off so gates stay put.
+	if os.Getenv("ASK_ABSTAIN") == "1" {
+		dE.Abstain = abstain.Default()
+	}
+	// Opt-in two-call query simulator (2.4): needs an endpoint.
+	if stack.chat != nil && os.Getenv("ASK_QUERY_SIM") == "1" {
+		dE.QuerySim = &llm.AigateQuerySimulator{Client: stack.chat}
+	}
 	if len(opt.History) > 0 {
 		dE.History = opt.History
 		dE.HistoryRewriter = stack.rewriter

@@ -330,6 +330,8 @@ func LinkQuerySeq(ctx context.Context, st Store, from, to string) error {
 }
 
 // LinkCoOcur records that two clusters shared evidence/source (co-mention).
+// Repeat co-mentions bump the weight (capped at 1) so the profile accumulates
+// like Self-Index co-retrieval counts (ir-rag A4).
 func LinkCoOcur(ctx context.Context, st Store, a, b string) error {
 	if a == "" || b == "" || a == b {
 		return nil
@@ -338,5 +340,80 @@ func LinkCoOcur(ctx context.Context, st Store, a, b string) error {
 	if from > to {
 		from, to = to, from
 	}
-	return st.Save(ctx, Edge{From: from, To: to, Weight: 0.7, Source: SourceCoOcur})
+	w := 0.7
+	if prev := CoOccurWeight(ctx, st, from, to); prev > 0 {
+		w = prev + 0.1
+		if w > 1 {
+			w = 1
+		}
+	}
+	return st.Save(ctx, Edge{From: from, To: to, Weight: w, Source: SourceCoOcur})
+}
+
+// CoOccurWeight is the current co_occur weight between two clusters (0 if none).
+func CoOccurWeight(ctx context.Context, st Store, a, b string) float64 {
+	if st == nil || a == "" || b == "" || a == b {
+		return 0
+	}
+	es, err := st.From(ctx, a)
+	if err != nil {
+		return 0
+	}
+	for _, e := range es {
+		if e.Source == SourceCoOcur && ((e.From == a && e.To == b) || (e.From == b && e.To == a)) {
+			return e.Weight
+		}
+	}
+	// Undirected storage uses lower id first; also check To.
+	ts, err := st.To(ctx, a)
+	if err != nil {
+		return 0
+	}
+	for _, e := range ts {
+		if e.Source == SourceCoOcur && (e.From == b || e.To == b) {
+			return e.Weight
+		}
+	}
+	return 0
+}
+
+// CoOccurPartners is the co-retrieval profile of one cluster: partners sorted
+// by weight desc (Self-Index A.1.2 comparative diagnosis input).
+func CoOccurPartners(ctx context.Context, st Store, id string) []Edge {
+	if st == nil || id == "" {
+		return nil
+	}
+	var out []Edge
+	if es, err := st.From(ctx, id); err == nil {
+		for _, e := range es {
+			if e.Source == SourceCoOcur {
+				out = append(out, e)
+			}
+		}
+	}
+	if ts, err := st.To(ctx, id); err == nil {
+		for _, e := range ts {
+			if e.Source == SourceCoOcur {
+				out = append(out, e)
+			}
+		}
+	}
+	// Dedup undirected duplicates.
+	seen := map[string]bool{}
+	var uniq []Edge
+	for _, e := range out {
+		key := e.From + "|" + e.To + "|" + e.Source
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		uniq = append(uniq, e)
+	}
+	sort.Slice(uniq, func(i, j int) bool {
+		if uniq[i].Weight != uniq[j].Weight {
+			return uniq[i].Weight > uniq[j].Weight
+		}
+		return uniq[i].From+uniq[i].To < uniq[j].From+uniq[j].To
+	})
+	return uniq
 }
