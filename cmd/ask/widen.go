@@ -13,22 +13,40 @@ import (
 
 	"github.com/cumubase/ask/internal/fast"
 	"github.com/cumubase/ask/internal/ingest"
+	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
 )
 
-func widenFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl string) func(context.Context, string, map[string]bool, int) ([]source.Source, error) {
+func widenFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl string, refiner *llm.AigateKeywordRefiner) func(context.Context, string, map[string]bool, int) ([]source.Source, error) {
 	return func(ctx context.Context, query string, exclude map[string]bool, m int) ([]source.Source, error) {
 		all, err := st.ActiveSources(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if out, err := fe.WidenSources(ctx, query, all, exclude, m); err != nil {
+		var failed []string
+		if out, tried, err := fe.WidenSources(ctx, query, all, exclude, m); err != nil {
 			return nil, err
 		} else if len(out) > 0 {
 			return out, nil
+		} else {
+			for _, fs := range tried {
+				failed = append(failed, fs...)
+			}
 		}
-		return widenSemantic(ctx, c, sourcesColl, all, exclude, query, m)
+		if out, _ := widenSemantic(ctx, c, sourcesColl, all, exclude, query, m); len(out) > 0 {
+			return out, nil
+		}
+		// ReAct 精炼轮: both arms empty → regenerate keywords in statutory
+		// register and retry the ranking once (Sirchmunk 的迭代改写位).
+		if refiner == nil {
+			return nil, nil
+		}
+		refined, err := refiner.Refine(ctx, query, failed)
+		if err != nil || len(refined) == 0 {
+			return nil, nil
+		}
+		return fe.AdmitByFields(refined, all, exclude, m), nil
 	}
 }
 
@@ -40,7 +58,7 @@ func widenFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl 
 // (Sirchmunk dir_scan 对齐).
 func rankFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl string) func(context.Context, string, []source.Source) ([]source.Source, error) {
 	return func(ctx context.Context, query string, sources []source.Source) ([]source.Source, error) {
-		out, err := fe.WidenSources(ctx, query, sources, nil, maxDeepLoops)
+		out, _, err := fe.WidenSources(ctx, query, sources, nil, maxDeepLoops)
 		if err != nil {
 			return nil, err
 		}

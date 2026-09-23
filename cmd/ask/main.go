@@ -283,7 +283,11 @@ func main() {
 		dE.Scorer = scorer
 		dE.Synth = synth
 		// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
-		dE.Widen = widenFunc(fe, st, c, sources)
+		var refiner *llm.AigateKeywordRefiner
+		if chatClient != nil {
+			refiner = &llm.AigateKeywordRefiner{Client: chatClient}
+		}
+		dE.Widen = widenFunc(fe, st, c, sources, refiner)
 		// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
 		dE.RankAdmission = rankFunc(fe, st, c, sources)
 		if *history != "" {

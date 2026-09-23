@@ -440,6 +440,40 @@ func (e *AigateKeywordExpander) Expand(ctx context.Context, query string, levels
 	return ParseMultilevelJSON(raw, levels)
 }
 
+// AigateKeywordRefiner regenerates keywords AFTER a failed match, instructed
+// to switch to statutory register (ReAct 精炼轮 — the widen loop's second
+// attempt when the whole cascade came up empty).
+type AigateKeywordRefiner struct {
+	Client *ChatClient
+}
+
+// Refine returns replacement keywords close to statutory wording, excluding
+// the failed ones.
+func (r *AigateKeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
+	tmpl := prompts.MustRender(prompts.KeywordsRefine, map[string]string{
+		"query":  query,
+		"failed": strings.Join(failed, "、"),
+	})
+	raw, err := r.Client.Complete(ctx, tmpl)
+	if err != nil {
+		return nil, err
+	}
+	clean, _ := SplitThink(raw)
+	var parsed struct {
+		Refined []string `json:"refined"`
+	}
+	if err := parseJSON(clean, &parsed); err != nil {
+		return nil, err
+	}
+	out := parsed.Refined[:0]
+	for _, k := range parsed.Refined {
+		if k = strings.TrimSpace(k); k != "" {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
 // ParseMultilevelJSON is exported for frozen prompt regression tests.
 func ParseMultilevelJSON(raw string, levels int) ([][]string, error) {
 	var parsed map[string][]string

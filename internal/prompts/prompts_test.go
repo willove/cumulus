@@ -8,7 +8,7 @@ import (
 func TestAllAssetsLoad(t *testing.T) {
 	for _, name := range []string{
 		EvaluateSample, FastAnalyze, KeywordsMultilevel, HistoryRewrite, SynthesizeROI,
-		JudgeCorrect,
+		JudgeCorrect, KeywordsRefine,
 	} {
 		body, err := Load(name)
 		if err != nil {
@@ -75,6 +75,18 @@ func TestSynthesizeRefuseContract(t *testing.T) {
 	for _, s := range []string{"refuse", "[n]", "不得编造", "{{evidences}}"} {
 		if !strings.Contains(body, s) {
 			t.Fatalf("synthesize missing %q", s)
+		}
+	}
+}
+
+func TestKeywordsRefineContract(t *testing.T) {
+	body, err := Load(KeywordsRefine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"{{query}}", "{{failed}}", "refined", "JSON"} {
+		if !strings.Contains(body, s) {
+			t.Fatalf("keywords_refine missing %q", s)
 		}
 	}
 }

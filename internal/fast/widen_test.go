@@ -19,7 +19,7 @@ func TestWidenSourcesOffline(t *testing.T) {
 		mk("c", "《民法典》第六百零九条：出卖人交付标的物……"),
 	}
 	e := New(mcs.KeywordScorer{})
-	got, err := e.WidenSources(context.Background(), "网购的商品七天无理由退货有法律依据吗？", sources, map[string]bool{}, 4)
+	got, _, err := e.WidenSources(context.Background(), "网购的商品七天无理由退货有法律依据吗？", sources, map[string]bool{}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestWidenSourcesOffline(t *testing.T) {
 	}
 
 	// exclude must filter.
-	got2, _ := e.WidenSources(context.Background(), "网购的商品七天无理由退货有法律依据吗？", sources, map[string]bool{got[0].ID: true}, 4)
+	got2, _, _ := e.WidenSources(context.Background(), "网购的商品七天无理由退货有法律依据吗？", sources, map[string]bool{got[0].ID: true}, 4)
 	if len(got2) != 0 {
 		t.Fatalf("exclude not honored: %d", len(got2))
 	}
@@ -48,7 +48,7 @@ func TestWidenSourcesRealizationProbe(t *testing.T) {
 		"经常性谩骂和恐吓算不算家庭暴力？",
 		"家庭暴力",
 	} {
-		got, err := e.WidenSources(context.Background(), q, srcs, map[string]bool{}, 4)
+		got, _, err := e.WidenSources(context.Background(), q, srcs, map[string]bool{}, 4)
 		t.Logf("%q -> admitted=%d err=%v", q, len(got), err)
 		for _, s := range got {
 			t.Logf("   %s %s", s.BusinessKey, s.Title)

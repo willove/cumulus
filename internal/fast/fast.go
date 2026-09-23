@@ -183,13 +183,34 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}, nil
 }
 
+// AdmitByFields admits up to m active sources matching the given fields
+// directly (the widen loop's refinement round: keywords regenerated after a
+// failed cascade go straight to the same ranking the cascade uses).
+func (e *Engine) AdmitByFields(fields []string, sources []source.Source, exclude map[string]bool, m int) []source.Source {
+	if m <= 0 || len(fields) == 0 {
+		return nil
+	}
+	var out []source.Source
+	for _, sc := range rankSources(fields, sources) {
+		if exclude[sc.src.ID] || sc.src.Status != source.StatusActive {
+			continue
+		}
+		out = append(out, sc.src)
+		if len(out) >= m {
+			break
+		}
+	}
+	return out
+}
+
 // WidenSources re-ranks the FULL corpus by the query's keyword cascade
 // (primary → fallback → expander levels) and returns up to m active sources
-// not in exclude — the DEEP loop's mid-search file admission (Sirchmunk
-// ReAct 对齐：探索回路可以扩大候选集，而不是在定死的集合里打转).
-func (e *Engine) WidenSources(ctx context.Context, query string, sources []source.Source, exclude map[string]bool, m int) ([]source.Source, error) {
+// not in exclude, plus every field list the cascade tried (the refinement
+// round's failure context) — the DEEP loop's mid-search file admission
+// (Sirchmunk ReAct 对齐：探索回路可以扩大候选集，而不是在定死的集合里打转).
+func (e *Engine) WidenSources(ctx context.Context, query string, sources []source.Source, exclude map[string]bool, m int) ([]source.Source, [][]string, error) {
 	if m <= 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	an := e.Analyzer
 	if an == nil {
@@ -197,7 +218,7 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 	}
 	a, err := an.Analyze(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []source.Source
 	add := func(fields []string) bool {
@@ -212,6 +233,7 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 		}
 		return false
 	}
+	tried := [][]string{}
 	candidates := [][]string{orderedKeys(a.Primary), orderedKeys(a.Fallback)}
 	if e.Expander != nil {
 		if levels, err := e.Expander.Expand(ctx, query, 2); err == nil {
@@ -224,11 +246,12 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 		if len(fields) == 0 {
 			continue
 		}
+		tried = append(tried, fields)
 		if add(fields) {
-			break
+			return out, tried, nil
 		}
 	}
-	return out, nil
+	return out, tried, nil
 }
 
 // render prefers the production Synthesizer; on refusal/error it degrades to

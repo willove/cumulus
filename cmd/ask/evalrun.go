@@ -105,7 +105,11 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
 	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
-	dE.Widen = widenFunc(fe, st, c, sourcesColl)
+	var refiner *llm.AigateKeywordRefiner
+	if stack.chat != nil {
+		refiner = &llm.AigateKeywordRefiner{Client: stack.chat}
+	}
+	dE.Widen = widenFunc(fe, st, c, sourcesColl, refiner)
 	// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl)
 
