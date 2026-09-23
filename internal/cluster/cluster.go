@@ -186,7 +186,11 @@ type Cluster struct {
 	TopicKeys []string `json:"topic_keys,omitempty"` // aliases from folded clusters
 	// LevelKeys are multi-level retrieval keys (D.6). Identity stays TopicKey;
 	// these only feed max-over-keys scoring and are droppable (G-drop).
-	LevelKeys  []LevelKey      `json:"level_keys,omitempty"`
+	LevelKeys []LevelKey `json:"level_keys,omitempty"`
+	// KeyEmbeds are per-level-key embeddings (MVR-cache 分段 MaxSim, ir-rag
+	// 2.5): MaxSim over segments instead of one vector for the whole cluster.
+	// Aligned 1:1 with LevelKeys; nil or length mismatch falls back to Embed.
+	KeyEmbeds  [][]float64     `json:"key_embeds,omitempty"`
 	Name       string          `json:"name"`
 	Content    string          `json:"content"`
 	Queries    []string        `json:"queries"`
@@ -293,7 +297,46 @@ func (c *Cluster) AllKeyTexts() []string {
 	return out
 }
 
-// addLevelKey appends a derived key when missing (Evolve / fold).
+// LevelKeyTexts returns level key texts in stored order (KeyEmbeds alignment).
+func (c *Cluster) LevelKeyTexts() []string {
+	out := make([]string, 0, len(c.LevelKeys))
+	for _, k := range c.LevelKeys {
+		out = append(out, k.Text)
+	}
+	return out
+}
+
+// AttachKeyEmbeds stores per-level-key embeddings (MVR-cache segments).
+// Mismatched length is ignored — a misaligned map must not silently score.
+func (c *Cluster) AttachKeyEmbeds(embeds [][]float64) {
+	if len(embeds) == 0 || len(embeds) != len(c.LevelKeys) {
+		return
+	}
+	for _, v := range embeds {
+		if len(v) == 0 {
+			return
+		}
+	}
+	c.KeyEmbeds = embeds
+}
+
+// MaxKeySim is MaxSim over segment embeddings (MVR-cache); 0 when no
+// aligned KeyEmbeds exist.
+func (c *Cluster) MaxKeySim(queryEmbed []float64) float64 {
+	if len(c.KeyEmbeds) != len(c.LevelKeys) || len(queryEmbed) == 0 {
+		return 0
+	}
+	m := 0.0
+	for _, ke := range c.KeyEmbeds {
+		if v := Cosine(ke, queryEmbed); v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// addLevelKey appends a derived key when missing (Evolve / fold). New keys
+// invalidate the aligned KeyEmbeds map until the caller recomputes it.
 func (c *Cluster) addLevelKey(level, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -305,6 +348,7 @@ func (c *Cluster) addLevelKey(level, text string) {
 		}
 	}
 	c.LevelKeys = append(c.LevelKeys, LevelKey{Level: level, Text: text})
+	c.KeyEmbeds = nil
 }
 
 // NormalizeEvidence copies samples and replaces sampling-method source labels
@@ -366,16 +410,19 @@ func MaxKeyRel(query string, c *Cluster) float64 {
 	return m
 }
 
-// ReuseScore is max(query-set embed cosine, max-over-keys lexical). The two
-// arms share a [0,1]-usable scale for Local/hash embeds and real embedders
-// alike; taking the max avoids fusion weights (D.6).
+// ReuseScore is max(query-set embed cosine, segment MaxSim, max-over-keys
+// lexical). The arms share a [0,1]-usable scale for Local/hash embeds and
+// real embedders alike; taking the max avoids fusion weights (D.6 + MVR).
 func ReuseScore(c *Cluster, query string, queryEmbed []float64) float64 {
 	s := Cosine(c.Embed, queryEmbed)
 	if s < 0 {
 		s = 0
 	}
 	if k := MaxKeyRel(query, c); k > s {
-		return k
+		s = k
+	}
+	if m := c.MaxKeySim(queryEmbed); m > s {
+		return m
 	}
 	return s
 }

@@ -95,6 +95,13 @@ func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sou
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = opt.Prior
 	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
+	// 1.6: the prior's history arm reads live ask_evidence (needs the active
+	// list first — one read per stack build, not per query).
+	if opt.Prior {
+		if list, lerr := st.ActiveSources(ctx); lerr == nil {
+			fe.PriorHist = priorHistFromStore(ctx, st, list)
+		}
+	}
 	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_clusters")), stack.emb)
 	kbE.Edges = graph.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_weak_edges"))
 	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(opt.Namespace, "ask_cites"))

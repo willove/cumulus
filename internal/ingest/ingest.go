@@ -172,6 +172,45 @@ func (s *Store) ActiveSources(ctx context.Context) ([]source.Source, error) {
 	return out, nil
 }
 
+// EvidenceHit is one live evidence window (ask_evidence) — the "history
+// success" input to the LENS B4 prior's history arm.
+type EvidenceHit struct {
+	SourceID string  `json:"source_id"`
+	Score    float64 `json:"score"`
+	Snippet  string  `json:"snippet"`
+}
+
+// ActiveEvidence returns live evidence windows scored at or above minScore,
+// newest first, capped at limit. Read-only; failures degrade to nil so the
+// prior's history arm simply stays empty.
+func (s *Store) ActiveEvidence(ctx context.Context, minScore float64, limit int) ([]EvidenceHit, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	if minScore <= 0 {
+		minScore = 7
+	}
+	res, err := s.c.Query(ctx, s.evidence, client.Query{
+		Filter: map[string]any{"status": "live", "score": map[string]any{"$gte": minScore}},
+		Limit:  limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EvidenceHit, 0, len(res.Documents))
+	for _, d := range res.Documents {
+		id, _ := d["doc_id"].(string)
+		sc, _ := d["score"].(float64)
+		snip, _ := d["snippet"].(string)
+		if id == "" {
+			continue
+		}
+		out = append(out, EvidenceHit{SourceID: id, Score: sc, Snippet: snip})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out, nil
+}
+
 // MarkEvidence records one evidence window. Non-active sources are rejected.
 func (s *Store) MarkEvidence(ctx context.Context, docID string, start, end int, score float64, reasoning, snippet string) (string, error) {
 	src, err := s.getSource(ctx, docID)

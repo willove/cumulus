@@ -47,6 +47,9 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 	if len(c.LevelKeys) > 0 {
 		doc["level_keys"] = c.LevelKeys
 	}
+	if len(c.KeyEmbeds) > 0 {
+		doc["key_embeds"] = c.KeyEmbeds
+	}
 	// Insert-or-replace by _id (content-stable id).
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
 		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)

@@ -60,6 +60,28 @@ type History struct {
 	QueryTokens []string
 }
 
+// HistoryFrom merges successful-evidence sources and snippet texts into a
+// warm-prior History (LENS §4.1 历史成功证据 family). Snippets contribute
+// their tokens as QueryTokens; source IDs alone already score 1.0 on the
+// history arm.
+func HistoryFrom(sourceIDs, snippets []string) *History {
+	h := &History{SourceIDs: append([]string(nil), sourceIDs...)}
+	seen := map[string]bool{}
+	for _, sn := range snippets {
+		for _, tok := range mcs.Fields(sn) {
+			if len(tok) < 2 || seen[tok] {
+				continue
+			}
+			seen[tok] = true
+			h.QueryTokens = append(h.QueryTokens, tok)
+		}
+	}
+	if len(h.QueryTokens) > 64 {
+		h.QueryTokens = h.QueryTokens[:64]
+	}
+	return h
+}
+
 // Build fuses the five signal families into a query-conditioned prior.
 func Build(query string, sources []source.Source, hist *History, topK int) Belief {
 	return Rank(mcs.Fields(query), sources, hist, topK)

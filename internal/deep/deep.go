@@ -739,6 +739,22 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 		correctUsed := 0
+		// 1.7: coverage gaps ⇒ boost the global (blind-spot) arm. The lex
+		// anchor arm already failed for the original wording, so self-
+		// correction spends its slots on scatter/L2 exploration instead of
+		// re-probing the same anchors at a different phrasing.
+		gap := 0.0
+		if len(fx) > 0 {
+			gap = float64(len(rep.Missing)) / float64(len(fx))
+		}
+		exploreSampler := func() *mcs.Sampler {
+			smp := mcs.New(mcs.DefaultConfig(), e.scorer())
+			smp.FactHints = hints
+			if gap > 0 {
+				smp.ExploreBoost = 1 + 2*gap // 1.0 (no gap) → 3.0 (all open)
+			}
+			return smp
+		}
 		// 2.4: MissingQueries first, then two-call complements (Jaccard-filtered)
 		// so self-correction is not locked to the original wording.
 		mqs := facts.MissingQueries(fx, rep)
@@ -759,7 +775,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				correctUsed++
 				loops++
 				tried[s.ID] = true
-				samples, err := newSampler().SampleBody(ctx, mq, s.Body)
+				samples, err := exploreSampler().SampleBody(ctx, mq, s.Body)
 				if err != nil {
 					continue
 				}

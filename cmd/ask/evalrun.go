@@ -145,6 +145,10 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = prior
 	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
+	// 1.6: prior history arm from live ask_evidence (list is already loaded).
+	if prior {
+		fe.PriorHist = priorHistFromStore(ctx, st, list)
+	}
 	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(namespace, "ask_clusters")), stack.emb)
 	kbE.Edges = graph.NewCumuStore(c, ns.Coll(namespace, "ask_weak_edges"))
 	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(namespace, "ask_cites"))

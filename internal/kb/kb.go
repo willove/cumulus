@@ -118,7 +118,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 				c.Lifecycle = cluster.LifecycleStable
 			}
 			c.Evolve(query, nil)
-			c.Embed = e.querySetEmbed(ctx, *c)
+			e.refreshEmbeds(ctx, c)
 			_ = e.Store.Save(ctx, *c)
 			// Reuse still surfaces the stored evidence windows (0 new samples).
 			samples := cluster.NormalizeEvidence(c.SourceID, c.Evidence)
@@ -231,7 +231,7 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		wasStale := e.priorStale(ctx, target, sources)
 		target.Evidence = cluster.NormalizeEvidence(target.SourceID, target.Evidence)
 		target.Evolve(ans.Query, nil)
-		target.Embed = e.querySetEmbed(ctx, *target)
+		e.refreshEmbeds(ctx, target)
 		if replace || wasStale {
 			target.Content = ans.Summary
 			target.Confidence = ans.Confidence
@@ -259,7 +259,7 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 	if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
 		c := existing[0]
 		c.Evolve(ans.Query, nil)
-		c.Embed = e.querySetEmbed(ctx, c)
+		e.refreshEmbeds(ctx, &c)
 		if err := e.Store.Save(ctx, c); err != nil {
 			return res, err
 		}
@@ -271,6 +271,7 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 	}
 
 	c := cluster.New(key, ans.Query, ans.Summary, ans.Query, ans.SourceID, ans.Samples, qe, ans.Confidence)
+	e.refreshEmbeds(ctx, &c)
 	if err := e.Store.Save(ctx, c); err != nil {
 		return res, err
 	}
@@ -439,6 +440,26 @@ func (e *Engine) querySetEmbed(ctx context.Context, c cluster.Cluster) []float64
 		return c.Embed
 	}
 	return qe
+}
+
+// refreshEmbeds recomputes the cluster's query-set embed AND its per-level-key
+// segment embeds in one pass (MVR-cache 2.5). Segment embeds come from a
+// single batch call; an error leaves the cluster with whatever it had
+// (misaligned segment maps are dropped, never silently scored).
+func (e *Engine) refreshEmbeds(ctx context.Context, c *cluster.Cluster) {
+	if e.Embedder == nil {
+		return
+	}
+	c.Embed = e.querySetEmbed(ctx, *c)
+	keys := c.LevelKeyTexts()
+	if len(keys) == 0 {
+		return
+	}
+	vs, err := e.Embedder.Embed(ctx, keys)
+	if err != nil || len(vs) != len(keys) {
+		return
+	}
+	c.AttachKeyEmbeds(vs)
 }
 
 var _ = mcs.Sample{}

@@ -77,6 +77,7 @@ type KeywordExpander interface {
 }
 
 // Engine runs FAST search over a set of active sources.
+// Engine struct — search tier state.
 type Engine struct {
 	Sampler  *mcs.Sampler
 	MaxChars int
@@ -86,6 +87,9 @@ type Engine struct {
 	// UsePrior ranks candidates with the LENS B4 multi-signal prior
 	// (internal/prior, opt-in; plain IDF cascade by default).
 	UsePrior bool
+	// PriorHist feeds the prior's history arm from successful evidence
+	// (ask_evidence). nil = history arm silent.
+	PriorHist *prior.History
 }
 
 func New(scorer mcs.Scorer) *Engine {
@@ -391,7 +395,7 @@ func MatchFilename(query string, sources []source.Source) (Answer, bool) {
 func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 	if e.UsePrior && len(fields) > 0 {
 		var out []scored
-		for _, f := range prior.Rank(fields, sources, nil, 0).Files {
+		for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
 			if s := sourceByID(sources, f.SourceID); s != nil {
 				out = append(out, scored{src: *s, score: f.Score})
 			}

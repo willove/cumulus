@@ -153,6 +153,11 @@ type Sampler struct {
 	// Weights are the arm weights after the last SampleBody run (B5 λ_t;
 	// visible for gates and probes).
 	Weights map[string]float64
+	// ExploreBoost amplifies the global (semantic-blind-spot) arm's share
+	// while the caller still has open coverage gaps (ir-rag 1.7: LENS
+	// information-directed λ weighting). 0 or 1 = normal arm economics.
+	// It is advisory: every arm keeps its one-slot floor.
+	ExploreBoost float64
 }
 
 // Arms are the complementary proposal families (LENS B5): lex anchors on the
@@ -228,8 +233,10 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 	return out, nil
 }
 
-// allocate splits one round's budget across the three arms by λ.
-func (s *Sampler) allocate(runes []rune, query string, seeds []Sample, λ map[string]float64) []Sample {
+// armBudget splits one round's k slots across the arms by λ, then applies
+// ExploreBoost to the global arm. Floors are respected: every arm keeps at
+// least one slot, and the total never exceeds k.
+func (s *Sampler) armBudget(λ map[string]float64) map[string]int {
 	k := s.Cfg.SamplesPerRound
 	if k < len(Arms) {
 		k = len(Arms)
@@ -246,6 +253,74 @@ func (s *Sampler) allocate(runes []rune, query string, seeds []Sample, λ map[st
 		budget[arm]++
 		rest--
 	}
+	applyExploreBoost(budget, k, s.ExploreBoost)
+	return budget
+}
+
+// armsByWeight orders arm names by descending weight.
+func armsByWeightDesc(λ map[string]float64) []string {
+	out := append([]string(nil), Arms...)
+	sort.Slice(out, func(i, j int) bool { return λ[out[i]] > λ[out[j]] })
+	return out
+}
+
+// applyExploreBoost moves up to (boost-1)×(movable slots) slots into global.
+// Movable slots are those above the per-arm floor of 1.
+func applyExploreBoost(budget map[string]int, k int, boost float64) {
+	if boost <= 1 {
+		return
+	}
+	movable := 0
+	for _, arm := range Arms {
+		movable += budget[arm] - 1
+	}
+	if movable <= 0 {
+		return
+	}
+	extra := int(float64(movable) * (boost - 1))
+	if extra > movable {
+		extra = movable
+	}
+	// Take from the heaviest non-global arms first (stable desc weight).
+	for _, arm := range armsByWeightDesc(map[string]float64{
+		"lex":    float64(budget["lex"]),
+		"local":  float64(budget["local"]),
+		"global": float64(budget["global"]),
+	}) {
+		if extra <= 0 {
+			break
+		}
+		if arm == "global" {
+			continue
+		}
+		for extra > 0 && budget[arm] > 1 {
+			budget[arm]--
+			budget["global"]++
+			extra--
+		}
+	}
+	// Sum guard: never grow past k.
+	total := 0
+	for _, n := range budget {
+		total += n
+	}
+	for total > k {
+		for _, arm := range Arms {
+			if total <= k {
+				break
+			}
+			if budget[arm] > 1 {
+				budget[arm]--
+				total--
+			}
+		}
+	}
+}
+
+// allocate splits one round's budget across the three arms (ExploreBoost
+// aware) and proposes the windows.
+func (s *Sampler) allocate(runes []rune, query string, seeds []Sample, λ map[string]float64) []Sample {
+	budget := s.armBudget(λ)
 	var out []Sample
 	out = append(out, s.fuzzWindows(runes, query, budget["lex"])...)
 	out = append(out, s.gaussian(runes, seeds, budget["local"])...)

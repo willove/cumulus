@@ -171,6 +171,12 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 			if qe, eerr := QuerySetEmbed(ctx, emb, winner.Queries); eerr == nil {
 				winner.Embed = qe
 			}
+			// 2.5: segment embeddings follow the merged key set.
+			if texts := winner.LevelKeyTexts(); len(texts) > 0 {
+				if vs, verr := emb.Embed(ctx, texts); verr == nil && len(vs) == len(texts) {
+					winner.AttachKeyEmbeds(vs)
+				}
+			}
 		}
 		if err := st.Save(ctx, winner); err != nil {
 			return rep, fmt.Errorf("tidy save %s: %w", winner.ID, err)
@@ -258,6 +264,7 @@ func foldInto(winner, loser *Cluster) {
 	for _, lk := range loser.LevelKeys {
 		winner.addLevelKey(lk.Level, lk.Text)
 	}
+	winner.KeyEmbeds = nil // recomputed by the embedder-owning caller
 
 	// Legacy samples carry sampling methods, not document IDs. Normalize both
 	// sides before comparing spans, without mutating either input evidence slice.
