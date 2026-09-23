@@ -34,11 +34,13 @@ type jobIn struct {
 	Recursive bool   `json:"recursive"`
 }
 
-// runServe exposes the HTTP ingest face: /health, POST /v1/ingest/sources,
-// POST /v1/ingest/jobs (async, queued → tracked in KV), GET
-// /v1/ingest/jobs/{id} (real progress, design §3.4.2).
-func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server string) {
+// runServe exposes the HTTP faces: ingest (/health, POST /v1/ingest/sources,
+// POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (P1: POST
+// /v1/search, POST /v1/search/stream).
+func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl string) {
 	mux := http.NewServeMux()
+
+	registerSearchFace(mux, c, st, sourcesColl)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())

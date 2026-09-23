@@ -14,10 +14,7 @@ import (
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/eval"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/graph"
 	"github.com/cumubase/ask/internal/ingest"
-	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/source"
@@ -232,90 +229,27 @@ func main() {
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
 		l1pre := fs.Bool("l1pre", false, "narrow candidates via body_embed KNN (L1 cache)")
 		_ = fs.Parse(rest)
-		list, err := st.ActiveSources(ctx)
-		if err != nil {
-			fatal(err)
-		}
-		// Production path via aigate (D6): scorer/embedder/analyze/synthesize.
-		// Offline stubs keep the gates deterministic without AIGATE_BASE_URL.
-		stack := newProdStack()
-		scorer, emb := stack.scorer, stack.emb
-		analyzer, synth, expander, rewriter := stack.analyzer, stack.synth, stack.expander, stack.rewriter
-		chatClient := stack.chat
-		// L1 candidate prefilter: KNN over body_embed (opt-in; empty/error
-		// falls back to the full L0 set — 索引是缓存，不是契约). D7 lazy
-		// path: a missing index materializes once, bounded, then retries.
-		if *l1pre {
-			embedFn, dims, embedModel := embedderFor()
-			knnOnce := func() (*client.KNNResult, error) {
-				qv, err := embedFn(ctx, []string{*q})
-				if err != nil || len(qv) != 1 {
-					return nil, fmt.Errorf("embed: %w", err)
-				}
-				return c.KNN(ctx, sources, client.KNNRequest{
-					Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
-					Index:  "ask_body_embed",
-					Filter: map[string]any{"status": source.StatusActive},
-				})
-			}
-			knn, err := knnOnce()
-			if err != nil {
-				if _, berr := st.EnsureEmbed(ctx, embedFn, dims, embedModel, 64); berr == nil {
-					knn, err = knnOnce()
-				}
-			}
-			if err == nil && knn != nil && len(knn.Documents) > 0 {
-				if narrowed := orderByKNN(list, knn.Documents); len(narrowed) > 0 {
-					list = narrowed
-				}
-			}
-		}
-		fe := fast.New(scorer)
-		fe.UsePrior = *priorRank
-		fe.Analyzer, fe.Synth, fe.Expander = analyzer, synth, expander
-		kbE := kb.New(fe, cluster.NewCumuStore(c, "ask_clusters"), emb)
-		kbE.Edges = graph.NewCumuStore(c, "ask_weak_edges")
-		kbE.Cites = deep.NewCumuCiteStore(c, "ask_cites")
-		kbE.HopTS = *hopts
-		kbE.MinHotness = *minhot
-		kbE.MinConfidence = *minconf
-		dE := deep.New(kbE, deep.NewCumuStore(c, "ask_conflicts"))
-		dE.Scorer = scorer
-		dE.Synth = synth
-		// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
-		var refiner *llm.AigateKeywordRefiner
-		if chatClient != nil {
-			refiner = &llm.AigateKeywordRefiner{Client: chatClient}
-		}
-		dE.Widen = widenFunc(fe, st, c, sources, refiner)
-		// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
-		dE.RankAdmission = rankFunc(fe, st, c, sources)
+		opt := SearchOptions{Prior: *priorRank, L1Pre: *l1pre, HopTS: *hopts, MinHot: *minhot, MinConf: *minconf}
 		if *history != "" {
-			var hist []string
 			for _, h := range strings.Split(*history, "|") {
 				if h = strings.TrimSpace(h); h != "" {
-					hist = append(hist, h)
+					opt.History = append(opt.History, h)
 				}
 			}
-			dE.History = hist
-			dE.HistoryRewriter = rewriter
 		}
-		res, err := dE.Ask(ctx, *q, list)
+		ss, err := newSearchStack(ctx, c, st, sources, opt)
 		if err != nil {
 			fatal(err)
 		}
-		if chatClient != nil {
-			res.Tokens = chatClient.TotalTokens() // B9 per-query accounting
-		}
-		ans := res.Answer
-		if !res.Reused && len(ans.Samples) > 0 && ans.SourceID != "" && !ans.Skipped {
-			top := ans.Samples[0]
-			_, _ = st.MarkEvidence(ctx, ans.SourceID, top.Start, top.End, top.Score, top.Reasoning, trim(top.Content, 200))
+		res, err := runSearch(ctx, ss, *q)
+		if err != nil {
+			fatal(err)
 		}
 		if *rawOut {
 			printJSON(res)
 			return
 		}
+		ans := res.Answer
 		fmt.Printf("mode=%s escalated=%v loops=%d conf=%.3f coverage=%.2f calls=%d skipped=%v reused=%v sampled=%d cluster=%s\n",
 			res.Mode, res.Escalated, res.Loops, ans.Confidence, ans.Coverage, ans.LLMCalls, ans.Skipped,
 			res.Reused, len(ans.Samples), res.ClusterID)
@@ -379,7 +313,7 @@ func main() {
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, server)
+		runServe(ctx, c, st, *listen, server, sources)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {

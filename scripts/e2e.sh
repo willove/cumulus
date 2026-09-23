@@ -305,6 +305,26 @@ HTTP_SRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/sources" -d '{"
 echo "$HTTP_SRC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] in ("created","updated","unchanged"), r' ; check "POST /v1/ingest/sources upserts a source" $?
 HTTP_JOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/jobs" -d "{\"dir\":\"$WORK/docs\",\"job\":\"servjob\",\"recursive\":false}")"
 echo "$HTTP_JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "POST /v1/ingest/jobs accepts an async job" $?
+
+# --- Gate P: search HTTP face (P1) -------------------------------------------
+PQ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d '{"query":"HTTP 摄取的内容里连接池最大是多少"}')"
+echo "$PQ" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+a=r.get("answer") or {}
+assert a.get("summary"), ("empty summary", r)
+assert r.get("mode") in ("FAST","DEEP","FILENAME_ONLY"), r
+print("ok")' ; check "POST /v1/search returns a cited answer (P1 JSON face)" $?
+PSSE="$(curl -fsS -N -X POST "http://127.0.0.1:$SPORT/v1/search/stream" -d '{"query":"HTTP 摄取的内容里连接池最大是多少"}')"
+echo "$PSSE" | python3 -c '
+import json,sys
+raw=sys.stdin.read()
+assert "text/event-stream" in raw or "event: done" in raw, raw[:200]
+assert "event: status" in raw and "event: content" in raw and "event: citations" in raw and "event: done" in raw, raw[:400]
+for line in raw.splitlines():
+    if line.startswith("data: ") and "mode" in line:
+        json.loads(line[6:])
+print("ok")' ; check "POST /v1/search/stream emits SSE status/content/citations/done (P1 SSE face)" $?
 JDONE=0
 for _ in $(seq 1 50); do
 	JST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/ingest/jobs/servjob" 2>/dev/null || true)"
