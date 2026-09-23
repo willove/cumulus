@@ -71,7 +71,8 @@ func main() {
 		}
 		for i, d := range res.Documents {
 			title, _ := d["title"].(string)
-			if title == gold {
+			bkey, _ := d["business_key"].(string)
+			if title == gold || bkey == gold {
 				dist := 0.0
 				if i < len(res.Distances) {
 					dist = res.Distances[i]
