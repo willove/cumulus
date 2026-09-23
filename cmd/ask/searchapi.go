@@ -280,8 +280,9 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 }
 
 // sseSearch streams one search as SSE events mapped onto the evoke-chat
-// engine: status → loading, content → appendContent, citations →
-// ChatSources, done → completeMessage.
+// engine: status → loading/progress, content → appendContent, citations →
+// ChatSources, done → completeMessage. A 5s heartbeat keeps proxies and
+// browsers from timing out during long DEEP searches.
 func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) {
 	if verbose {
 		ss.dE.Verbose = func(f string, a ...any) {
@@ -306,10 +307,13 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
-	// 心跳：长检索期间保活连接并让代理/浏览器不判超时。
+	emit("status", map[string]any{"stage": "started"})
+
+	// 心跳：长检索期间保活连接；停止与 handler 返回同步，杜绝迟到写。
 	heartbeat := make(chan struct{})
-	defer close(heartbeat)
+	hbDone := make(chan struct{})
 	go func() {
+		defer close(hbDone)
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
 		for {
@@ -326,18 +330,8 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 			}
 		}
 	}()
-	if verbose {
-		vlog := ss.dE.Verbose
-		if vlog != nil {
-			base := vlog
-			ss.dE.Verbose = func(f string, a ...any) {
-				line := fmt.Sprintf(f, a...)
-				log.Printf("[search %s] %s", query, line)
-				emit("status", map[string]any{"stage": "log", "text": line})
-			}
-			_ = base
-		}
-	}
+	defer func() { close(heartbeat); <-hbDone }()
+
 	ss.dE.OnFile = func(key string, best float64, windows int) {
 		emit("status", map[string]any{"stage": "file", "file": key, "score": best})
 	}

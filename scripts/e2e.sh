@@ -320,7 +320,8 @@ echo "$PSSE" | python3 -c '
 import json,sys
 raw=sys.stdin.read()
 assert "text/event-stream" in raw or "event: done" in raw, raw[:200]
-assert "event: status" in raw and "event: content" in raw and "event: citations" in raw and "event: done" in raw, raw[:400]
+missing=[e for e in ("event: status","event: content","event: citations","event: done") if e not in raw]
+assert not missing, ("missing", missing, repr(raw[-260:]))
 for line in raw.splitlines():
     if line.startswith("data: ") and "mode" in line:
         json.loads(line[6:])
