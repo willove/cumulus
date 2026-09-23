@@ -85,7 +85,7 @@ func TestTidyPreservesMultiSourceEvidenceAndTopicReuse(t *testing.T) {
 	a := source.New("A", "md", "", "a", "zh", "连接池最大 128。", nil)
 	b := source.New("B", "md", "", "b", "zh", "连接池上限 128。", nil)
 	q1, q2 := "连接池最大连接数是多少", "连接池最大连接数上限是多少"
-	// Seed two sibling clusters (one source each) with G1 write-path fold
+	// Seed two sibling clusters (one source each) with the write-path fold
 	// off, so THIS test owns the multi-source union via tidy. ReuseTheta=2
 	// empties crossTopicNear; each new topic still creates its own cluster.
 	e.ReuseTheta = 2.0

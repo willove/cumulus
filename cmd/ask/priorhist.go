@@ -1,6 +1,6 @@
 package main
 
-// priorHist builds the LENS B4 history arm from live ask_evidence windows
+// priorHist builds the history arm from live ask_evidence windows
 // (历史成功证据). Read failure degrades to nil — the history arm stays
 // silent rather than blocking the search.
 

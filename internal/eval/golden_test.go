@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestGoldenSetsFrozen is the R-E2 discipline (lens-notes §7.4): the golden
-// question sets backing the recorded scoreboards are checksummed; any edit
-// to them must land together with a re-recorded scoreboard, never silently.
+// TestGoldenSetsFrozen pins the golden question sets backing the recorded
+// scoreboards: they are checksummed; any edit to them must land together
+// with a re-recorded scoreboard, never silently.
 func TestGoldenSetsFrozen(t *testing.T) {
 	manifest := map[string]string{
 		"../../testdata/eval/chinalaw39.jsonl":  "e01207db094eda7b8bb268d006baf4593f3b60d68b87586c35a0196f799cebc7",

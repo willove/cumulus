@@ -1,7 +1,7 @@
 // Package deep is the DEEP tier: confidence-gated escalation from FAST,
 // multi-source evidence refinement (ReAct-shaped tool loop, offline stub),
 // conflict detection between clusters, and the citation delivery face ([?]
-// legend for unresolved refs). Gate D: low confidence must escalate; conflict
+// legend for unresolved refs). Low confidence must escalate; conflict
 // pairs must be discoverable; citations must resolve to source offsets.
 package deep
 
@@ -131,7 +131,7 @@ type Result struct {
 	Persisted  bool                 `json:"persisted"`
 	Merged     bool                 `json:"merged"`
 	Neighbors  []graph.ExpandResult `json:"neighbors,omitempty"`
-	// Cover is the per-fact multi-hop coverage report (LENS B1/B2; B6 oracle
+	// Cover is the per-fact multi-hop coverage report (oracle annotations
 	// vector when the scorer annotates covers).
 	Cover facts.Report `json:"cover"`
 	// SelfCorrected marks a weakest-requirement re-sample pass.
@@ -139,9 +139,9 @@ type Result struct {
 	// Widened counts files admitted mid-search by the widening pass (Sirchmunk
 	// ReAct 对齐): exploration may grow the candidate set, bounded.
 	Widened int `json:"widened,omitempty"`
-	// Session echoes the chat session id when the caller passed one (P2).
+	// Session echoes the chat session id when the caller passed one.
 	Session string `json:"session,omitempty"`
-	// B9 budget accounting: LatencyMS is always filled; Tokens carries the
+	// Budget accounting: LatencyMS is always filled; Tokens carries the
 	// upstream-reported total (0 on the offline stub path — the CLI fills it
 	// from the chat client after Ask returns). BudgetHit marks an independent
 	// token-budget stop (judge tokens never enter TokenBudget).
@@ -313,7 +313,7 @@ func (e *Engine) thresholdFor(fx []facts.Fact) float64 {
 	return thr
 }
 
-// Ask runs the confidence-gated path (门 D: 置信不足必升级).
+// Ask runs the confidence-gated path: insufficient confidence escalates.
 func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
 	started := time.Now()
 	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
@@ -338,7 +338,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	return e.afterBase(ctx, started, query, base, sources, thr, fx, nil)
 }
 
-// SourceLoader lazily materializes the full candidate corpus (G2: a warm
+// SourceLoader lazily materializes the full candidate corpus (a warm
 // reuse must not pay the full-corpus read).
 type SourceLoader func(ctx context.Context) ([]source.Source, error)
 
@@ -382,7 +382,7 @@ func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (
 // afterBase is the shared post-reuse path: citations, conflicts, cover, the
 // abstain gates and the DEEP escalation. `citeCorpus` is the source set
 // citation refs resolve against (the full corpus, or the narrow anchor set
-// on a G2 hit); `load` materializes the full corpus when DEEP actually
+// on a warm hit); `load` materializes the full corpus when DEEP actually
 // escalates (nil = caller already provided it).
 func (e *Engine) afterBase(ctx context.Context, started time.Time, query string, base kb.Result, citeCorpus []source.Source, thr float64, fx []facts.Fact, load SourceLoader) (res Result, err error) {
 	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
@@ -459,7 +459,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		return res, nil
 	}
 
-	// G2: a narrow reuse hit that still needs DEEP must now pay for the
+	// a narrow reuse hit that still needs DEEP must now pay for the
 	// corpus — load it exactly once, here (nil corpus = lazy path).
 	deepCorpus := citeCorpus
 	if len(deepCorpus) == 0 && load != nil {
@@ -538,7 +538,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 
 // topKeeps sorts kept windows by score and truncates to the synthesis budget.
 // Failed observations are dropped; overlapping/adjacent windows on the same
-// source are merged first (GrepRAG §5.6: information density > rerank).
+// source are merged first (GrepRAG: information density > rerank).
 func topKeeps(kept []mcs.Sample) []mcs.Sample {
 	return topKeepsWith(kept, nil)
 }
@@ -624,7 +624,7 @@ func consolidateWindows(kept []mcs.Sample) []mcs.Sample {
 }
 
 // expandWindows grows each kept span by expandMargin runes against the live
-// body (LENS §4.4 / GrepRAG: expand boundaries for readable continuous blocks
+// body (expand boundaries for readable continuous blocks
 // while the span stays the source of truth for citations).
 const expandMargin = 24
 
@@ -686,7 +686,7 @@ func unionStrings(a, b []string) []string {
 	return out
 }
 
-// runDeep is the ReAct-shaped loop with per-fact coverage (LENS B1/B2):
+// runDeep is the ReAct-shaped loop with per-fact coverage:
 // sample sources → evaluate fact coverage → bounded self-correction on the
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
 // Returns admitted source IDs (every file the loop scored) for ir-rag 1.5
@@ -696,7 +696,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		affinity = map[string]bool{}
 	}
 	fx := facts.Build(query)
-	// B6 oracle hints: "f1:描述" strings let a FactAware scorer emit the
+	// oracle hints: "f1:描述" strings let a FactAware scorer emit the
 	// per-fact observation vector in the same scoring call.
 	hints := make([]string, len(fx))
 	for i, f := range fx {
@@ -745,7 +745,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if s.Status != source.StatusActive {
 			continue
 		}
-		// Weakest-requirement stop (LENS B2): the strongest window with full
+		// Weakest-requirement stop: the strongest window with full
 		// coverage is enough — sampling further admitted files wastes budget
 		// and latency (真机: 85s/13944 tokens 空转在已答问题上).
 		if rep.Complete && bestScore >= 8 {
@@ -962,7 +962,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	if !rep.Complete {
 		b.WriteString("\n【未覆盖需求】")
 		b.WriteString(strings.Join(rep.Missing, ", "))
-		// Weakest-requirement floor (B2): open facts cap confidence.
+		// Weakest-requirement floor: open facts cap confidence.
 		if conf > 0.45 {
 			conf = 0.45
 		}
@@ -1122,7 +1122,8 @@ func claimOf(c cluster.Cluster) string {
 	return cluster.NumericClaim(c)
 }
 
-// BuildCitations maps answer samples back to source spans (门 D: 引用可点回原文).
+// BuildCitations maps answer samples back to source spans, so a citation
+// resolves to the original text.
 // Each sample resolves against its own source: DEEP keeps multi-source windows
 // with sm.Source = doc id, while FAST/cluster-reuse samples carry a sampling
 // method label and fall back to the answer's single source. Resolved means the

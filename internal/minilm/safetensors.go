@@ -5,7 +5,7 @@
 // the SAME vector space as Sirchmunk's semantic cache index without cgo,
 // ONNX runtime, or a Python sidecar.
 //
-// Feasibility numbers (see docs/embed-notes.md): 118M params,
+// Feasibility numbers: 118M params,
 // ~5.4 GFLOP per 128-token sequence on 12 CPU threads.
 package minilm
 

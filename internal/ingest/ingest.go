@@ -61,7 +61,7 @@ func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store 
 	}
 }
 
-// MaxSyncBodyBytes is the synchronous put cap (§3.4.2): larger corpora must
+// MaxSyncBodyBytes is the synchronous put cap: larger corpora must
 // go through the Job path (ingest-files / serve jobs), never block a request.
 const MaxSyncBodyBytes = 256 << 10
 
@@ -175,7 +175,7 @@ func (s *Store) ActiveSources(ctx context.Context) ([]source.Source, error) {
 }
 
 // EvidenceHit is one live evidence window (ask_evidence) — the "history
-// success" input to the LENS B4 prior's history arm.
+// success" input to the prior's history arm.
 type EvidenceHit struct {
 	SourceID string  `json:"source_id"`
 	Score    float64 `json:"score"`
@@ -183,7 +183,7 @@ type EvidenceHit struct {
 }
 
 // SourcesByIDs returns the ACTIVE sources with the given ids (unknown or
-// retired ids are skipped). G2: the reuse path validates a warm prior against
+// retired ids are skipped). The reuse path validates a warm prior against
 // only the documents a cluster anchors on, instead of reading the whole
 // corpus (14k articles ≈ 2s of paged reads for a 0-sample answer).
 func (s *Store) SourcesByIDs(ctx context.Context, ids []string) ([]source.Source, error) {
@@ -332,7 +332,7 @@ func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
 }
 
 // ReconcileReport summarizes one downstream pass over the ask_sources
-// changelog (§3.4.2: 下游轮询消费，游标持久化，at-least-once + _id 幂等).
+// changelog (下游轮询消费，游标持久化，at-least-once + _id 幂等).
 type ReconcileReport struct {
 	Scanned        int    `json:"scanned"`
 	EvInvalidated  int    `json:"evidence_invalidated"`
@@ -386,7 +386,7 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 }
 
 // markClustersStale flags clusters anchored on a retired source 待复核
-// (emerging) — the reconcile-side trigger for the B8 re-validation.
+// (emerging) — the reconcile-side trigger for the re-validation.
 func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
 	res, err := s.c.Query(ctx, s.clusters, contract.Query{
 		Filter: map[string]any{"source_id": docID},
@@ -504,7 +504,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	}
 	// Paginate: a corpus larger than one page used to be silently truncated
 	// (operator asked for a full backfill, got the first 1000). Same failure
-	// mode as the v1.19 ActiveSources truncation.
+	// mode as the earlier ActiveSources truncation.
 	const page = 1000
 	for skip := 0; ; skip += page {
 		res, qe := s.c.Query(ctx, s.sources, contract.Query{
@@ -570,8 +570,7 @@ func trimRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// JobDoc is the async-ingest state-machine state under KV ask:job:<name>
-// (design §3.4.2: 进度必须真实可查).
+// JobDoc is the async-ingest state-machine state under KV ask:job:<name>.
 type JobDoc struct {
 	Job     string `json:"job"`
 	State   string `json:"state"` // queued | running | done | failed
@@ -716,7 +715,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 
 // MapSpec is the declarative Path B mapping (ingest-jsonl --map): body/title/
 // key are {{field}} templates — never raw JSON serialization — while the
-// listed fields pass through to meta for filtering (design §3.4.2).
+// listed fields pass through to meta for filtering.
 type MapSpec struct {
 	Title string   `json:"title"`
 	Body  string   `json:"body"`

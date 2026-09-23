@@ -1,6 +1,6 @@
 package main
 
-// Web UI (P7 v0): a single self-contained page embedded into the binary —
+// Web UI: a single self-contained page embedded into the binary —
 // the appliance serves its own workbench with zero Node runtime. The page
 // talks to /v1/search/stream (SSE) and /v1/sessions (KV) directly.
 

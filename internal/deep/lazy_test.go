@@ -32,7 +32,7 @@ func (r *countingReader) SourcesByIDs(_ context.Context, ids []string) ([]source
 	return out, nil
 }
 
-// G2 end-to-end at the engine level: a warm hit must never materialize the
+// end-to-end at the engine level: a warm hit must never materialize the
 // full corpus (loader stays at one call — the cold first ask).
 func TestAskLazySkipsCorpusLoadOnWarmHit(t *testing.T) {
 	ctx := context.Background()
@@ -69,7 +69,7 @@ func TestAskLazySkipsCorpusLoadOnWarmHit(t *testing.T) {
 	}
 }
 
-// G2 guard: when the reuse attempt escalates (multi-fact, incomplete cover),
+// guard: when the reuse attempt escalates (multi-fact, incomplete cover),
 // the lazy path must pay for the corpus exactly then.
 func TestAskLazyLoadsCorpusWhenEscalating(t *testing.T) {
 	ctx := context.Background()

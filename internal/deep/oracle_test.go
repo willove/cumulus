@@ -12,7 +12,7 @@ import (
 	"github.com/cumubase/ask/internal/source"
 )
 
-// oracleE2EScorer feeds the B6 observation vector through the whole DEEP loop:
+// oracleE2EScorer feeds the observation vector through the whole DEEP loop:
 // one scoring call per window names every fact the window supports.
 type oracleE2EScorer struct{}
 
@@ -35,7 +35,7 @@ func (oracleE2EScorer) ScoreWithFacts(_ context.Context, _ string, _ []string, s
 }
 
 // Multi-hop paraphrase (zero lexical overlap between facts) must complete via
-// the oracle vector, and the accounting fields (B9) must be present.
+// the oracle vector, and the accounting fields must be present.
 func TestAskOracleCoverageAndAccounting(t *testing.T) {
 	body := strings.Repeat("无关内容甲乙丙丁。\n", 60) +
 		"上限为一百二十八台。\n" +

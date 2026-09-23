@@ -84,7 +84,7 @@ type Engine struct {
 	Analyzer Analyzer
 	Synth    Synthesizer
 	Expander KeywordExpander
-	// UsePrior ranks candidates with the LENS B4 multi-signal prior
+	// UsePrior ranks candidates with the multi-signal prior
 	// (internal/prior, opt-in; plain IDF cascade by default).
 	UsePrior bool
 	// PriorHist feeds the prior's history arm from successful evidence
@@ -390,7 +390,7 @@ func MatchFilename(query string, sources []source.Source) (Answer, bool) {
 	}, true
 }
 
-// rankFields ranks sources by the keyword cascade, or by the B4 prior when
+// rankFields ranks sources by the keyword cascade, or by the prior when
 // the engine opts in (empty prior result falls back to the plain cascade).
 func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 	if e.UsePrior && len(fields) > 0 {

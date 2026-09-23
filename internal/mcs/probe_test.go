@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// R3 probe (design §6.6): how often do stage-1 CJK anchors actually land in
+// probe: how often do stage-1 CJK anchors actually land in
 // the body, and does a window containing the known answer survive scoring?
 // Run with: go test ./internal/mcs -run TestR3AnchorProbe -v
 func TestR3AnchorProbe(t *testing.T) {
@@ -63,7 +63,7 @@ func TestR3AnchorProbe(t *testing.T) {
 	t.Logf("R3 anchor probe: field hit-rate %.3f (%d/%d) · localization %.3f (%d/%d cases)",
 		hitRate, hitFields, totalFields, locRate, localized, len(cases))
 	// Field hit-rate is recorded, not gated: CJK bigram anchors are noisy
-	// (R3) — that is why stage 1 keeps the stratified arm. The KPI is the
+	// (noisy anchors) — that is why stage 1 keeps the stratified arm. The KPI is the
 	// answer actually landing in a scored window.
 	if locRate < 0.5 {
 		t.Fatalf("localization rate too low: %.3f", locRate)

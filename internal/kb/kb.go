@@ -33,8 +33,8 @@ type Engine struct {
 	Embedder cluster.Embedder
 	Edges    graph.Store // optional; nil = no expansion
 	Cites    CiteStore   // optional; nil = no cite edges
-	// SourceReader narrows the B8 warm-prior validation to the documents a
-	// cluster anchors on (G2). nil = validation uses the caller's list.
+	// SourceReader narrows the warm-prior validation to the documents a
+	// cluster anchors on. nil = validation uses the caller's list.
 	SourceReader SourceReader
 	ReuseTheta   float64
 	MergeTheta   float64
@@ -114,7 +114,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return finish(res), nil
 	}
 
-	// Phase 0b (G1): cross-topic near hits are merge candidates only — never
+	// Phase 0b: cross-topic near hits are merge candidates only — never
 	// returned as a reused answer (G-pollute). L0 still answers; saveAnswer
 	// folds into the strongest candidate when AcceptFold passes.
 	ans, err := e.Fast.Search(ctx, query, sources)
@@ -132,7 +132,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	return finish(res), nil
 }
 
-// TryReuseNarrow is the G2 reuse attempt: the warm-prior validation runs
+// TryReuseNarrow is the narrow reuse attempt: the warm-prior validation runs
 // against ONLY the sources the candidate cluster anchors on (its evidence
 // windows + answer source), so a warm hit costs one small read instead of a
 // full-corpus page walk. Returns ok=false whenever the caller must fall back
@@ -190,7 +190,7 @@ func (e *Engine) reuseAttempt(ctx context.Context, query string, qe []float64, s
 // the reuse result. A stale prior is marked 待复核 and reported as "no
 // reuse" — the L0 path self-heals it.
 func (e *Engine) reuseAttemptWith(ctx context.Context, query string, qe []float64, same []cluster.Cluster, c *cluster.Cluster, validateAgainst []source.Source) (Result, bool) {
-	// B8 warm-prior validation (LENS): a prior is only warm while it
+	// warm-prior validation: a prior is only warm while it
 	// still matches the CURRENT corpus. Any evidence window that no
 	// longer pins back exactly (source updated/gone) disqualifies the
 	// prior — mark it 待复核 and fall through to L0, which self-heals
@@ -201,7 +201,7 @@ func (e *Engine) reuseAttemptWith(ctx context.Context, query string, qe []float6
 		return Result{}, false
 	}
 	if c.Lifecycle == cluster.LifecycleEmerging {
-		// B8: the prior just validated against the current corpus —
+		// the prior just validated against the current corpus —
 		// self-heal complete.
 		c.Lifecycle = cluster.LifecycleStable
 	}
@@ -384,10 +384,10 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 	for _, s := range sources {
 		fresh[s.ID] = s.UpdatedAt
 	}
-	// G2: a narrow reuse hit only carries the cluster's own anchors, so a
+	// a narrow reuse hit only carries the cluster's own anchors, so a
 	// neighbour's source may be missing from `fresh`. When structured/TS
 	// pruning is configured, read that one document instead of silently
-	// disabling the prune (Gate N regression).
+	// disabling the prune (regression).
 	var reader SourceReader
 	if e.SourceReader != nil && (e.HopTS > 0 || e.MinHotness > 0 || e.MinConfidence > 0) {
 		reader = e.SourceReader
@@ -470,7 +470,7 @@ func (e *Engine) lastClusterID(ctx context.Context) string {
 	return best.ID
 }
 
-// priorStale validates a warm prior against the CURRENT corpus (B8): the
+// priorStale validates a warm prior against the CURRENT corpus: the
 // cluster's source must still exist and every stored evidence window must
 // pin back exactly (rune-exact slice of the live body). Empty evidence is
 // treated as valid — nothing there can contradict the corpus.

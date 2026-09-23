@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// B5: the global arm must sweep the whole span, not cluster at one end —
+// the global arm must sweep the whole span, not cluster at one end —
 // with a fixed seed the draws stay reproducible while covering both edges.
 func TestGlobalScatterSpan(t *testing.T) {
 	n := 6000
@@ -50,7 +50,7 @@ func (a armScorer) Score(_ context.Context, _ string, s Sample) (float64, string
 	return 0, "miss", nil
 }
 
-// B5 online weights: an arm that yields scoreable windows pulls budget from
+// online weights: an arm that yields scoreable windows pulls budget from
 // arms that yield nothing — but never below the one-slot floor.
 func TestLambdaShiftsBudgetToYieldingArm(t *testing.T) {
 	bodyRunes := make([]rune, 6000)
@@ -76,7 +76,7 @@ func TestLambdaShiftsBudgetToYieldingArm(t *testing.T) {
 	}
 }
 
-// B6 oracle path: a FactAware scorer's covers flow into samples.
+// oracle path: a FactAware scorer's covers flow into samples.
 type oracleScorer struct{}
 
 func (oracleScorer) Score(_ context.Context, _ string, s Sample) (float64, string, error) {

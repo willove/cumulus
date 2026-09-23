@@ -1,7 +1,7 @@
-// Package facts implements LENS per-fact evidence targets (B1): decompose a
+// Package facts implements per-fact evidence targets: decompose a
 // query into atomic requirements D_req = {f1..fK}, track per-fact coverage
 // from a shared sample pool, and report the weakest-requirement stop signal
-// (B2). Offline decomposition is a deterministic heuristic so gates stay
+// (weakest-requirement stop signal). Offline decomposition is a deterministic heuristic so gates stay
 // stable; production may replace Build with an aigate analyzer that returns
 // the same []Fact shape.
 package facts
@@ -114,7 +114,7 @@ func Evaluate(facts []Fact, samples []mcs.Sample) Report {
 	return rep
 }
 
-// hasCovers reports whether any sample carries oracle annotations (B6).
+// hasCovers reports whether any sample carries oracle annotations.
 func hasCovers(samples []mcs.Sample) bool {
 	for _, sm := range samples {
 		if len(sm.Covers) > 0 {
@@ -124,7 +124,7 @@ func hasCovers(samples []mcs.Sample) bool {
 	return false
 }
 
-// EvaluateOracle is the B6 oracle path: per-fact coverage comes from the
+// EvaluateOracle is the oracle path: per-fact coverage comes from the
 // scorer's observation vector (sample.Covers), not keyword overlap — one
 // scoring call updated every fact. Facts no window claims stay open.
 func EvaluateOracle(facts []Fact, samples []mcs.Sample) Report {
@@ -181,7 +181,7 @@ func EvaluateOracle(facts []Fact, samples []mcs.Sample) Report {
 	return rep
 }
 
-// ReportFor picks the oracle path when the scorer annotated covers (B6) and
+// ReportFor picks the oracle path when the scorer annotated covers and
 // falls back to the keyword path for plain scorers (offline stub).
 func ReportFor(facts []Fact, samples []mcs.Sample) Report {
 	if hasCovers(samples) {
@@ -190,7 +190,7 @@ func ReportFor(facts []Fact, samples []mcs.Sample) Report {
 	return Evaluate(facts, samples)
 }
 
-// ReportForOracle forces the B6 oracle path: empty covers on every window
+// ReportForOracle forces the oracle path: empty covers on every window
 // means "covered nothing", not "no annotations". FactAware scorers (aigate)
 // always emit the covers field — falling back to keywords would re-mark
 // honest misses as covered.
@@ -198,7 +198,7 @@ func ReportForOracle(facts []Fact, samples []mcs.Sample) Report {
 	return EvaluateOracle(facts, samples)
 }
 
-// NeedContinue is the budget-aware continue predicate (LENS §4.3): keep
+// NeedContinue is the budget-aware continue predicate: keep
 // exploring while some requirement is open and the loop budget remains.
 func NeedContinue(rep Report, loops, maxLoops int) bool {
 	if loops >= maxLoops {

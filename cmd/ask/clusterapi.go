@@ -1,9 +1,9 @@
 package main
 
-// Cluster browse REST face (P7 UI v1 的后勤信半边): the web workbench's
-// cluster page reads these. List is namespace-scoped like every other face
-// (P3); detail carries the cluster's cite edges so the UI can render the
-// cluster → source evidence links without a second round trip.
+// Cluster browse REST face: the web workbench's cluster page reads these.
+// List is namespace-scoped like every other face; detail carries the
+// cluster's cite edges so the UI can render the cluster → source evidence
+// links without a second round trip.
 
 import (
 	"net/http"

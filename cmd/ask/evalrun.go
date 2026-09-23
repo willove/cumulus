@@ -1,10 +1,10 @@
 package main
 
-// ask eval-run — LENS 式真实语料评测（R-E1，lens-notes §7.4）。
+// ask eval-run — LENS 式真实语料评测。
 // items JSONL 复用 internal/eval.Item：answer 字段是判官参考文本（检索型
 // 数据集没有短答案字符串，如法条原文），gold_sources 是 Ev.Rec 目标文档键。
 // 每项跑真实管线（FAST→DEEP 升级）得系统答案，同时产出一个 Closed-Book
-// 直答对照（论文 §6：揭穿「凭模型记忆答对」）；-judge 时端点判官按
+// 直答对照（揭穿「凭模型记忆答对」）；-judge 时端点判官按
 // judge_correct 资产把「候选回答 vs 参考标准」打成 0–10 分（≥7 判对）。
 // 逐项落盘可续跑（中断不丢已完成项），每次运行末尾对**全量**结果文件
 // 聚合：EM/Ev.Rec/Ground + 失败四分类 + McNemar 配对 + 档位分布。
@@ -167,7 +167,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if os.Getenv("ASK_ABSTAIN") == "1" {
 			dE.Abstain = abstain.Default()
 			if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
-				// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+				// 早弃权默认关：DEEP 有救回拒答的真实先例，
 				// 运营商显式开才牺牲这段恢复机会换 token。
 				dE.Abstain.EarlyAbove = 0
 			}
@@ -178,7 +178,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	} else if os.Getenv("ASK_ABSTAIN") == "1" {
 		dE.Abstain = abstain.Default()
 		if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
-			// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+			// 早弃权默认关：DEEP 有救回拒答的真实先例，
 			// 运营商显式开才牺牲这段恢复机会换 token。
 			dE.Abstain.EarlyAbove = 0
 		}

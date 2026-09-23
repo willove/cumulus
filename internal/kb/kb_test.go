@@ -20,7 +20,7 @@ func fixtureSources() []source.Source {
 	}
 }
 
-// Gate B: second synonymous query reuses the cluster with 0 samples.
+// second synonymous query reuses the cluster with 0 samples.
 func TestGateBReuseZeroSampling(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()
@@ -57,7 +57,7 @@ func TestGateBReuseZeroSampling(t *testing.T) {
 	}
 }
 
-// Gate B: many paraphrases do not fracture (split_cap).
+// many paraphrases do not fracture (split_cap).
 func TestGateBNoFractureUnderParaphrase(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()
@@ -96,7 +96,7 @@ func TestGateBNoFractureUnderParaphrase(t *testing.T) {
 	}
 }
 
-// Gate B: drop all clusters and rebuild yields the same stable id.
+// drop all clusters and rebuild yields the same stable id.
 func TestGateBDropRebuild(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()

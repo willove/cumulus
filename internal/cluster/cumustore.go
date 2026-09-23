@@ -128,7 +128,7 @@ func evidenceToAny(ev []mcs.Sample) []any {
 			"start": s.Start, "end": s.End, "content": s.Content,
 			"source": s.Source, "score": s.Score, "reasoning": s.Reasoning,
 		}
-		// B5/B6 annotations ride along when present (omitempty shapes).
+		// annotations ride along when present (omitempty shapes).
 		if s.Arm != "" {
 			doc["arm"] = s.Arm
 		}

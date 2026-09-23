@@ -112,7 +112,7 @@ func main() {
 	if err := ns.Validate(namespace); err != nil {
 		fatal(err)
 	}
-	// Namespace scoping (P3): an explicit -sources/-evidence is a full engine
+	// Namespace scoping: an explicit -sources/-evidence is a full engine
 	// identity and wins verbatim; otherwise the suite's own collections are
 	// composed as "ns:coll" so one tenant's reuse path never sees another's.
 	if sources == "" {
@@ -456,7 +456,7 @@ func main() {
 			}
 			printJSON(cl)
 		case "tidy":
-			// P6: cross-topic near-duplicate sweep. The write path only
+			// Cross-topic near-duplicate sweep. The write path only
 			// merges within a topic key, so paraphrases asked in genuinely
 			// different wordings survive as siblings; this folds them.
 			fs := flag.NewFlagSet("tidy", flag.ExitOnError)
@@ -514,7 +514,7 @@ func main() {
 			os.Exit(2)
 		}
 	case "eval-demo":
-		// LENS B3 evidence-quality protocol demo (offline, deterministic).
+		// Evidence-quality protocol demo (offline, deterministic).
 		items := []eval.Item{
 			{ID: "q1", Query: "连接池最大连接数", Answer: "128", Gold: []string{"handbook"}},
 			{ID: "q2", Query: "部署机房", Answer: "广州", Gold: []string{"handbook"}},
@@ -548,7 +548,7 @@ func main() {
 		runSessionCLI(ctx, c, rest, namespace)
 		return
 	case "eval-run":
-		// LENS 式真实语料评测（R-E1）：真实管线 + Closed-Book 对照 + 判官。
+		// LENS 式真实语料评测：真实管线 + Closed-Book 对照 + 判官。
 		fs := flag.NewFlagSet("eval-run", flag.ExitOnError)
 		file := fs.String("file", "", "items jsonl (eval.Item: id/query/answer=reference/gold_sources)")
 		out := fs.String("out", "", "results jsonl (resumable; report aggregates the whole file)")
@@ -584,7 +584,7 @@ func main() {
 // search: explicit AIGATE_EMBED_MODEL over AIGATE_BASE_URL, else the offline
 // Local hash embedder.
 func embedderFor() (ingest.EmbedderFn, int, string) {
-	// 纯 Go MiniLM（embed-notes §8）：ASK_EMBED=minilm 显式开启；权重直接
+	// 纯 Go MiniLM：ASK_EMBED=minilm 显式开启；权重直接
 	// 复用 Sirchmunk 的模型缓存，向量空间与其语义缓存索引一致（384 维）。
 	if os.Getenv("ASK_EMBED") == "minilm" {
 		if minilm.Available() {

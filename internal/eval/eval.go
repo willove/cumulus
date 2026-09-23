@@ -1,4 +1,4 @@
-// Package eval is the LENS evidence-quality protocol (B3): Ev.Rec / Ground /
+// Package eval is the evidence-quality protocol: Ev.Rec / Ground /
 // Closed-Book reference and a McNemar paired test, so answer quality is not
 // judged by EM alone. Offline scoring is deterministic (substring / overlap);
 // an aigate judge can replace Correct() without changing the metric shape.
@@ -78,7 +78,7 @@ type Report struct {
 	Notes    string   `json:"notes,omitempty"`
 }
 
-// Taxonomy is the LENS four-way mutually exclusive verdict (§6.1): every item
+// Taxonomy is the four-way mutually exclusive verdict: every item
 // lands in exactly one class, so the fields sum to N. RetrievedOnly separates
 // "looked in the right place but answered badly" from never finding the
 // evidence at all.
@@ -210,7 +210,7 @@ func ClosedBook(it Item, answer string) ItemScore {
 	}
 }
 
-// McNemar is the paired discordant-pair test (LENS §6.6).
+// McNemar is the paired discordant-pair test.
 type McNemar struct {
 	BOnly int     `json:"b_only"`
 	COnly int     `json:"c_only"`

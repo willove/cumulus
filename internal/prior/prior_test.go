@@ -7,7 +7,7 @@ import (
 	"github.com/cumubase/ask/internal/source"
 )
 
-// LENS B4: path/title/struct signals must lift the right file.
+// path/title/struct signals must lift the right file.
 func TestBuildRanksPathSignal(t *testing.T) {
 	generic := strings.Repeat("填充内容 padding padding。\n", 20)
 	a := source.New("连接池配置手册", "md", "file://a", "a", "zh", generic, nil)

@@ -1,11 +1,11 @@
 package main
 
-// Session persistence (P2): chat sessions live in cumudb KV under
+// Session persistence: chat sessions live in cumudb KV under
 // ask:session:<id> — one JSON document per session holding the message
 // stream. `ask search -session <id>` folds the recent turns into the history
 // rewriter and appends the new turn afterwards; the HTTP /v1/search body
-// accepts the same "session" field. UI v1's ChatThreads reads the same keys.
-// P3: with -ns / "ns" the keys are scoped as ns:<name>:ask:session:<id>.
+// accepts the same "session" field. The web workbench's ChatThreads reads the
+// same keys. With -ns / "ns" the keys are scoped as ns:<name>:ask:session:<id>.
 
 import (
 	"context"
@@ -60,7 +60,7 @@ func newSessionID() string {
 
 type sessionStore struct {
 	c  cumulite.Port
-	ns string // P3: namespace scope — "" = default library KV keys
+	ns string // namespace scope — "" = default library KV keys
 }
 
 func (st sessionStore) key(id string) string { return ns.KV(st.ns, sessionKeyPrefix+id) }

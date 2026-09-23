@@ -38,7 +38,7 @@ type ChatClient struct {
 	// into message.reasoning_content (content stays the clean answer).
 	ReasoningSplit bool
 
-	total atomic.Int64 // B9: cumulative upstream-reported tokens
+	total atomic.Int64 // cumulative upstream-reported tokens
 }
 
 func (c *ChatClient) http() *http.Client {
@@ -106,7 +106,7 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 		return "", err
 	}
 	if out.Usage.TotalTokens > 0 {
-		c.total.Add(out.Usage.TotalTokens) // B9 budget accounting
+		c.total.Add(out.Usage.TotalTokens) // budget accounting
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("llm: empty choices")
@@ -122,7 +122,7 @@ func (c *ChatClient) Complete(ctx context.Context, user string) (string, error) 
 }
 
 // TotalTokens reports the cumulative upstream-reported token usage of every
-// completed call through this client (B9 per-query accounting; the CLI reads
+// completed call through this client (per-query accounting; the CLI reads
 // it after one search). Atomic — serve handlers may share the client.
 func (c *ChatClient) TotalTokens() int64 { return c.total.Load() }
 
@@ -139,7 +139,7 @@ func SplitThink(content string) (clean, reasoning string) {
 }
 
 // AigateScorer scores samples via the evaluate_sample prompt (v2: emits the
-// per-fact oracle vector when given fact hints — LENS B6).
+// per-fact oracle vector when given fact hints).
 type AigateScorer struct {
 	Client *ChatClient
 }
@@ -178,7 +178,7 @@ func (s *AigateScorer) Score(ctx context.Context, query string, sm mcs.Sample) (
 	return r.Score, r.Reasoning, nil
 }
 
-// ScoreWithFacts implements mcs.FactAware (B6 oracle vector): covers are
+// ScoreWithFacts implements mcs.FactAware (oracle vector): covers are
 // clamped to the given fact ids.
 func (s *AigateScorer) ScoreWithFacts(ctx context.Context, query string, facts []string, sm mcs.Sample) (float64, string, []string, error) {
 	r, err := s.evaluate(ctx, query, facts, sm)

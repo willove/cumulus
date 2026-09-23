@@ -44,7 +44,7 @@ func setupGraph(t *testing.T) (*Expander, cluster.Store, Store) {
 	return NewExpander(es, cs), cs, es
 }
 
-// 门 C: hand-written neighborhood at depth 1..2.
+// Hand-written neighborhood at depth 1..2.
 func TestMultiHopNeighborhood(t *testing.T) {
 	ctx := context.Background()
 	ex, _, _ := setupGraph(t)
@@ -78,7 +78,7 @@ func TestMultiHopNeighborhood(t *testing.T) {
 	}
 }
 
-// 门 C: hopKNN keeps the probe-closest neighbors and does not drop a high-sim one.
+// hopKNN keeps the probe-closest neighbors and does not drop a high-sim one.
 func TestHopKNNPruneKeepsClosest(t *testing.T) {
 	ctx := context.Background()
 	ex, _, _ := setupGraph(t)
@@ -127,7 +127,7 @@ func TestHopKNNPruneKeepsClosest(t *testing.T) {
 	}
 }
 
-// 门 C: empty graph returns nil — caller falls back to L0.
+// empty graph returns nil — caller falls back to L0.
 func TestEmptyGraphFallsBack(t *testing.T) {
 	ctx := context.Background()
 	ex := NewExpander(NewMemory(), cluster.NewMemory())

@@ -1,4 +1,4 @@
-// Package prior is LENS B4: a low-cost, query-conditioned prior over
+// Package prior is a low-cost, query-conditioned prior over
 // candidate evidence regions, fused from multiple cheap signals and factored
 // as π_file × π_pos. Nothing here reads raw text through an LLM.
 package prior
@@ -61,7 +61,7 @@ type History struct {
 }
 
 // HistoryFrom merges successful-evidence sources and snippet texts into a
-// warm-prior History (LENS §4.1 历史成功证据 family). Snippets contribute
+// warm-prior History (历史成功证据 family). Snippets contribute
 // their tokens as QueryTokens; source IDs alone already score 1.0 on the
 // history arm.
 func HistoryFrom(sourceIDs, snippets []string) *History {

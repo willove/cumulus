@@ -6,7 +6,7 @@ import (
 	"github.com/cumubase/ask/internal/mcs"
 )
 
-// Offline engine parts shared by the G2 reuse tests: deterministic FAST tier,
+// Offline engine parts shared by the reuse tests: deterministic FAST tier,
 // in-memory cluster store, local hash embedder.
 func fastStub() *fast.Engine {
 	return fast.New(mcs.KeywordScorer{Keywords: []string{"连接池", "128"}})

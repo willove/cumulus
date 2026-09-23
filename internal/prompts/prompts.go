@@ -1,4 +1,4 @@
-// Package prompts is the SSOT for LLM prompt assets (S5 plan §6.3 / R1).
+// Package prompts holds the LLM prompt assets.
 // Bodies live in sibling .md files so wording can be reviewed and frozen
 // without touching Go; templates inject {{param}} placeholders at runtime.
 package prompts

@@ -9,7 +9,7 @@ import (
 	"github.com/cumubase/ask/internal/mcs"
 )
 
-// G1: a cross-topic cluster with one strong shared level key must NOT be
+// a cross-topic cluster with one strong shared level key must NOT be
 // returned as a reused answer; L0 still runs and the write path may merge.
 func TestCrossTopicNearIsMergeNotReuse(t *testing.T) {
 	ctx := context.Background()
@@ -55,7 +55,7 @@ func TestCrossTopicNearIsMergeNotReuse(t *testing.T) {
 	}
 }
 
-// Same-topic reuse still works under max-over-keys (regression for Gate B).
+// Same-topic reuse still works under max-over-keys (regression).
 func TestSameTopicReuseStillWorks(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()

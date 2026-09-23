@@ -14,7 +14,7 @@ import (
 	"github.com/willove/cumudb/pkg/client"
 )
 
-// P3: the session KV keys are scoped through ns.KV — a tenant's session list
+// The session KV keys are scoped through ns.KV — a tenant's session list
 // must never surface another tenant's sessions (same key prefix discipline the
 // collections follow via "ns:coll" composite identities).
 func TestSessionKeyScopedByNamespace(t *testing.T) {

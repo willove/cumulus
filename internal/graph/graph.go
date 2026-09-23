@@ -99,7 +99,7 @@ func sortEdges(es []Edge) {
 	})
 }
 
-// ExpandRequest bounds one BFS expansion (four-limit style, plan G1 analogy).
+// ExpandRequest bounds one BFS expansion (four-limit style).
 type ExpandRequest struct {
 	StartID    string
 	MaxDepth   int    // default 2 (plan: 1..2 hops)
@@ -141,7 +141,7 @@ func NewExpander(es Store, cs cluster.Store) *Expander {
 }
 
 // Expand runs bounded BFS. Empty neighborhood returns nil, nil — callers fall
-// back to L0 (门 C: 空图回落).
+// back to L0 on an empty graph.
 func (e *Expander) Expand(ctx context.Context, req ExpandRequest) ([]ExpandResult, error) {
 	if req.StartID == "" {
 		return nil, nil
@@ -292,7 +292,7 @@ func passStructured(c cluster.Cluster, req ExpandRequest) bool {
 }
 
 // LinkEmbedSim adds a cosine-derived weak edge between two clusters (periodic
-// backfill in P2/P3; also callable after save).
+// backfill; also callable after save).
 func LinkEmbedSim(ctx context.Context, st Store, a, b cluster.Cluster) error {
 	if a.ID == b.ID {
 		return nil

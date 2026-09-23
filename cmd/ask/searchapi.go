@@ -1,9 +1,9 @@
 package main
 
-// Search HTTP face (P1): POST /v1/search (JSON, same shape as `ask search
+// Search HTTP face: POST /v1/search (JSON, same shape as `ask search
 // -raw`) and POST /v1/search/stream (SSE). The SSE event schema maps onto the
 // evoke-chat engine callbacks: status → loading, content → appendContent,
-// citations → ChatSources, done → completeMessage (P7 对齐).
+// citations → ChatSources, done → completeMessage.
 
 import (
 	"context"
@@ -70,7 +70,7 @@ type SearchOptions struct {
 	HopTS   time.Duration `json:"hopts,omitempty"`
 	MinHot  float64       `json:"minhot,omitempty"`
 	MinConf float64       `json:"minconf,omitempty"`
-	// Namespace scopes the L2 collections (P3): clusters, weak edges, cites and
+	// Namespace scopes the L2 collections: clusters, weak edges, cites and
 	// conflicts become "<ns>:ask_*" composite identities, so a reuse hit can
 	// never come from another tenant's namespace.
 	Namespace string `json:"namespace,omitempty"`
@@ -104,7 +104,7 @@ func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sour
 		}
 	}
 	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_clusters")), stack.emb)
-	// G2: warm-prior validation reads only the cluster's anchored docs.
+	// warm-prior validation reads only the cluster's anchored docs.
 	kbE.SourceReader = st
 	kbE.Edges = graph.NewCumuStore(c, ns.Coll(opt.Namespace, "ask_weak_edges"))
 	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(opt.Namespace, "ask_cites"))
@@ -129,7 +129,7 @@ func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sour
 	if os.Getenv("ASK_ABSTAIN") == "1" {
 		dE.Abstain = abstain.Default()
 		if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
-			// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+			// 早弃权默认关：DEEP 有救回拒答的真实先例，
 			// 运营商显式开才牺牲这段恢复机会换 token。
 			dE.Abstain.EarlyAbove = 0
 		}
@@ -152,7 +152,7 @@ func refinerFor(chat *llm.ChatClient) *llm.AigateKeywordRefiner {
 	return &llm.AigateKeywordRefiner{Client: chat}
 }
 
-// loadCandidates materializes the candidate corpus for one query (G2: kept
+// loadCandidates materializes the candidate corpus for one query (kept
 // behind a loader so a warm reuse never pays the full-corpus read).
 func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]source.Source, error) {
 	list, err := ss.st.ActiveSources(ctx)
@@ -169,7 +169,7 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 }
 
 // runSearch executes one query and applies the CLI/HTTP shared side effects
-// (evidence marking, B9 token accounting).
+// (evidence marking, token accounting).
 func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result, error) {
 	res, err := ss.dE.AskLazy(ctx, query, func(ctx context.Context) ([]source.Source, error) {
 		return ss.loadCandidates(ctx, query)
@@ -234,7 +234,7 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 
 // registerSessionFace mounts the session REST endpoints the web UI reads:
 // POST /v1/sessions (new), GET /v1/sessions (list), GET/DELETE /v1/sessions/{id}.
-// Per-request "ns" scopes the KV keys (P3); empty falls back to serveNS.
+// Per-request "ns" scopes the KV keys; empty falls back to serveNS.
 func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 	sessions := func(w http.ResponseWriter, r *http.Request) {
 		st := sessionStore{c: c}
@@ -319,7 +319,7 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
-// Per-request "ns" overrides serveNS for this query only (P3).
+// Per-request "ns" overrides serveNS for this query only.
 func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -340,7 +340,7 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
-			// Whole-stack scoping (P3): L0 corpus, L1 evidence, L2 cluster
+			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
 			// collections and KV keys all move to the request's namespace.
 			stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
 			if serr != nil {

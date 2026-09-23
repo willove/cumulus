@@ -1,9 +1,9 @@
 package cluster
 
-// Cluster tidy (P6): the write path only merges within one topic key
+// Cluster tidy: the write path only merges within one topic key
 // (kb.pickMergeable reads FindByTopic), so near-duplicate clusters asked in
-// genuinely different wordings survive across topics — Sirchmunk's "size"
-// fracture our R2 probe measured on their side. Tidy is the maintenance sweep
+// genuinely different wordings survive across topics — the "size" fracture
+// Sirchmunk shows on its side. Tidy is the maintenance sweep
 // that folds those survivors: pairwise embed-similar sweep over ONE namespace's
 // collection, deterministic (older cluster wins), idempotent, and explicit —
 // operators run it; nothing is deleted as a side effect of search.

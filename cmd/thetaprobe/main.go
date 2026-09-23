@@ -1,6 +1,5 @@
 // Command thetaprobe measures where the L2 reuse line sits for the currently
-// configured embedder (ir-rag / MeanCache-SCALM threshold search, embed-notes
-// §10 item 1).
+// configured embedder (ir-rag / MeanCache-SCALM threshold search).
 //
 // Labels are PROVENANCE, never a golden set: each seed query's text comes
 // from a known statute article (expect_key); the correct reuse target is the

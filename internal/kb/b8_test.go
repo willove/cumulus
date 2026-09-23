@@ -11,7 +11,7 @@ import (
 	"github.com/cumubase/ask/internal/source"
 )
 
-// B8 warm-prior validation: after the source is updated, the old cluster's
+// warm-prior validation: after the source is updated, the old cluster's
 // evidence no longer pins back — reuse must be refused, the cluster marked
 // 待复核 (emerging), and the L0 path must serve the FRESH answer.
 func TestStalePriorFallsToL0AndSelfHeals(t *testing.T) {

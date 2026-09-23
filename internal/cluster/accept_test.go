@@ -40,8 +40,8 @@ func TestAcceptFoldSeparationRejectsCompetitorOwnedKey(t *testing.T) {
 }
 
 // Divergent numeric claims on a cross-topic near-hit are conflicts, not
-// duplicates (e2e Gate A/J: 128↔256, 96↔192). Same-topic folds still allow
-// a claim replacement so B8 self-heal can update a stale number.
+// duplicates (128↔256, 96↔192). Same-topic folds still allow
+// a claim replacement so self-heal can update a stale number.
 func TestAcceptFoldRejectsDivergentCrossTopicClaims(t *testing.T) {
 	winner := Cluster{
 		ID: "W", TopicKey: "k128", Content: "连接池最大 128。",
@@ -55,7 +55,7 @@ func TestAcceptFoldRejectsDivergentCrossTopicClaims(t *testing.T) {
 	if ok, why := AcceptFold(winner, loser, []Cluster{winner, loser}, 3); ok {
 		t.Fatalf("cross-topic divergent claims 128 vs 256 must refuse fold: %s", why)
 	}
-	// Same topic key: B8-style claim update must still pass AcceptFold.
+	// Same topic key: a claim update must still pass AcceptFold.
 	loser.TopicKey = winner.TopicKey
 	ok, why := AcceptFold(winner, loser, []Cluster{winner, loser}, 3)
 	if !ok {

@@ -6,7 +6,7 @@ import (
 	"github.com/cumubase/ask/internal/mcs"
 )
 
-// B6: the oracle vector decides coverage — a window whose covers name the
+// the oracle vector decides coverage — a window whose covers name the
 // fact counts even when keyword overlap would miss (and vice versa).
 func TestEvaluateOracleUsesCovers(t *testing.T) {
 	fx := Build("连接池最大是多少 以及 超时多久")

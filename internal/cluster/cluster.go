@@ -548,10 +548,10 @@ func RelevanceGate(query string, c Cluster, minOverlap float64) bool {
 //
 // Additionally rejects **cross-topic** folds whose numeric claims diverge
 // (128 vs 256, 96 vs 192): those are conflicts to surface, not duplicates —
-// otherwise G1 write-path near-hits pollute conflict fixtures. Same-topic
-// folds still proceed: B8 self-heal must replace a stale claim with the
+// otherwise write-path near-hits pollute conflict fixtures. Same-topic
+// folds still proceed: self-heal must replace a stale claim with the
 // fresh one (replace path, not a union of both numbers).
-// Faithfulness (LLM, 0–3) is endpoint-only (P5), not run here.
+// Faithfulness (LLM, 0–3) is endpoint-only, not run here.
 func AcceptFold(winner, loser Cluster, competitors []Cluster, topK int) (bool, string) {
 	if topK <= 0 {
 		topK = 3

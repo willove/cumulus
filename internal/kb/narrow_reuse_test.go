@@ -27,7 +27,7 @@ func (f *fakeReader) SourcesByIDs(_ context.Context, ids []string) ([]source.Sou
 	return out, nil
 }
 
-// G2: a warm prior validates against ONLY the anchored docs — the reader is
+// a warm prior validates against ONLY the anchored docs — the reader is
 // asked for those ids and the reuse succeeds without any full corpus.
 func TestTryReuseNarrowValidatesAnchoredOnly(t *testing.T) {
 	ctx := context.Background()
@@ -58,7 +58,7 @@ func TestTryReuseNarrowValidatesAnchoredOnly(t *testing.T) {
 	}
 }
 
-// G2 guard: when the anchored source is gone, the narrow read cannot validate
+// guard: when the anchored source is gone, the narrow read cannot validate
 // the prior — reuse must NOT fire (the caller falls back to the full path,
 // which self-heals).
 func TestTryReuseNarrowRefusesWhenAnchorGone(t *testing.T) {

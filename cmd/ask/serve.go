@@ -17,7 +17,7 @@ import (
 	"github.com/willove/cumulite"
 )
 
-// sourceIn / jobIn are the HTTP ingest face payloads (design §3.4.5).
+// sourceIn / jobIn are the HTTP ingest face payloads.
 type sourceIn struct {
 	Title string         `json:"title"`
 	Type  string         `json:"type"`
@@ -26,20 +26,20 @@ type sourceIn struct {
 	Lang  string         `json:"lang"`
 	Body  string         `json:"body"`
 	Meta  map[string]any `json:"meta"`
-	NS    string         `json:"ns"` // per-request namespace (P3); empty = serve's -ns
+	NS    string         `json:"ns"` // per-request namespace; empty = serve's -ns
 }
 
 type jobIn struct {
 	Dir       string `json:"dir"`
 	Job       string `json:"job"`
 	Recursive bool   `json:"recursive"`
-	NS        string `json:"ns"` // per-request namespace (P3); empty = serve's -ns
+	NS        string `json:"ns"` // per-request namespace; empty = serve's -ns
 }
 
 // runServe exposes the HTTP faces: ingest (/health, POST /v1/ingest/sources,
-// POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (P1: POST
+// POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (POST
 // /v1/search, POST /v1/search/stream). serveNS is the default namespace for
-// every face; request bodies may override it per call (P3).
+// every face; request bodies may override it per call.
 func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, server, sourcesColl, serveNS string, verbose bool) {
 	mux := http.NewServeMux()
 

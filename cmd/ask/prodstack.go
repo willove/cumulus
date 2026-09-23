@@ -35,7 +35,7 @@ func newProdStack() prodStack {
 	// 簇语义缓存（Sirchmunk 对齐位）：MiniLM 只嵌查询与簇摘要——查询驱动的
 	// 复用匹配，从不预嵌语料。语料侧向量仍是 opt-in 加速器（embedderFor）。
 	//
-	// 3.1/§10-3：AS_EMBED 忘设或权重缺席时会**静默**退回本地 hash——
+	// AS_EMBED 忘设或权重缺席时会**静默**退回本地 hash——
 	// 部署态因此误以为在跑语义模型。verbose 下必须说清用的是哪一把。
 	cacheEmbedder := "local-hash-64"
 	if os.Getenv("ASK_EMBED") == "minilm" {

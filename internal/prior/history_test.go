@@ -7,7 +7,7 @@ import (
 	"github.com/cumubase/ask/internal/source"
 )
 
-// LENS §4.1 历史成功证据: a source whose evidence hits were marked live must
+// 历史成功证据: a source whose evidence hits were marked live must
 // outrank one with no history, other signals equal.
 func TestHistoryArmLiftsPreviouslySuccessfulSource(t *testing.T) {
 	// Distinct bodies: source IDs are content-addressed, so identical bodies

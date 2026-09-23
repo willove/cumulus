@@ -19,8 +19,8 @@ type Sample struct {
 	End       int      `json:"end"`
 	Content   string   `json:"content"`
 	Source    string   `json:"source"`
-	Arm       string   `json:"arm,omitempty"`    // B5: lex | local | global
-	Covers    []string `json:"covers,omitempty"` // B6: fact ids this window supports
+	Arm       string   `json:"arm,omitempty"`    // lex | local | global
+	Covers    []string `json:"covers,omitempty"` // fact ids this window supports
 	Score     float64  `json:"score"`
 	Reasoning string   `json:"reasoning"`
 }
@@ -38,7 +38,7 @@ type Scorer interface {
 	Score(ctx context.Context, query string, s Sample) (score float64, reasoning string, err error)
 }
 
-// FactAware is an optional Scorer extension (LENS B6 oracle vector): the
+// FactAware is an optional Scorer extension (oracle vector): the
 // scorer sees the query's atomic fact ids and reports which ones the window
 // directly supports — one scoring call updates every fact's coverage, so the
 // call count does not grow with K.
@@ -148,9 +148,9 @@ type Sampler struct {
 	Scorer Scorer
 	RNG    *rand.Rand
 	// FactHints, when set (as "f1:描述" strings), switches scoring to the
-	// FactAware oracle path (B6); nil keeps the plain scorer.
+	// FactAware oracle path; nil keeps the plain scorer.
 	FactHints []string
-	// Weights are the arm weights after the last SampleBody run (B5 λ_t;
+	// Weights are the arm weights after the last SampleBody run (λ_t;
 	// visible for gates and probes).
 	Weights map[string]float64
 	// ExploreBoost amplifies the global (semantic-blind-spot) arm's share
@@ -160,7 +160,7 @@ type Sampler struct {
 	ExploreBoost float64
 }
 
-// Arms are the complementary proposal families (LENS B5): lex anchors on the
+// Arms are the complementary proposal families: lex anchors on the
 // query's own words, local neighborhoods (stratified/gaussian), global
 // uniform scatter over the whole body — the semantic blind-spot arm.
 var Arms = []string{"lex", "local", "global"}
@@ -188,7 +188,7 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 	}
 
 	// Round 0: full sweep — stratified grid + query anchors. The spread arm
-	// is what keeps anchors from being the only entrance (R3 conclusion).
+	// is what keeps anchors from being the only entrance.
 	evaluated, err := s.evalAll(ctx, query, s.stage1(runes, query, body))
 	if err != nil {
 		return nil, err
@@ -196,7 +196,7 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 	seeds := topSeeds(evaluated, s.Cfg.TopSeeds)
 
 	// Rounds 1..N: arm-proportional proposals. λ starts equal and follows
-	// each arm's yield of scoreable windows (B5 online weights); every arm
+	// each arm's yield of scoreable windows (online weights); every arm
 	// keeps at least one slot — weights steer, they never silence.
 	λ := equalWeights()
 	for r := 0; r < s.Cfg.Rounds; r++ {
@@ -328,7 +328,7 @@ func (s *Sampler) allocate(runes []rune, query string, seeds []Sample, λ map[st
 	return out
 }
 
-// updateLambda nudges the arm weights toward this round's yield (B5 online
+// updateLambda nudges the arm weights toward this round's yield (online
 // weights): utility = each arm's share of scoreable windows, EMA 0.5,
 // renormalized to sum 1.
 func updateLambda(λ map[string]float64, batch []Sample) map[string]float64 {
@@ -423,7 +423,7 @@ func (s *Sampler) gaussian(runes []rune, seeds []Sample, limit int) []Sample {
 	return out
 }
 
-// globalScatter drops uniform-random windows over the whole body (B5 global
+// globalScatter drops uniform-random windows over the whole body (global
 // arm, LENS global proposals): the semantic blind-spot arm that ignores both
 // anchors and seeds. RNG is seeded in New, so draws stay reproducible for
 // gates.

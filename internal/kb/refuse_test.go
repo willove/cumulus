@@ -25,7 +25,7 @@ func (r refusingSynth) Synthesize(ctx context.Context, query string, samples []m
 
 func (r refusingSynth) Refused() bool { return r.refused }
 
-// Gate G-pollute (fill): a refused synthesis must NOT persist a cluster —
+// a refused synthesis must NOT persist a cluster —
 // a cached non-answer poisons reuse. Sirchmunk saved a cluster with
 // files_read=0 and answered from model memory; this suite refuses that.
 func TestRefusedAnswerDoesNotPersistCluster(t *testing.T) {

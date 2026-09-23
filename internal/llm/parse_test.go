@@ -2,7 +2,7 @@ package llm
 
 import "testing"
 
-// Frozen shape regressions for the prompt JSON contracts (§6.3).
+// Frozen shape regressions for the prompt JSON contracts.
 func TestParseAnalyzeJSON(t *testing.T) {
 	raw := `{"intent":"search","primary":{"连接池":0.9},"fallback":{"最大":0.4},"keywords_alt":{"pool":0.5}}`
 	a, err := ParseAnalyzeJSON(raw)

@@ -31,7 +31,7 @@ func newEngine() *Engine {
 	return New(k, NewMemoryConflict())
 }
 
-// 门 D: thin evidence must escalate to DEEP.
+// thin evidence must escalate to DEEP.
 func TestGateDEscalateOnLowConfidence(t *testing.T) {
 	ctx := context.Background()
 	e := newEngine()
@@ -68,7 +68,7 @@ func TestSolidFASTDoesNotEscalate(t *testing.T) {
 	}
 }
 
-// 门 D: citations resolve back to source offsets.
+// citations resolve back to source offsets.
 func TestGateDCitationsResolve(t *testing.T) {
 	ctx := context.Background()
 	e := newEngine()
@@ -113,7 +113,7 @@ func TestUnresolvedCarriesQuestionMark(t *testing.T) {
 	}
 }
 
-// 门 D: multi-source samples resolve against their own source; windows that do
+// multi-source samples resolve against their own source; windows that do
 // not pin back to the current body stay [?] (stale evidence never becomes现证).
 func TestBuildCitationsPerSourceResolution(t *testing.T) {
 	a := source.New("手册A", "md", "", "a", "zh", "连接池最大 128，详见后文说明。", nil)
@@ -144,7 +144,7 @@ func TestBuildCitationsPerSourceResolution(t *testing.T) {
 	}
 }
 
-// 门 D: conflict pairs are discoverable.
+// conflict pairs are discoverable.
 func TestGateDConflictDiscoverable(t *testing.T) {
 	ctx := context.Background()
 	st := NewMemoryConflict()
