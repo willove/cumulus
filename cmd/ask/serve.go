@@ -37,10 +37,10 @@ type jobIn struct {
 // runServe exposes the HTTP faces: ingest (/health, POST /v1/ingest/sources,
 // POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (P1: POST
 // /v1/search, POST /v1/search/stream).
-func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl string) {
+func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl string, verbose bool) {
 	mux := http.NewServeMux()
 
-	registerSearchFace(mux, c, st, sourcesColl)
+	registerSearchFace(mux, c, st, sourcesColl, verbose)
 	registerSessionFace(mux, c)
 	registerWebFace(mux)
 

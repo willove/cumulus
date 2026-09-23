@@ -221,11 +221,13 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 		return nil, nil, err
 	}
 	var out []source.Source
+	seen := map[string]bool{}
 	add := func(fields []string) bool {
 		for _, sc := range rankSources(fields, sources) {
-			if exclude[sc.src.ID] || sc.src.Status != source.StatusActive {
-				continue
+			if exclude[sc.src.ID] || seen[sc.src.ID] || sc.src.Status != source.StatusActive {
+				continue // cascade levels overlap: one file once (真机: 重复条文吃预算)
 			}
+			seen[sc.src.ID] = true
 			out = append(out, sc.src)
 			if len(out) >= m {
 				return true

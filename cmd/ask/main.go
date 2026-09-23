@@ -252,6 +252,11 @@ func main() {
 		if err != nil {
 			fatal(err)
 		}
+		if os.Getenv("ASK_VERBOSE") == "1" {
+			ss.dE.Verbose = func(f string, a ...any) {
+				fmt.Fprintf(os.Stderr, "[search] "+f+"\n", a...)
+			}
+		}
 		res, err := runSearch(ctx, ss, *q)
 		if err != nil {
 			fatal(err)
@@ -330,8 +335,9 @@ func main() {
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
+		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also ASK_VERBOSE=1)")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, server, sources)
+		runServe(ctx, c, st, *listen, server, sources, *verbose)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {

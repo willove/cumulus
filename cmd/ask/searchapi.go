@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -86,6 +88,9 @@ func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result,
 	if err != nil {
 		return deep.Result{}, err
 	}
+	if ss.dE.Verbose != nil {
+		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
+	}
 	if ss.opt.L1Pre {
 		list = ss.narrowL1Pre(ctx, list, query)
 	}
@@ -95,6 +100,10 @@ func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result,
 	}
 	if ss.chat != nil {
 		res.Tokens = ss.chat.TotalTokens()
+	}
+	if ss.dE.Verbose != nil {
+		ss.dE.Verbose("done mode=%s conf=%.2f loops=%d widened=%d tokens=%d latency=%dms reused=%v",
+			res.Mode, res.Answer.Confidence, res.Loops, res.Widened, res.Tokens, res.LatencyMS, res.Reused)
 	}
 	ans := res.Answer
 	if !res.Reused && len(ans.Samples) > 0 && ans.SourceID != "" && !ans.Skipped {
@@ -208,7 +217,7 @@ func registerSessionFace(mux *http.ServeMux, c *client.Client) {
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
-func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, sourcesColl string) {
+func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, sourcesColl string, verbose bool) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -243,6 +252,11 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
+			if verbose || os.Getenv("ASK_VERBOSE") == "1" {
+				ss.dE.Verbose = func(f string, a ...any) {
+					log.Printf("[search %s] %s", in.Query, fmt.Sprintf(f, a...))
+				}
+			}
 			if !in.Stream {
 				res, err := runSearch(r.Context(), ss, in.Query)
 				if err != nil {
@@ -257,7 +271,7 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
-			sseSearch(w, r, ss, in.Query, sess, in.Session)
+			sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("ASK_VERBOSE") == "1")
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
@@ -267,7 +281,12 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 // sseSearch streams one search as SSE events mapped onto the evoke-chat
 // engine: status → loading, content → appendContent, citations →
 // ChatSources, done → completeMessage.
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string) {
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) {
+	if verbose {
+		ss.dE.Verbose = func(f string, a ...any) {
+			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
+		}
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
@@ -284,6 +303,9 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		flusher.Flush()
 	}
 	emit("status", map[string]any{"stage": "started"})
+	ss.dE.OnFile = func(key string, best float64, windows int) {
+		emit("status", map[string]any{"stage": "file", "file": key, "score": best})
+	}
 
 	res, err := runSearch(r.Context(), ss, query)
 	if err != nil {

@@ -106,8 +106,29 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl s
 				out = append(out, s)
 			}
 		}
-		return affinityFirst(out, affinity, maxDeepLoops), nil
+		// 亲缘配额混合：同族最多 3（弱 FAST 答案会把亲缘带偏——真机:
+		// 「保护」一词命中妇女权益全家，反家暴法被挤出前 6），全局最优补足。
+		return mixedAffinity(out, affinity, maxDeepLoops, 3), nil
 	}
+}
+
+// mixedAffinity cuts candidates to m: up to cap from the affinity families
+// (stable order), then the global best for the rest — 亲缘加速但不淹没全局。
+func mixedAffinity(cands []source.Source, affinity map[string]bool, m, cap int) []source.Source {
+	var fam, rest []source.Source
+	for _, s := range cands {
+		i := strings.Index(s.BusinessKey, "-")
+		if i > 0 && affinity[s.BusinessKey[:i]] && len(fam) < cap {
+			fam = append(fam, s)
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	out := append(fam, rest...)
+	if len(out) > m {
+		out = out[:m]
+	}
+	return out
 }
 
 // widenSemantic admits the query's KNN neighbours (索引是缓存：no embedder

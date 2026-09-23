@@ -154,6 +154,12 @@ type Engine struct {
 	HistoryRewriter HistoryRewriter
 	Sources         []source.Source
 	EscalateBelow   float64
+	// Verbose, when set, receives per-step diagnostic lines (serve -verbose /
+	// ASK_VERBOSE). nil → silent.
+	Verbose func(format string, a ...any)
+	// OnFile fires after each file's windows are sampled (admission order) —
+	// the SSE face forwards it so the UI shows live progress.
+	OnFile func(key string, best float64, windows int)
 	// RankAdmission orders the sources before the DEEP loop explores them.
 	// affinity carries the law prefixes of already-answered sources (same-law
 	// statutes answer in clusters — 同法亲缘准入). nil → caller order.
@@ -370,9 +376,19 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	var kept []mcs.Sample
 	var bestSrc source.Source
 	bestScore := -1.0
+	rep := facts.ReportFor(fx, kept)
 	for _, s := range ranked {
 		if s.Status != source.StatusActive {
 			continue
+		}
+		// Weakest-requirement stop (LENS B2): the strongest window with full
+		// coverage is enough — sampling further admitted files wastes budget
+		// and latency (真机: 85s/13944 tokens 空转在已答问题上).
+		if rep.Complete && bestScore >= 8 {
+			if e.Verbose != nil {
+				e.Verbose("early stop: covered, best=%.1f, files=%d", bestScore, loops)
+			}
+			break
 		}
 		loops++
 		if loops > MaxLoops {
@@ -380,6 +396,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		}
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		if err != nil {
+			if e.Verbose != nil {
+				e.Verbose("file %s: sample error %v", s.BusinessKey, err)
+			}
 			continue
 		}
 		localBest := 0.0
@@ -392,12 +411,18 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				kept = append(kept, sm)
 			}
 		}
+		if e.OnFile != nil {
+			e.OnFile(s.BusinessKey, localBest, len(samples))
+		}
+		if e.Verbose != nil {
+			e.Verbose("file %s: windows=%d best=%.1f kept=%d", s.BusinessKey, len(samples), localBest, len(kept))
+		}
 		if localBest > bestScore {
 			bestScore = localBest
 			bestSrc = s
 		}
+		rep = facts.ReportFor(fx, kept)
 	}
-	rep := facts.ReportFor(fx, kept)
 
 	// Self-correction: weakest requirement still open → one bounded re-sample.
 	selfCorrected := false
