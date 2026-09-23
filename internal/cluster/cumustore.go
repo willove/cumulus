@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // CumuStore persists clusters in a cumudb collection (default ask_clusters).

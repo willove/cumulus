@@ -18,8 +18,8 @@ import (
 
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // Result reports what a single put did.

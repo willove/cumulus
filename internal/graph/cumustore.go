@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // CumuStore persists weak edges in ask_weak_edges.

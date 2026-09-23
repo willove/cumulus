@@ -27,8 +27,8 @@ import (
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // firstNonEmpty picks the per-request override, falling back to the serve-level

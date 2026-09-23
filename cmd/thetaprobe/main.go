@@ -29,7 +29,7 @@ import (
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/willove/cumudb/pkg/client"
 )
 
 type seed struct {

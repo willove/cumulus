@@ -32,8 +32,8 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/prompts"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // judgePass is the Correct threshold over the judge's 0–10 score.

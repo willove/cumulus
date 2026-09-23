@@ -14,7 +14,7 @@ import (
 
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumulite"
 )
 
 // sourceIn / jobIn are the HTTP ingest face payloads (design §3.4.5).

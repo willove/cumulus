@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 const sessionKeyPrefix = "ask:session:"

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/willove/cumudb/pkg/client"
 )
 
 // P3: the session KV keys are scoped through ns.KV — a tenant's session list

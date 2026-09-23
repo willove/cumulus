@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/willove/cumudb/pkg/client"
 )
 
 func TestSessionReadOutcomes(t *testing.T) {

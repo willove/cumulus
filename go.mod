@@ -3,8 +3,8 @@ module github.com/cumubase/ask
 go 1.27.0
 
 require (
-	github.com/cumubase/cumudb v0.0.0
-	github.com/cumubase/cumulite v0.0.0
+	github.com/willove/cumudb v0.0.0
+	github.com/willove/cumulite v0.0.0
 )
 
 require (
@@ -24,6 +24,6 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 
-replace github.com/cumubase/cumudb => ../../cumudb
+replace github.com/willove/cumudb => ../../cumudb
 
-replace github.com/cumubase/cumulite => ../../cumulite
+replace github.com/willove/cumulite => ../../cumulite

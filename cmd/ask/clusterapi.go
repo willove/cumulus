@@ -14,7 +14,7 @@ import (
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumulite"
 )
 
 // registerClusterFace mounts GET /v1/clusters and GET /v1/clusters/{id}.

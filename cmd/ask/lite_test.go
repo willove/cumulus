@@ -9,8 +9,8 @@ import (
 	"github.com/cumubase/ask/internal/graph"
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumudb/pkg/client"
-	"github.com/cumubase/cumulite"
+	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 // The portability claim, executed: the whole suite — put, ensure, ensure-embed,

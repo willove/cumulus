@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/willove/cumudb/pkg/client"
 )
 
 func embedOf(t *testing.T, e Embedder, s string) []float64 {
