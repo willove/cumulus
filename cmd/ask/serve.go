@@ -14,7 +14,7 @@ import (
 
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // sourceIn / jobIn are the HTTP ingest face payloads (design §3.4.5).
@@ -40,7 +40,7 @@ type jobIn struct {
 // POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (P1: POST
 // /v1/search, POST /v1/search/stream). serveNS is the default namespace for
 // every face; request bodies may override it per call (P3).
-func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, server, sourcesColl, serveNS string, verbose bool) {
+func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, server, sourcesColl, serveNS string, verbose bool) {
 	mux := http.NewServeMux()
 
 	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose)

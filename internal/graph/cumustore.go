@@ -6,15 +6,16 @@ import (
 	"time"
 
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // CumuStore persists weak edges in ask_weak_edges.
 type CumuStore struct {
-	c    *client.Client
+	c    cumulite.Port
 	coll string
 }
 
-func NewCumuStore(c *client.Client, coll string) *CumuStore {
+func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "ask_weak_edges"
 	}

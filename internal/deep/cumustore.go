@@ -6,15 +6,16 @@ import (
 	"time"
 
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // CumuCiteStore persists cluster → source evidence edges (ask_cites).
 type CumuCiteStore struct {
-	c    *client.Client
+	c    cumulite.Port
 	coll string
 }
 
-func NewCumuCiteStore(c *client.Client, coll string) *CumuCiteStore {
+func NewCumuCiteStore(c cumulite.Port, coll string) *CumuCiteStore {
 	if coll == "" {
 		coll = "ask_cites"
 	}
@@ -53,11 +54,11 @@ func (s *CumuCiteStore) List(ctx context.Context) ([]map[string]any, error) {
 
 // CumuStore persists conflict edges in a cumudb collection (ask_conflicts).
 type CumuStore struct {
-	c    *client.Client
+	c    cumulite.Port
 	coll string
 }
 
-func NewCumuStore(c *client.Client, coll string) *CumuStore {
+func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "ask_conflicts"
 	}

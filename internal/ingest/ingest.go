@@ -19,6 +19,7 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // Result reports what a single put did.
@@ -35,7 +36,7 @@ type Result struct {
 // tenant, bare name for the default library); namespace only scopes the flat
 // KV keys the Store owns (job cursors, reconcile cursor) via ns.KV.
 type Store struct {
-	c         *client.Client
+	c         cumulite.Port
 	sources   string
 	evidence  string
 	clusters  string
@@ -43,7 +44,7 @@ type Store struct {
 	jobs      string
 }
 
-func New(c *client.Client, sources, evidence, clusters, namespace string) *Store {
+func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store {
 	if sources == "" {
 		sources = "ask_sources"
 	}

@@ -18,6 +18,7 @@ import (
 
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 const sessionKeyPrefix = "ask:session:"
@@ -57,7 +58,7 @@ func newSessionID() string {
 }
 
 type sessionStore struct {
-	c  *client.Client
+	c  cumulite.Port
 	ns string // P3: namespace scope — "" = default library KV keys
 }
 
@@ -147,7 +148,7 @@ func sessionHistory(ctx context.Context, st sessionStore, id string, max int) ([
 
 // --- CLI face ---------------------------------------------------------------
 
-func runSessionCLI(ctx context.Context, c *client.Client, args []string, namespace string) {
+func runSessionCLI(ctx context.Context, c cumulite.Port, args []string, namespace string) {
 	st := sessionStore{c: c, ns: namespace}
 	sub := "list"
 	if len(args) > 0 {

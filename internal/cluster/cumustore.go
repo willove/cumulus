@@ -8,15 +8,16 @@ import (
 
 	"github.com/cumubase/ask/internal/mcs"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // CumuStore persists clusters in a cumudb collection (default ask_clusters).
 type CumuStore struct {
-	c    *client.Client
+	c    cumulite.Port
 	coll string
 }
 
-func NewCumuStore(c *client.Client, coll string) *CumuStore {
+func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "ask_clusters"
 	}

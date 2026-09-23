@@ -28,6 +28,7 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // firstNonEmpty picks the per-request override, falling back to the serve-level
@@ -47,7 +48,7 @@ func firstNonEmpty(a, b string) string {
 // serveSources is the serve-level sources identity the caller already resolved
 // (an explicit -sources full identity wins over -ns there) and is returned
 // unchanged when the request stays in the serve's namespace.
-func storeForNS(c *client.Client, st *ingest.Store, serveNS, reqNS, serveSources string) (*ingest.Store, string, error) {
+func storeForNS(c cumulite.Port, st *ingest.Store, serveNS, reqNS, serveSources string) (*ingest.Store, string, error) {
 	if err := ns.Validate(reqNS); err != nil {
 		return nil, "", err
 	}
@@ -83,14 +84,14 @@ type searchStack struct {
 	dE          *deep.Engine
 	chat        *llm.ChatClient
 	st          *ingest.Store
-	c           *client.Client
+	c           cumulite.Port
 	sourcesColl string
 	opt         SearchOptions
 }
 
 // newSearchStack wires the production stack (aigate when configured, offline
 // stubs otherwise) with the ranked admission and widening callbacks.
-func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sourcesColl string, opt SearchOptions) (*searchStack, error) {
+func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions) (*searchStack, error) {
 	stack := newProdStack()
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = opt.Prior
@@ -234,7 +235,7 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 // registerSessionFace mounts the session REST endpoints the web UI reads:
 // POST /v1/sessions (new), GET /v1/sessions (list), GET/DELETE /v1/sessions/{id}.
 // Per-request "ns" scopes the KV keys (P3); empty falls back to serveNS.
-func registerSessionFace(mux *http.ServeMux, c *client.Client, serveNS string) {
+func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 	sessions := func(w http.ResponseWriter, r *http.Request) {
 		st := sessionStore{c: c}
 		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/sessions"), "/")
@@ -319,7 +320,7 @@ func registerSessionFace(mux *http.ServeMux, c *client.Client, serveNS string) {
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
 // Per-request "ns" overrides serveNS for this query only (P3).
-func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
+func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {

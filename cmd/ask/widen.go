@@ -17,9 +17,10 @@ import (
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
-func widenFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl string, refiner *llm.AigateKeywordRefiner) func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
+func widenFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string, refiner *llm.AigateKeywordRefiner) func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
 	return func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error) {
 		all, err := st.ActiveSources(ctx)
 		if err != nil {
@@ -83,7 +84,7 @@ func affinityFirst(cands []source.Source, affinity map[string]bool, m int) []sou
 // (diagnosis: 反家庭暴力法's real articles lost to short unrelated ones);
 // the semantic neighbours recover the statutes the wording never touches
 // (Sirchmunk dir_scan 对齐).
-func rankFunc(fe *fast.Engine, st *ingest.Store, c *client.Client, sourcesColl string) func(context.Context, string, []source.Source, map[string]bool) ([]source.Source, error) {
+func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string) func(context.Context, string, []source.Source, map[string]bool) ([]source.Source, error) {
 	return func(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) ([]source.Source, error) {
 		// Sweep wide, then let affinityFirst cut the loop budget: the global
 		// top-6 rarely contains the right member of the right family, but the
@@ -134,7 +135,7 @@ func mixedAffinity(cands []source.Source, affinity map[string]bool, m, cap int) 
 // widenSemantic admits the query's KNN neighbours (索引是缓存：no embedder
 // configured, no index, or a KNN error → empty, the search simply stays
 // keyword-only — never an error path for the caller).
-func widenSemantic(ctx context.Context, c *client.Client, sourcesColl string, all []source.Source, exclude map[string]bool, query string, m int) ([]source.Source, error) {
+func widenSemantic(ctx context.Context, c cumulite.Port, sourcesColl string, all []source.Source, exclude map[string]bool, query string, m int) ([]source.Source, error) {
 	embedFn, _, _ := embedderFor()
 	qv, err := embedFn(ctx, []string{query})
 	if err != nil || len(qv) != 1 {

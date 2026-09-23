@@ -21,6 +21,7 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 const usage = `ask — cognitive search suite (on cumudb)
@@ -49,6 +50,8 @@ Usage:
 
 Flags:
   -server URL    cumudb base URL (default http://127.0.0.1:8480)
+  -lite DIR      嵌入式存储（cumulite，Badger 单文件）：指向目录即完全不连
+                 cumudb 服务端，同一套集合与 KV 语义照旧；DIR 不存在则创建
   -sources NAME  sources collection (default ask_sources; full identity wins over -ns)
   -evidence NAME evidence collection (default ask_evidence; full identity wins over -ns)
   -ns NAME       namespace scope: suite collections become ns:ask_* composite
@@ -75,6 +78,7 @@ func main() {
 	}
 	applyLLMAliases()
 	server := "http://127.0.0.1:8480"
+	lite := ""
 	sources := ""
 	evidence := ""
 	namespace := ""
@@ -84,6 +88,9 @@ func main() {
 		switch {
 		case a == "-server" && i+1 < len(args):
 			server = args[i+1]
+			i++
+		case a == "-lite" && i+1 < len(args):
+			lite = args[i+1]
 			i++
 		case a == "-sources" && i+1 < len(args):
 			sources = args[i+1]
@@ -138,7 +145,20 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	c := client.New(server)
+	// 存储端口：-lite 指向 cumulite 嵌入式引擎（无服务端），否则连 cumudb。
+	// 两者满足同一个 Port 契约，以下的 store 装配对二者逐字节相同。
+	var port cumulite.Port
+	if lite != "" {
+		engine, err := cumulite.Open(lite)
+		if err != nil {
+			fatal(err)
+		}
+		defer engine.Close()
+		port = engine
+	} else {
+		port = client.New(server)
+	}
+	c := port
 	st := ingest.New(c, sources, evidence, clustersColl, namespace)
 
 	switch cmd {

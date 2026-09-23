@@ -33,6 +33,7 @@ import (
 	"github.com/cumubase/ask/internal/prompts"
 	"github.com/cumubase/ask/internal/source"
 	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // judgePass is the Correct threshold over the judge's 0–10 score.
@@ -109,7 +110,7 @@ type evalReport struct {
 // new item to outPath (resume: ids already present are skipped). The printed
 // report aggregates the whole file so the last batch of a chunked run shows
 // the full picture.
-func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesColl, namespace, file, outPath string, judgeOn, prior, l1pre bool, limit int) error {
+func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl, namespace, file, outPath string, judgeOn, prior, l1pre bool, limit int) error {
 	items, err := readEvalItems(file)
 	if err != nil {
 		return err
@@ -275,7 +276,7 @@ func evalConfig(prior, l1pre, judge bool, namespace string) string {
 // one query. Index is deliberately omitted: with no usable ANN structure the
 // engine falls back to a filtered scan, which is the right operating point
 // for small corpora (索引是缓存：只影响快慢，不影响正确性).
-func narrowByKNN(ctx context.Context, c *client.Client, embedFn ingest.EmbedderFn, sourcesColl string, list []source.Source, query string) ([]source.Source, error) {
+func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn, sourcesColl string, list []source.Source, query string) ([]source.Source, error) {
 	qv, err := embedFn(ctx, []string{query})
 	if err != nil || len(qv) != 1 {
 		return nil, fmt.Errorf("embed query: %w", err)

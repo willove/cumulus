@@ -14,11 +14,11 @@ import (
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/cumubase/cumudb/pkg/client"
+	"github.com/cumubase/cumulite"
 )
 
 // registerClusterFace mounts GET /v1/clusters and GET /v1/clusters/{id}.
-func registerClusterFace(mux *http.ServeMux, c *client.Client, serveNS string) {
+func registerClusterFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET only"})
