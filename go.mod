@@ -24,6 +24,7 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 
-replace github.com/willove/cumudb => ../../cumudb
+// The engines live one level up and across, under db-works/.
+replace github.com/willove/cumudb => ../../db-works/cumudb
 
-replace github.com/willove/cumulite => ../../cumulite
+replace github.com/willove/cumulite => ../../db-works/cumulite

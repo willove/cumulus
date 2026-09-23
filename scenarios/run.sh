@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-(cd ../../cumudb && go build -o "$WORK/cumudb" ./cmd/cumudb && go build -o "$WORK/cumuctl" ./cmd/cumuctl) || { echo "scenario: FAIL building cumudb"; exit 1; }
+(cd ../../db-works/cumudb && go build -o "$WORK/cumudb" ./cmd/cumudb && go build -o "$WORK/cumuctl" ./cmd/cumuctl) || { echo "scenario: FAIL building cumudb"; exit 1; }
 go build -o "$WORK/ask" ./cmd/ask || { echo "scenario: FAIL building ask"; exit 1; }
 "$WORK/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$WORK/data" -log-level warn >"$WORK/cumudb.log" 2>&1 &
 DB_PID=$!
