@@ -5,6 +5,7 @@ package main
 // deterministic without AIGATE_BASE_URL.
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -33,8 +34,20 @@ func newProdStack() prodStack {
 	}
 	// 簇语义缓存（Sirchmunk 对齐位）：MiniLM 只嵌查询与簇摘要——查询驱动的
 	// 复用匹配，从不预嵌语料。语料侧向量仍是 opt-in 加速器（embedderFor）。
-	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
-		ps.emb = minilm.New(minilm.DefaultDir())
+	//
+	// 3.1/§10-3：AS_EMBED 忘设或权重缺席时会**静默**退回本地 hash——
+	// 部署态因此误以为在跑语义模型。verbose 下必须说清用的是哪一把。
+	cacheEmbedder := "local-hash-64"
+	if os.Getenv("ASK_EMBED") == "minilm" {
+		if minilm.Available() {
+			ps.emb = minilm.New(minilm.DefaultDir())
+			cacheEmbedder = "minilm-l12-384"
+		} else {
+			cacheEmbedder = "local-hash-64 (ASK_EMBED=minilm 权重缺席，静默降级)"
+		}
+	}
+	if os.Getenv("ASK_VERBOSE") == "1" {
+		fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=%s\n", cacheEmbedder)
 	}
 	base := os.Getenv("AIGATE_BASE_URL")
 	if base == "" {
@@ -66,6 +79,9 @@ func newProdStack() prodStack {
 			APIKey:  os.Getenv("AIGATE_API_KEY"),
 			Model:   os.Getenv("AIGATE_EMBED_MODEL"),
 			N:       64,
+		}
+		if os.Getenv("ASK_VERBOSE") == "1" {
+			fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=aigate:%s\n", os.Getenv("AIGATE_EMBED_MODEL"))
 		}
 	}
 	return ps

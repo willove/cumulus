@@ -565,9 +565,14 @@ func main() {
 func embedderFor() (ingest.EmbedderFn, int, string) {
 	// 纯 Go MiniLM（embed-notes §8）：ASK_EMBED=minilm 显式开启；权重直接
 	// 复用 Sirchmunk 的模型缓存，向量空间与其语义缓存索引一致（384 维）。
-	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
-		emb := minilm.New(minilm.DefaultDir())
-		return emb.Embed, emb.Dims(), "minilm-l12-384"
+	if os.Getenv("ASK_EMBED") == "minilm" {
+		if minilm.Available() {
+			emb := minilm.New(minilm.DefaultDir())
+			return emb.Embed, emb.Dims(), "minilm-l12-384"
+		}
+		if os.Getenv("ASK_VERBOSE") == "1" {
+			fmt.Fprintln(os.Stderr, "[embedderFor] ASK_EMBED=minilm 但权重缺席——退回 local-hash-64（语料向量降级）")
+		}
 	}
 	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" {
 		fe := &llm.AigateEmbedder{
