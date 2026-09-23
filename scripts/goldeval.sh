@@ -13,6 +13,7 @@ ITEMS="testdata/eval/$SET.jsonl"
 shasum -a 256 -c testdata/eval/MANIFEST.sha256 || { echo "goldeval: golden set drifted"; exit 1; }
 case "$SET" in
 chinalaw39) SERVER="${SERVER:-http://127.0.0.1:8594}" ;;
+chinalaw158) SERVER="${SERVER:-http://127.0.0.1:8594}" ;;  # 规模化集（显著性复测）；RESUME：LIMIT 分批跑同一 OUT
 cnlaw30) SERVER="${SERVER:-http://127.0.0.1:8593}" ;;
 *) echo "goldeval: no default server for $SET"; exit 1 ;;
 esac

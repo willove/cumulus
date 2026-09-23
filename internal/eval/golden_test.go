@@ -12,8 +12,9 @@ import (
 // to them must land together with a re-recorded scoreboard, never silently.
 func TestGoldenSetsFrozen(t *testing.T) {
 	manifest := map[string]string{
-		"../../testdata/eval/chinalaw39.jsonl": "e01207db094eda7b8bb268d006baf4593f3b60d68b87586c35a0196f799cebc7",
-		"../../testdata/eval/cnlaw30.jsonl":    "92a68b50f72bd2e03b687c8637ef514ff3a7117385cdd947ca760bdbc4183d0f",
+		"../../testdata/eval/chinalaw39.jsonl":  "e01207db094eda7b8bb268d006baf4593f3b60d68b87586c35a0196f799cebc7",
+		"../../testdata/eval/cnlaw30.jsonl":     "92a68b50f72bd2e03b687c8637ef514ff3a7117385cdd947ca760bdbc4183d0f",
+		"../../testdata/eval/chinalaw158.jsonl": "bf5833a825b64f8def7f633626fe1a91e83a1efb9b94bdb33415a19d92c734d0",
 	}
 	for path, want := range manifest {
 		raw, err := os.ReadFile(path)
