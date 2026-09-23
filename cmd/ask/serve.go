@@ -41,6 +41,8 @@ func runServe(ctx context.Context, c *client.Client, st *ingest.Store, listen, s
 	mux := http.NewServeMux()
 
 	registerSearchFace(mux, c, st, sourcesColl)
+	registerSessionFace(mux, c)
+	registerWebFace(mux)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())

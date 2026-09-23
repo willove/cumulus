@@ -342,6 +342,14 @@ PSJ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d "{\"query\":\"�
 echo "$PSJ" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("session"), r' ; check "HTTP /v1/search echoes session id (P2)" $?
 SESSN="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
 echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "session show lists appended HTTP turn (P2)" $?
+
+# --- Gate R: web UI (P7 v0) ---------------------------------------------------
+UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
+echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
+SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
+echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?
+SLIST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions")"
+echo "$SLIST" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' ; check "GET /v1/sessions lists sessions (P7 REST)" $?
 JDONE=0
 for _ in $(seq 1 50); do
 	JST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/ingest/jobs/servjob" 2>/dev/null || true)"

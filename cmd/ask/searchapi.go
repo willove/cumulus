@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
@@ -140,6 +141,70 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 		return narrowed
 	}
 	return list
+}
+
+// registerSessionFace mounts the session REST endpoints the web UI reads:
+// POST /v1/sessions (new), GET /v1/sessions (list), GET/DELETE /v1/sessions/{id}.
+func registerSessionFace(mux *http.ServeMux, c *client.Client) {
+	st := sessionStore{c: c}
+	sessions := func(w http.ResponseWriter, r *http.Request) {
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/sessions"), "/")
+		switch r.Method {
+		case http.MethodPost:
+			var in struct {
+				Title string `json:"title"`
+				ID    string `json:"id"`
+			}
+			if err := decode(r, &in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			if in.ID == "" {
+				in.ID = newSessionID()
+			}
+			d, err := st.ensure(r.Context(), in.ID, in.Title)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			if err := st.save(r.Context(), d); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusCreated, d)
+		case http.MethodGet:
+			if id == "" {
+				all, err := st.list(r.Context())
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, all)
+				return
+			}
+			d, err := st.load(r.Context(), id)
+			if err != nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, d)
+		case http.MethodDelete:
+			if id == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "session id required"})
+				return
+			}
+			ok, err := st.c.KVDelete(r.Context(), st.key(id))
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": ok})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET/POST/DELETE only"})
+		}
+	}
+	mux.HandleFunc("/v1/sessions", sessions)
+	mux.HandleFunc("/v1/sessions/", sessions)
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.

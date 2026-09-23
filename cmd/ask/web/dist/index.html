@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ask · 认知检索</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --line: #e3e6ea;
+    --ink: #1c2330; --muted: #6b7684; --accent: #2456d6;
+    --accent-soft: #e8eefc; --user: #2456d6; --ok: #1d8a4e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--ink); display: flex; height: 100vh; }
+  /* ---- sidebar ---- */
+  aside { width: 240px; background: var(--panel); border-right: 1px solid var(--line);
+          display: flex; flex-direction: column; }
+  aside header { padding: 14px 16px 10px; font-weight: 700; letter-spacing: .02em; }
+  aside header small { display:block; color: var(--muted); font-weight: 400; }
+  .newbtn { margin: 0 12px 10px; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+            background: var(--accent-soft); color: var(--accent); cursor: pointer; font-size: 13px; }
+  .sesslist { flex: 1; overflow: auto; padding: 4px 8px 12px; }
+  .sess { padding: 8px 10px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; gap: 6px; }
+  .sess:hover { background: var(--bg); }
+  .sess.cur { background: var(--accent-soft); }
+  .sess .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess .x { color: var(--muted); visibility: hidden; }
+  .sess:hover .x { visibility: visible; }
+  /* ---- main ---- */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #stream { flex: 1; overflow: auto; padding: 22px 26px; }
+  .msg { max-width: 780px; margin: 0 auto 18px; }
+  .bubble { padding: 12px 16px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
+  .user .bubble { background: var(--user); color: #fff; margin-left: 15%; }
+  .bot .bubble { background: var(--panel); border: 1px solid var(--line); }
+  .meta { color: var(--muted); font-size: 12px; margin: 6px auto 0; max-width: 780px; }
+  .cites { max-width: 780px; margin: 8px auto 0; }
+  .cites details { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+  .cites summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+  .cite { border-top: 1px dashed var(--line); padding: 8px 2px; font-size: 13px; }
+  .cite b { color: var(--accent); }
+  .err { color: #b42318; }
+  /* ---- composer ---- */
+  form { display: flex; gap: 10px; padding: 14px 26px 18px; background: var(--panel); border-top: 1px solid var(--line); }
+  input { flex: 1; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; font: inherit; outline: none; }
+  input:focus { border-color: var(--accent); }
+  button.go { padding: 0 22px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; }
+  button.go:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0 auto 4px; max-width: 780px; }
+</style>
+</head>
+<body>
+<aside>
+  <header>ask 认知检索<small>原文即契约 · 索引是缓存</small></header>
+  <button class="newbtn" id="new">＋ 新会话</button>
+  <div class="sesslist" id="sesslist"></div>
+</aside>
+<main>
+  <div id="stream">
+    <p class="hint" id="hint">向私域语料提问，回答附带原文引用；追问可用「它/这个」指代。</p>
+  </div>
+  <form id="f">
+    <input id="q" placeholder="问点什么……（Enter 发送）" autocomplete="off" autofocus>
+    <button class="go" id="go">发送</button>
+  </form>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const streamEl = $("stream"), form = $("f"), input = $("q"), go = $("go");
+let session = null, busy = false;
+
+function scroll() { streamEl.scrollTop = streamEl.scrollHeight; }
+
+function bubble(role, text) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + role;
+  const b = document.createElement("div");
+  b.className = "bubble";
+  b.textContent = text || "";
+  wrap.appendChild(b);
+  streamEl.appendChild(wrap);
+  scroll();
+  return { wrap, body: b };
+}
+
+function meta(text) {
+  const m = document.createElement("div");
+  m.className = "meta";
+  m.textContent = text;
+  const last = streamEl.lastElementChild;
+  if (last) last.after(m); else streamEl.appendChild(m);
+  scroll();
+}
+
+function citeBlock(refs) {
+  const box = document.createElement("div");
+  box.className = "cites";
+  const d = document.createElement("details");
+  const s = document.createElement("summary");
+  s.textContent = "引用原文（" + refs.length + "）";
+  d.appendChild(s);
+  for (const r of refs) {
+    const c = document.createElement("div");
+    c.className = "cite";
+    const head = document.createElement("b");
+    head.textContent = "[" + r.index + "] " + (r.title || r.source_id) + (r.span ? " · " + r.span : "") + (r.resolved ? "" : " [?]");
+    const q = document.createElement("div");
+    q.textContent = r.quote || "";
+    c.append(head, q);
+    d.appendChild(c);
+  }
+  box.appendChild(d);
+  streamEl.appendChild(box);
+  scroll();
+}
+
+async function send(text) {
+  busy = true; go.disabled = true; $("hint").style.display = "none";
+  bubble("user", text);
+  const bot = bubble("bot", "");
+  bot.body.textContent = "检索中……";
+  const metaEl = document.createElement("div");
+  try {
+    const resp = await fetch("/v1/search/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: text, session: session || undefined, prior: true }),
+    });
+    if (!resp.ok || !resp.body) throw new Error("HTTP " + resp.status);
+    bot.body.textContent = "";
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        let ev = "message", data = "";
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event: ")) ev = line.slice(7).trim();
+          else if (line.startsWith("data: ")) data += line.slice(6);
+        }
+        if (!data) continue;
+        const m = JSON.parse(data);
+        if (ev === "content") { bot.body.textContent += m.text; bot.wrap.after(metaEl); scroll(); }
+        else if (ev === "status" && m.stage !== "started") { metaEl.textContent = "⚠ " + m.stage; }
+        else if (ev === "citations") citeBlock(m.refs);
+        else if (ev === "done") {
+          metaEl.textContent = "mode=" + m.mode + " · conf=" + (m.conf ?? 0).toFixed(2)
+            + " · loops=" + (m.loops || 0) + (m.widened ? " · 扩征" + m.widened : "")
+            + " · tokens=" + (m.tokens || 0) + " · " + (m.latency_ms || 0) + "ms";
+        }
+        else if (ev === "error") { bot.body.classList.add("err"); bot.body.textContent = "出错：" + m.error; }
+      }
+    }
+  } catch (e) {
+    bot.body.classList.add("err");
+    bot.body.textContent = "出错：" + e.message;
+  }
+  busy = false; go.disabled = false; input.focus();
+  loadSessions();
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const t = input.value.trim();
+  if (!t || busy) return;
+  input.value = "";
+  send(t);
+});
+
+/* ---- sessions ---- */
+async function loadSessions() {
+  const list = await (await fetch("/v1/sessions")).json();
+  const box = $("sesslist");
+  box.textContent = "";
+  for (const s of list || []) {
+    const row = document.createElement("div");
+    row.className = "sess" + (s.id === session ? " cur" : "");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = s.title || s.id;
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "✕";
+    x.title = "删除会话";
+    x.onclick = (e) => { e.stopPropagation(); delSession(s.id); };
+    row.append(t, x);
+    row.onclick = () => { session = s.id; openSession(s); loadSessions(); };
+    box.appendChild(row);
+  }
+}
+
+async function openSession(s) {
+  streamEl.textContent = "";
+  const d = await (await fetch("/v1/sessions/" + s.id)).json();
+  for (let i = 0; i < (d.messages || []).length; i += 2) {
+    bubble("user", d.messages[i].content);
+    bubble("bot", (d.messages[i + 1] || {}).content || "");
+  }
+}
+
+async function delSession(id) {
+  await fetch("/v1/sessions/" + id, { method: "DELETE" });
+  if (session === id) { session = null; streamEl.textContent = ""; }
+  loadSessions();
+}
+
+$("new").onclick = async () => {
+  const r = await (await fetch("/v1/sessions", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  })).json();
+  session = r.id;
+  streamEl.textContent = "";
+  loadSessions();
+  input.focus();
+};
+
+loadSessions();
+</script>
+</body>
+</html>
