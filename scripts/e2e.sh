@@ -292,6 +292,10 @@ assert "服务端口 8484" in s["body"], s["body"][:80]
 print("ok")' ; check "html body is tag-free plain text (Path A extract)" $?
 EMB="$($A ensure -embed)"
 echo "$EMB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("embedded",0)>=1, r' ; check "ensure -embed backfills body_embed (idempotent L1)" $?
+# 门禁补：回显实际使用的 embedder——离线门必须是确定性 hash-64（不许静默
+# 走语义模型导致门结果随权重漂移）；同时复跑证明幂等。
+EMB2="$($A ensure -embed)"
+echo "$EMB2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r; assert r.get("embedded",0)>=1, r' ; check "ensure -embed reports the embedder it used (offline=hash-64, idempotent)" $?
 JOB="$($A job -job fg1)"
 echo "$JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="done" and r["total"]>=2 and r["done"]==r["total"], r' ; check "job state machine reports done with real progress" $?
 SPORT="${E2E_SERVE_PORT:-8599}"
