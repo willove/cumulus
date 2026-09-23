@@ -2,10 +2,12 @@ package deep
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/cumubase/ask/internal/cluster"
+	"github.com/cumubase/ask/internal/facts"
 	"github.com/cumubase/ask/internal/fast"
 	"github.com/cumubase/ask/internal/kb"
 	"github.com/cumubase/ask/internal/mcs"
@@ -169,5 +171,116 @@ func TestGateDConflictDiscoverable(t *testing.T) {
 	same.ID = "Cd"
 	if _, err := DetectConflict(ctx, st, a, same); err == nil {
 		t.Fatal("identical claims must not conflict")
+	}
+}
+
+// D1: widen must exclude only files this run tried — never the full candidate
+// list (L1Pre=false used to starve the extra budget on the same corpus).
+// Fixture: admission takes MaxLoops; self-correction may pull up to
+// correctBudget untried files; one file remains untouched and must be eligible.
+func TestWidenExcludeOnlyTried(t *testing.T) {
+	ctx := context.Background()
+	e := newEngine()
+	n := MaxLoops + correctBudget + 1
+	var srcs []source.Source
+	for i := 0; i < n; i++ {
+		// Distinct bodies → distinct content-addressed IDs (source.IDFor).
+		srcs = append(srcs, source.New(
+			fmt.Sprintf("弱%d", i), "md", "", fmt.Sprintf("weak%d", i), "zh",
+			fmt.Sprintf("%d %s", i, strings.Repeat("完全无关的填充文本。", 40)), nil,
+		))
+	}
+	last := srcs[n-1]
+	for i := 1; i < n; i++ {
+		if srcs[i].ID == srcs[0].ID {
+			t.Fatalf("fixture IDs must be unique: src[%d]==src[0] %s", i, srcs[i].ID)
+		}
+	}
+
+	e.RankAdmission = func(_ context.Context, _ string, sources []source.Source, _ map[string]bool) ([]source.Source, error) {
+		if len(sources) > MaxLoops {
+			return sources[:MaxLoops], nil
+		}
+		return sources, nil
+	}
+	e.Widen = func(_ context.Context, _ string, exclude map[string]bool, _ int, _ map[string]bool) ([]source.Source, error) {
+		if exclude[last.ID] {
+			t.Errorf("D1: never-tried file %s must not be in exclude", last.ID)
+			return nil, nil
+		}
+		for i := 0; i < MaxLoops; i++ {
+			if !exclude[srcs[i].ID] {
+				t.Errorf("D1: admission-tried file %d should be excluded", i)
+			}
+		}
+		return []source.Source{last}, nil
+	}
+
+	_, _, _, widened, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if widened < 1 {
+		t.Fatalf("D1: widen must admit the never-tried file, got widened=%d", widened)
+	}
+}
+
+// D4: filling MaxLoops on an incomplete multi-fact query must still enter
+// self-correction (own budget), not share the admission clock.
+func TestSelfCorrectAfterFullAdmissionBudget(t *testing.T) {
+	ctx := context.Background()
+	e := newEngine()
+	e.Widen = nil
+	var srcs []source.Source
+	for i := 0; i < MaxLoops; i++ {
+		srcs = append(srcs, source.New(
+			fmt.Sprintf("薄%d", i), "md", "", fmt.Sprintf("thin%d", i), "zh",
+			strings.Repeat("无关内容。", 50), nil,
+		))
+	}
+	e.RankAdmission = func(_ context.Context, _ string, sources []source.Source, _ map[string]bool) ([]source.Source, error) {
+		return sources, nil
+	}
+	_, _, _, _, selfCorrected, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selfCorrected {
+		t.Fatal("D4: self-correction must run when admission exhausts MaxLoops and coverage is open")
+	}
+}
+
+// D2: topKeeps drops low-score windows; Cover must be recomputed on the
+// truncated set (pre-truncate Complete must not leak into res.Cover).
+func TestCoverRecomputedAfterTopKeeps(t *testing.T) {
+	fx := facts.Build("连接池最大是多少 以及 超时多久")
+	if len(fx) < 2 {
+		t.Fatalf("want K>=2, got %+v", fx)
+	}
+	var kept []mcs.Sample
+	for i := 0; i < maxKeepWindows; i++ {
+		kept = append(kept, mcs.Sample{
+			Start: i, End: i + 1, Source: "s1", Score: 9,
+			Content: "连接池最大是多少 词面命中。",
+			Covers:  []string{fx[0].ID},
+		})
+	}
+	// Unique support for f2 lives only on the 9th (lowest-score) window.
+	kept = append(kept, mcs.Sample{
+		Start: maxKeepWindows, End: maxKeepWindows + 1, Source: "s2", Score: 4,
+		Content: "超时多久 单独一窗。",
+		Covers:  []string{fx[1].ID},
+	})
+	before := facts.ReportForOracle(fx, kept)
+	if !before.Complete {
+		t.Fatalf("precondition: full pool must cover both facts: %+v", before)
+	}
+	top := topKeeps(kept)
+	after := facts.ReportForOracle(fx, top)
+	if after.Complete {
+		t.Fatalf("D2: after truncating the only f2 window, Cover must be incomplete: %+v", after)
+	}
+	if len(after.Missing) == 0 {
+		t.Fatalf("D2: missing must list dropped facts: %+v", after)
 	}
 }

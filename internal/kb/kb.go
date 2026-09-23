@@ -94,7 +94,8 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return res
 	}
 
-	// Phase 0: reuse (same topic first, then any close cluster).
+	// Phase 0: reuse within the same topic_key / aliases only (cross-topic
+	// near-duplicates are folded offline by `cluster tidy`, not at query time).
 	same, err := e.Store.FindByTopic(ctx, key)
 	if err != nil {
 		return Result{}, err

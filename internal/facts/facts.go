@@ -190,6 +190,14 @@ func ReportFor(facts []Fact, samples []mcs.Sample) Report {
 	return Evaluate(facts, samples)
 }
 
+// ReportForOracle forces the B6 oracle path: empty covers on every window
+// means "covered nothing", not "no annotations". FactAware scorers (aigate)
+// always emit the covers field — falling back to keywords would re-mark
+// honest misses as covered.
+func ReportForOracle(facts []Fact, samples []mcs.Sample) Report {
+	return EvaluateOracle(facts, samples)
+}
+
 // NeedContinue is the budget-aware continue predicate (LENS §4.3): keep
 // exploring while some requirement is open and the loop budget remains.
 func NeedContinue(rep Report, loops, maxLoops int) bool {

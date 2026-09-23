@@ -33,6 +33,15 @@ const MaxLoops = 6
 // MaxLoops (the initial admission must not starve exploration).
 const widenBudget = 4
 
+// correctBudget is the self-correction file allowance (D4): admission
+// usually spends MaxLoops on the first wave; missing-fact re-sampling must
+// not share that clock or the weakest-requirement pass never runs.
+const correctBudget = 3
+
+// maxKeepWindows is the synthesis budget: only the top-scored windows are
+// handed to the synthesizer / returned in the answer.
+const maxKeepWindows = 8
+
 // Mode labels.
 const (
 	ModeFAST = "FAST"
@@ -346,16 +355,37 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	return res, nil
 }
 
+// topKeeps sorts kept windows by score and truncates to the synthesis budget.
+func topKeeps(kept []mcs.Sample) []mcs.Sample {
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
+	if len(kept) > maxKeepWindows {
+		kept = kept[:maxKeepWindows]
+	}
+	return kept
+}
+
 // runDeep is the ReAct-shaped loop with per-fact coverage (LENS B1/B2):
 // sample sources → evaluate fact coverage → bounded self-correction on the
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, error) {
+	if affinity == nil {
+		affinity = map[string]bool{}
+	}
 	fx := facts.Build(query)
 	// B6 oracle hints: "f1:描述" strings let a FactAware scorer emit the
 	// per-fact observation vector in the same scoring call.
 	hints := make([]string, len(fx))
 	for i, f := range fx {
 		hints[i] = f.ID + ":" + f.Query
+	}
+	_, oracleMode := e.scorer().(mcs.FactAware)
+	// D3: FactAware empty covers = "covered nothing"; never fall back to
+	// keywords. Offline KeywordScorer keeps ReportFor's stub path.
+	report := func(samples []mcs.Sample) facts.Report {
+		if oracleMode {
+			return facts.ReportForOracle(fx, samples)
+		}
+		return facts.ReportFor(fx, samples)
 	}
 	newSampler := func() *mcs.Sampler {
 		smp := mcs.New(mcs.DefaultConfig(), e.scorer())
@@ -369,12 +399,24 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// then explore in relevance order (Sirchmunk Phase-1 对齐).
 	ranked := e.rankAdmission(ctx, query, sources, affinity)
 
+	// D1: widen excludes only files this run actually attempted — not the
+	// full candidate list (L1Pre=false used to pass the whole corpus in and
+	// starve the extra budget).
+	tried := map[string]bool{}
+	widenExclude := func() map[string]bool {
+		out := make(map[string]bool, len(tried))
+		for id := range tried {
+			out[id] = true
+		}
+		return out
+	}
+
 	var best fast.Answer
 	loops := 0
 	var kept []mcs.Sample
 	var bestSrc source.Source
 	bestScore := -1.0
-	rep := facts.ReportFor(fx, kept)
+	rep := report(kept)
 	for _, s := range ranked {
 		if s.Status != source.StatusActive {
 			continue
@@ -392,6 +434,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if loops > MaxLoops {
 			break
 		}
+		tried[s.ID] = true
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		if err != nil {
 			if e.Verbose != nil {
@@ -419,35 +462,57 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestScore = localBest
 			bestSrc = s
 		}
-		rep = facts.ReportFor(fx, kept)
+		rep = report(kept)
 	}
 
-	// Self-correction: weakest requirement still open → one bounded re-sample.
+	// Self-correction (D4): own budget, independent of admission MaxLoops.
+	// Prefer files admission never reached, then re-sample tried ones with
+	// the missing-fact queries.
 	selfCorrected := false
-	if facts.NeedContinue(rep, loops, MaxLoops) {
+	if !rep.Complete && correctBudget > 0 {
 		selfCorrected = true
+		var order []source.Source
+		for _, s := range sources {
+			if s.Status == source.StatusActive && !tried[s.ID] {
+				order = append(order, s)
+			}
+		}
+		for _, s := range sources {
+			if s.Status == source.StatusActive && tried[s.ID] {
+				order = append(order, s)
+			}
+		}
+		correctUsed := 0
+	outer_correct:
 		for _, mq := range facts.MissingQueries(fx, rep) {
-			for _, s := range sources {
-				if s.Status != source.StatusActive {
-					continue
+			for _, s := range order {
+				if correctUsed >= correctBudget {
+					break outer_correct
 				}
+				correctUsed++
 				loops++
-				if loops > MaxLoops {
-					break
-				}
+				tried[s.ID] = true
 				samples, err := newSampler().SampleBody(ctx, mq, s.Body)
 				if err != nil {
 					continue
 				}
+				localBest := 0.0
 				for _, sm := range samples {
+					if sm.Score > localBest {
+						localBest = sm.Score
+					}
 					if sm.Score >= 4 {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 					}
 				}
+				if localBest > bestScore {
+					bestScore = localBest
+					bestSrc = s
+				}
 			}
 		}
-		rep = facts.ReportFor(fx, kept)
+		rep = report(kept)
 	}
 
 	// Widening: coverage still open OR no strong window found → re-admit
@@ -456,15 +521,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// admission usually spends the whole loop budget, which must not starve
 	// exploration (Sirchmunk ReAct 对齐). Covers alone cannot veto widening:
 	// a generous oracle can mark wrong-doc windows "complete".
+	// D1: exclude = tried only (see widenExclude).
 	widened := 0
 	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
-		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v\n", len(kept), rep.Complete, bestScore, e.Widen != nil)
+		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v tried=%d\n", len(kept), rep.Complete, bestScore, e.Widen != nil, len(tried))
 	}
 	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil {
-		exclude := map[string]bool{}
-		for _, s := range sources {
-			exclude[s.ID] = true
-		}
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -472,36 +534,46 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for k := range lawAffinity(keptIDs, sources) {
 			affinity[k] = true
 		}
-		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
+		if extra, err := e.Widen(ctx, query, widenExclude(), widenBudget, affinity); err == nil && len(extra) > 0 {
 			for _, s := range extra {
 				loops++
 				widened++
+				tried[s.ID] = true
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
 				if err != nil {
 					continue
 				}
+				localBest := 0.0
 				for _, sm := range samples {
+					if sm.Score > localBest {
+						localBest = sm.Score
+					}
 					if sm.Score >= 4 {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 					}
 				}
+				if localBest > bestScore {
+					bestScore = localBest
+					bestSrc = s
+				}
 			}
-			rep = facts.ReportFor(fx, kept)
+			rep = report(kept)
 		}
 	}
 
 	loops++
 	if bestSrc.ID == "" || len(kept) == 0 {
+		kept = topKeeps(kept)
+		rep = report(kept)
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
 			Summary: "深度检索仍证据不足",
 		}, rep, loops, widened, selfCorrected, nil
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
-	if len(kept) > 8 {
-		kept = kept[:8]
-	}
+	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
+	kept = topKeeps(kept)
+	rep = report(kept)
 	cov := mcs.Coverage(query, kept)
 	mean := 0.0
 	for _, sm := range kept {
@@ -548,40 +620,46 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// → admit one more affinity-guided wave and rebuild ONCE. Gating on
 	// low-confidence fired on almost every answer and doubled latency
 	// (真机: 长时间无输出的元凶); mediocre-but-cited answers are acceptable.
+	// D1: same tried-only exclude as the primary widen gate.
 	if best.Refused && widened == 0 && e.Widen != nil && len(affinity) > 0 {
-		exclude := map[string]bool{}
-		for _, s := range sources {
-			exclude[s.ID] = true
-		}
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
-			exclude[sm.Source] = true
 		}
 		for k := range lawAffinity(keptIDs, sources) {
 			affinity[k] = true
+		}
+		exclude := widenExclude()
+		for id := range keptIDs {
+			exclude[id] = true
 		}
 		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
 			for _, s := range extra {
 				loops++
 				widened++
+				tried[s.ID] = true
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
 				if err != nil {
 					continue
 				}
+				localBest := 0.0
 				for _, sm := range samples {
+					if sm.Score > localBest {
+						localBest = sm.Score
+					}
 					if sm.Score >= 4 {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 					}
 				}
+				if localBest > bestScore {
+					bestScore = localBest
+					bestSrc = s
+				}
 			}
 			if widened > 0 {
-				rep = facts.ReportFor(fx, kept)
-				sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
-				if len(kept) > 8 {
-					kept = kept[:8]
-				}
+				kept = topKeeps(kept)
+				rep = report(kept)
 				cov = mcs.Coverage(query, kept)
 				mean = 0.0
 				for _, sm := range kept {
@@ -607,6 +685,10 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				b2.WriteString("\n")
 				for i, sm := range kept {
 					fmt.Fprintf(&b2, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
+				}
+				if !rep.Complete {
+					b2.WriteString("\n【未覆盖需求】")
+					b2.WriteString(strings.Join(rep.Missing, ", "))
 				}
 				best = buildAnswer(b2.String())
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)

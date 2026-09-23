@@ -39,3 +39,25 @@ func TestReportForPicksOracleWhenAnnotated(t *testing.T) {
 		t.Fatalf("annotated samples take the oracle path: %+v", rep)
 	}
 }
+
+// D3: FactAware empty covers mean "covered nothing" — ReportForOracle must
+// not fall back to keywords and re-mark an honest miss as complete.
+func TestReportForOracleEmptyCovers(t *testing.T) {
+	fx := Build("连接池最大是多少 以及 超时多久")
+	// Lexically strong on both halves, but the oracle claimed no covers.
+	samples := []mcs.Sample{
+		{Start: 0, End: 40, Content: "连接池最大是多少 完全命中词面。", Source: "s1", Score: 9, Covers: []string{}},
+		{Start: 40, End: 80, Content: "以及 超时多久 也命中词面。", Source: "s2", Score: 9, Covers: nil},
+	}
+	kw := ReportFor(fx, samples)
+	if !kw.Complete {
+		t.Fatalf("stub ReportFor may still complete via keywords (baseline): %+v", kw)
+	}
+	orc := ReportForOracle(fx, samples)
+	if orc.Complete {
+		t.Fatalf("oracle empty covers must stay incomplete: %+v", orc)
+	}
+	if len(orc.Missing) == 0 {
+		t.Fatalf("missing must list open facts: %+v", orc)
+	}
+}
