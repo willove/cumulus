@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -440,19 +441,26 @@ func (e *AigateKeywordExpander) Expand(ctx context.Context, query string, levels
 	return ParseMultilevelJSON(raw, levels)
 }
 
-// AigateKeywordRefiner regenerates keywords AFTER a failed match, instructed
-// to switch to statutory register (ReAct 精炼轮 — the widen loop's second
-// attempt when the whole cascade came up empty).
+// AigateKeywordRefiner regenerates keywords AFTER a failed match (ReAct
+// 精炼轮 — the widen loop's second attempt when the whole cascade came up
+// empty). Domain specialization is OPERATOR-declared via ASK_DOMAIN_HINT and
+// injected as a hint only; the prompt asset itself stays corpus-agnostic
+// (评估纪律：管线资产不得携带评测语料的领域知识).
 type AigateKeywordRefiner struct {
 	Client *ChatClient
 }
 
-// Refine returns replacement keywords close to statutory wording, excluding
-// the failed ones.
+// Refine returns replacement keywords in the target corpus's register,
+// excluding the failed ones.
 func (r *AigateKeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
+	domain := strings.TrimSpace(os.Getenv("ASK_DOMAIN_HINT"))
+	if domain == "" {
+		domain = "未指定——按通用书面文档处理"
+	}
 	tmpl := prompts.MustRender(prompts.KeywordsRefine, map[string]string{
 		"query":  query,
 		"failed": strings.Join(failed, "、"),
+		"domain": domain,
 	})
 	raw, err := r.Client.Complete(ctx, tmpl)
 	if err != nil {

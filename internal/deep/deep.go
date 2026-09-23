@@ -153,15 +153,12 @@ type Engine struct {
 	Sources         []source.Source
 	EscalateBelow   float64
 	// RankAdmission orders the sources before the DEEP loop explores them.
-	// nil → caller order (offline gates, small corpora). At 10k+ scale the
-	// caller order is arbitrary and burns the whole budget on the first
-	// files; the CLI wires the FAST tier's cascade here.
-	RankAdmission func(ctx context.Context, query string, sources []source.Source) ([]source.Source, error)
-	// Widen, when set, lets the DEEP loop re-admit candidate files mid-search:
-	// coverage still open after self-correction → re-rank the FULL corpus by
-	// the query keywords and admit up to m not-yet-tried files (Sirchmunk
-	// ReAct 对齐；nil 关闭扩征，离线门可用).
-	Widen func(ctx context.Context, query string, exclude map[string]bool, m int) ([]source.Source, error)
+	// affinity carries the law prefixes of already-answered sources (same-law
+	// statutes answer in clusters — 同法亲缘准入). nil → caller order.
+	RankAdmission func(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) ([]source.Source, error)
+	// Widen re-admits candidate files mid-search under the same contract
+	// (Sirchmunk ReAct 对齐；nil 关闭扩征，离线门可用).
+	Widen func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error)
 }
 
 // HistoryRewriter rewrites a follow-up query against history.
@@ -186,15 +183,35 @@ func New(k *kb.Engine, conflicts ConflictStore) *Engine {
 }
 
 // rankAdmission orders sources before exploration (nil → untouched order).
-func (e *Engine) rankAdmission(ctx context.Context, query string, sources []source.Source) []source.Source {
+// affinity = law prefixes of sources already answered (FAST hit + kept), so
+// the ranker can put same-law articles first (同法亲缘).
+func (e *Engine) rankAdmission(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) []source.Source {
 	if e.RankAdmission == nil {
 		return sources
 	}
-	out, err := e.RankAdmission(ctx, query, sources)
+	out, err := e.RankAdmission(ctx, query, sources, affinity)
 	if err == nil && len(out) > 0 {
 		return out
 	}
 	return sources
+}
+
+// lawAffinity collects the document-family prefixes (business_key before
+// '-') of the sources the pipeline already answered from.
+func lawAffinity(ids map[string]bool, sources []source.Source) map[string]bool {
+	aff := map[string]bool{}
+	if len(ids) == 0 {
+		return aff
+	}
+	for _, s := range sources {
+		if !ids[s.ID] {
+			continue
+		}
+		if i := strings.Index(s.BusinessKey, "-"); i > 0 {
+			aff[s.BusinessKey[:i]] = true
+		}
+	}
+	return aff
 }
 
 func (e *Engine) scorer() mcs.Scorer {
@@ -289,7 +306,10 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 
 	res.Escalated = true
 	res.Mode = ModeDEEP
-	deepAns, cover, loops, wid, sc, err := e.runDeep(ctx, query, sources)
+	// 文档族亲缘: the FAST answer's source votes for its family — answers
+	// cluster within a family (11/13 failures were same-family near-misses).
+	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, sources)
+	deepAns, cover, loops, wid, sc, err := e.runDeep(ctx, query, sources, affinity)
 	if err != nil {
 		return Result{}, err
 	}
@@ -323,7 +343,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 // runDeep is the ReAct-shaped loop with per-fact coverage (LENS B1/B2):
 // sample sources → evaluate fact coverage → bounded self-correction on the
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source) (fast.Answer, facts.Report, int, int, bool, error) {
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, error) {
 	fx := facts.Build(query)
 	// B6 oracle hints: "f1:描述" strings let a FactAware scorer emit the
 	// per-fact observation vector in the same scoring call.
@@ -341,7 +361,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// whole budget on the first files that happen to be there. Rank first —
 	// the caller's fast engine carries the same cascade the FAST tier uses —
 	// then explore in relevance order (Sirchmunk Phase-1 对齐).
-	ranked := e.rankAdmission(ctx, query, sources)
+	ranked := e.rankAdmission(ctx, query, sources, affinity)
 
 	var best fast.Answer
 	loops := 0
@@ -420,7 +440,14 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for _, s := range sources {
 			exclude[s.ID] = true
 		}
-		if extra, err := e.Widen(ctx, query, exclude, widenBudget); err == nil && len(extra) > 0 {
+		keptIDs := map[string]bool{}
+		for _, sm := range kept {
+			keptIDs[sm.Source] = true
+		}
+		for k := range lawAffinity(keptIDs, sources) {
+			affinity[k] = true
+		}
+		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
 			for _, s := range extra {
 				loops++
 				widened++
@@ -481,13 +508,89 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			conf = 0.45
 		}
 	}
-	summary := e.render(ctx, query, kept, b.String())
-	best = fast.Answer{
-		Query: query, Mode: ModeDEEP, LLMCalls: loops,
-		SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
-		Confidence: conf, Summary: summary,
-		Skipped: conf < 0.35,
-		Refused: fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(summary, e.Synth),
+	buildAnswer := func(template string) fast.Answer {
+		return fast.Answer{
+			Query: query, Mode: ModeDEEP, LLMCalls: loops,
+			SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
+			Confidence: conf, Summary: e.render(ctx, query, kept, template),
+			Skipped: conf < 0.35,
+		}
+	}
+	best = buildAnswer(b.String())
+	best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
+
+	// ReAct 观察轮: synthesis refused (flag or template degradation), or the
+	// answer is merely mediocre while the affinity family still has unsampled
+	// documents → admit one more affinity-guided wave and rebuild ONCE.
+	// Without this the exploration loop never learns from the render step
+	// (真机抓到: 商标法定义题两轮都引 7/43，48 条从未被采样).
+	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
+		fmt.Fprintf(os.Stderr, "deep: observe gate refused=%v conf=%.2f wid=%d hook=%v aff=%d\n", best.Refused, best.Confidence, widened, e.Widen != nil, len(affinity))
+	}
+	if (best.Refused || best.Confidence < 0.6) && widened == 0 && e.Widen != nil && len(affinity) > 0 {
+		exclude := map[string]bool{}
+		for _, s := range sources {
+			exclude[s.ID] = true
+		}
+		keptIDs := map[string]bool{}
+		for _, sm := range kept {
+			keptIDs[sm.Source] = true
+			exclude[sm.Source] = true
+		}
+		for k := range lawAffinity(keptIDs, sources) {
+			affinity[k] = true
+		}
+		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
+			for _, s := range extra {
+				loops++
+				widened++
+				samples, err := newSampler().SampleBody(ctx, query, s.Body)
+				if err != nil {
+					continue
+				}
+				for _, sm := range samples {
+					if sm.Score >= 4 {
+						sm.Source = s.ID
+						kept = append(kept, sm)
+					}
+				}
+			}
+			if widened > 0 {
+				rep = facts.ReportFor(fx, kept)
+				sort.Slice(kept, func(i, j int) bool { return kept[i].Score > kept[j].Score })
+				if len(kept) > 8 {
+					kept = kept[:8]
+				}
+				cov = mcs.Coverage(query, kept)
+				mean = 0.0
+				for _, sm := range kept {
+					mean += sm.Score
+				}
+				mean /= float64(len(kept))
+				conf = mcs.Confidence(mean, cov)
+				if conf < 1 {
+					conf = min1(conf + 0.1)
+				}
+				if !rep.Complete && conf > 0.45 {
+					conf = 0.45
+				}
+				var b2 strings.Builder
+				b2.WriteString("【DEEP 摘要】")
+				b2.WriteString(query)
+				b2.WriteString("\n【来源】")
+				title := bestSrc.Title
+				if title == "" {
+					title = bestSrc.ID
+				}
+				b2.WriteString(title)
+				b2.WriteString("\n")
+				for i, sm := range kept {
+					fmt.Fprintf(&b2, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
+				}
+				best = buildAnswer(b2.String())
+				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
+			}
+		}
 	}
 	return best, rep, loops, widened, selfCorrected, nil
 }
