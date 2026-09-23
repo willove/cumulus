@@ -1,7 +1,7 @@
 # 认知检索套件（ask 套件）
 
 > CumuBase 功能套件：cumudb 基座之上的认知检索——证据可核、多跳可串、同类问题越问越快。
-> 文档主场（含设计 SSOT 与 LENS 论文对照）：[`docs/suites/ask/`](../db-works/docs/suites/ask/)；设计单一事实源 [`design-plan.md`](../db-works/docs/suites/ask/design-plan.md)（v1.4）；Sirchmunk 核心算法研究论文对照 [`lens-notes.md`](../db-works/docs/suites/ask/lens-notes.md)。
+> 文档主场（含设计 SSOT 与 LENS 论文对照）：[`docs/`](docs/)（**本地私有**——`/docs/` 已登记 .gitignore，不提交不外发）；设计单一事实源 [`design-plan.md`](docs/design-plan.md)；Sirchmunk 核心算法研究论文对照 [`lens-notes.md`](docs/lens-notes.md)。
 
 ## 定位
 
