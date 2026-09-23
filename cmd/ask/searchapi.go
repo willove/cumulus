@@ -125,6 +125,11 @@ func newSearchStack(ctx context.Context, c *client.Client, st *ingest.Store, sou
 	// Opt-in zero-LLM abstention head (3.1): default off so gates stay put.
 	if os.Getenv("ASK_ABSTAIN") == "1" {
 		dE.Abstain = abstain.Default()
+		if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
+			// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+			// 运营商显式开才牺牲这段恢复机会换 token。
+			dE.Abstain.EarlyAbove = 0
+		}
 	}
 	// Opt-in two-call query simulator (2.4): needs an endpoint.
 	if stack.chat != nil && os.Getenv("ASK_QUERY_SIM") == "1" {

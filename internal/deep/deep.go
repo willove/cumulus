@@ -157,6 +157,9 @@ type Result struct {
 	AbstainP float64 `json:"abstain_p,omitempty"`
 	// AbstainAction is "" | "deep" | "refuse" — what the head recommended.
 	AbstainAction string `json:"abstain_action,omitempty"`
+	// AbstainEarly marks a pre-DEEP refusal (FAST had zero usable evidence
+	// and p_fail cleared EarlyAbove): DEEP was skipped to save budget.
+	AbstainEarly bool `json:"abstain_early,omitempty"`
 }
 
 // Engine runs FAST and escalates into DEEP when confidence is thin.
@@ -382,6 +385,23 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		if act == "refuse" && !need {
 			// Head already sure this is a fail — do not trust a thin FAST hit.
 			need = true
+		}
+		// 早弃权（ir-rag 3.1 / RCS 原意「少烧钱」）：FAST 已**完全没有**可用
+		// 证据（无样本且被跳过）且 p_fail 达到 EarlyAbove 时，在 DEEP 之前
+		// 就拒——DEEP 的 14 轮 + 扩征在这类题上是纯燃烧（真机：≈96s /
+		// ≈19k tokens 换一个必然的拒答）。反之（哪怕有一个低分样本）仍然
+		// 升级：DEEP 的补采样/扩征确实救回过一些题，不能一刀切。
+		if e.Abstain.EarlyAbove > 0 && len(base.Answer.Samples) == 0 && base.Answer.Skipped {
+			if e.Abstain.PFail(f) >= e.Abstain.EarlyAbove {
+				res.Answer.Refused = true
+				res.Answer.Skipped = true
+				if strings.TrimSpace(res.Answer.Summary) == "" {
+					res.Answer.Summary = "证据不足，暂不作答"
+				}
+				res.AbstainEarly = true
+				res.Citations.Legend = legend(res.Citations, false)
+				return res, nil
+			}
 		}
 	}
 	if !need {

@@ -34,6 +34,12 @@ type Head struct {
 	DeepAbove float64
 	// RefuseAbove: recommend refuse when p_fail ≥ this (after search).
 	RefuseAbove float64
+	// EarlyAbove: when > 0 and the caller reports a hopeless pre-search
+	// state (no samples at all), p_fail ≥ this refuses BEFORE DEEP burns
+	// budget (ir-rag 3.1 / RCS "少烧钱"). It forfeits DEEP's recovery
+	// chance (真机有 DEEP 救回拒答的先例), so callers keep it OFF unless
+	// the operator opts in — see ASK_EARLY_ABSTAIN.
+	EarlyAbove float64
 }
 
 // Default returns the built-in heuristic head. It only reacts to structural
@@ -56,6 +62,7 @@ func Default() *Head {
 		Bias:        -0.20,
 		DeepAbove:   0.35,
 		RefuseAbove: 0.80,
+		EarlyAbove:  0.80,
 	}
 }
 

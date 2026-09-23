@@ -165,12 +165,22 @@ func evalRun(ctx context.Context, c *client.Client, st *ingest.Store, sourcesCol
 		}
 		if os.Getenv("ASK_ABSTAIN") == "1" {
 			dE.Abstain = abstain.Default()
+			if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
+				// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+				// 运营商显式开才牺牲这段恢复机会换 token。
+				dE.Abstain.EarlyAbove = 0
+			}
 		}
 		if os.Getenv("ASK_QUERY_SIM") == "1" {
 			dE.QuerySim = &llm.AigateQuerySimulator{Client: stack.chat}
 		}
 	} else if os.Getenv("ASK_ABSTAIN") == "1" {
 		dE.Abstain = abstain.Default()
+		if os.Getenv("ASK_EARLY_ABSTAIN") != "1" {
+			// 早弃权默认关：DEEP 有救回拒答的先例（v1.19 消保法退货题），
+			// 运营商显式开才牺牲这段恢复机会换 token。
+			dE.Abstain.EarlyAbove = 0
+		}
 	}
 	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
 	var refiner *llm.AigateKeywordRefiner
