@@ -31,7 +31,10 @@ type TidyPair struct {
 
 // TidyReport summarizes one sweep. Lifecycle counts are the population
 // snapshot so operators see drift (emerging/contested/deprecated) even when
-// nothing merges.
+// nothing merges. Delta is the before/after snapshot (ir-rag 2.6): a sweep
+// whose only effect is fewer clusters is NOT evidence of improvement — the
+// delta makes the effect visible and falsifiable. It is never computed over
+// evaluation items (论文纪律：不许用评测题选演进停止点).
 type TidyReport struct {
 	Scanned           int            `json:"scanned"`
 	Merged            int            `json:"merged"`
@@ -41,6 +44,44 @@ type TidyReport struct {
 	Lifecycle         map[string]int `json:"lifecycle"`
 	Pairs             []TidyPair     `json:"pairs,omitempty"`
 	DryRun            bool           `json:"dry_run"`
+	Delta             *TidyDelta     `json:"delta,omitempty"`
+}
+
+// TidyDelta is the before/after population snapshot of one sweep.
+// FoldedClusters = clusters - (merged + deleted-away losers); evidence and
+// query counts are sums over the LIVE population, so a fold that loses
+// evidence windows (bad) shows up as negative EvidenceDelta.
+type TidyDelta struct {
+	ClustersBefore int `json:"clusters_before"`
+	ClustersAfter  int `json:"clusters_after"`
+	QueriesBefore  int `json:"queries_before"`
+	QueriesAfter   int `json:"queries_after"`
+	EvidenceBefore int `json:"evidence_before"`
+	EvidenceAfter  int `json:"evidence_after"`
+	// Confidence/Hotness means over the live population (0 decimals).
+	ConfidenceBefore float64 `json:"confidence_before"`
+	ConfidenceAfter  float64 `json:"confidence_after"`
+	HotnessBefore    float64 `json:"hotness_before"`
+	HotnessAfter     float64 `json:"hotness_after"`
+	// Projected marks a dry-run delta: the numbers describe the fold that
+	// WOULD happen, not one that did.
+	Projected bool `json:"projected,omitempty"`
+}
+
+// snapshotStats aggregates one population snapshot.
+func snapshotStats(cs []Cluster) (clusters, queries, evidence int, confMean, hotMean float64) {
+	clusters = len(cs)
+	for _, c := range cs {
+		queries += len(c.Queries)
+		evidence += len(c.Evidence)
+		confMean += c.Confidence
+		hotMean += c.Hotness
+	}
+	if clusters > 0 {
+		confMean /= float64(clusters)
+		hotMean /= float64(clusters)
+	}
+	return
 }
 
 // QuerySetEmbed recomputes a cluster embedding from its retained queries
@@ -96,6 +137,22 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 		return rep, err
 	}
 	rep.Scanned = len(all)
+	qBefore, evBefore := 0, 0
+	confBefore, hotBefore := 0.0, 0.0
+	for _, c := range all {
+		qBefore += len(c.Queries)
+		evBefore += len(c.Evidence)
+		confBefore += c.Confidence
+		hotBefore += c.Hotness
+	}
+	if len(all) > 0 {
+		confBefore /= float64(len(all))
+		hotBefore /= float64(len(all))
+	}
+	before := TidyDelta{
+		ClustersBefore: len(all), QueriesBefore: qBefore, EvidenceBefore: evBefore,
+		ConfidenceBefore: round3(confBefore), HotnessBefore: round3(hotBefore),
+	}
 
 	work := make([]Cluster, 0, len(all))
 	alive := map[string]bool{}
@@ -164,6 +221,22 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 		}
 		rep.Pairs = append(rep.Pairs, *best)
 		if dryRun {
+			// 2.6: a dry-run delta that reads "nothing changed" is useless.
+			// Project the exemplar fold into a scratch copy (never saved).
+			win, lose := orderByAge(work[bestWI], work[bestLI])
+			foldInto(&win, &lose)
+			projected := make([]Cluster, 0, len(work))
+			for _, c := range work {
+				if !alive[c.ID] || c.ID == lose.ID {
+					continue
+				}
+				if c.ID == win.ID {
+					continue
+				}
+				projected = append(projected, c)
+			}
+			projected = append(projected, win)
+			rep.Delta = deltaFrom(before, projected, true)
 			break // one exemplar pair is enough to show what would happen
 		}
 		foldInto(&winner, &loser)
@@ -188,8 +261,31 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 		work[bestWI], work[bestLI] = winner, loser
 		rep.Merged++
 	}
+	// 2.6: before/after snapshot over the LIVE population. A dry-run already
+	// set a PROJECTED delta — never overwrite it with the no-op truth.
+	if rep.Delta == nil {
+		afterAll := make([]Cluster, 0, len(work))
+		for _, c := range work {
+			if alive[c.ID] {
+				afterAll = append(afterAll, c)
+			}
+		}
+		rep.Delta = deltaFrom(before, afterAll, false)
+	}
 	return rep, nil
 }
+
+// deltaFrom fills the "after" half of a delta from a population snapshot.
+func deltaFrom(b TidyDelta, after []Cluster, projected bool) *TidyDelta {
+	c, q, ev, conf, hot := snapshotStats(after)
+	b.ClustersAfter, b.QueriesAfter, b.EvidenceAfter = c, q, ev
+	b.ConfidenceAfter, b.HotnessAfter = round3(conf), round3(hot)
+	b.Projected = projected
+	return &b
+}
+
+// round3 keeps the JSON scoreboard readable without pulling in math.
+func round3(x float64) float64 { return float64(int(x*1000+0.5)) / 1000 }
 
 func pairKey(a, b string) string {
 	if a > b {
