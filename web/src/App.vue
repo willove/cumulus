@@ -79,7 +79,7 @@ async function onSend(text) {
         if (ev === "content") { stopThinking(am.id); appendContent(am.id, m.text); scroll(); }
         else if (ev === "citations") { sources.value = (m.refs || []).map((r, i) => ({ index: r.index, title: (r.title || r.source_id) + (r.span ? " · " + r.span : ""), snippet: r.quote, source: r.source_id })); }
         else if (ev === "status" && m.stage === "file") { meta.value = "已采样 " + (m.file || "") + "（" + (m.score ?? 0) + " 分）"; }
-        else if (ev === "status" && m.stage && m.stage !== "started") { meta.value = m.stage; }
+        else if (ev === "status" && m.stage !== "started") { meta.value = m.text || m.stage; }
         else if (ev === "done") {
           meta.value = "mode=" + m.mode + " · conf=" + (m.conf ?? 0).toFixed(2)
             + " · loops=" + (m.loops || 0) + (m.widened ? " · 扩征" + m.widened : "")

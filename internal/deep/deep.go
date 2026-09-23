@@ -546,15 +546,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	best = buildAnswer(b.String())
 	best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 
-	// ReAct 观察轮: synthesis refused (flag or template degradation), or the
-	// answer is merely mediocre while the affinity family still has unsampled
-	// documents → admit one more affinity-guided wave and rebuild ONCE.
-	// Without this the exploration loop never learns from the render step
-	// (真机抓到: 商标法定义题两轮都引 7/43，48 条从未被采样).
-	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
-		fmt.Fprintf(os.Stderr, "deep: observe gate refused=%v conf=%.2f wid=%d hook=%v aff=%d\n", best.Refused, best.Confidence, widened, e.Widen != nil, len(affinity))
-	}
-	if (best.Refused || best.Confidence < 0.6) && widened == 0 && e.Widen != nil && len(affinity) > 0 {
+	// ReAct 观察轮: ONLY on a genuine refusal (flag or template degradation)
+	// → admit one more affinity-guided wave and rebuild ONCE. Gating on
+	// low-confidence fired on almost every answer and doubled latency
+	// (真机: 长时间无输出的元凶); mediocre-but-cited answers are acceptable.
+	if best.Refused && widened == 0 && e.Widen != nil && len(affinity) > 0 {
 		exclude := map[string]bool{}
 		for _, s := range sources {
 			exclude[s.ID] = true

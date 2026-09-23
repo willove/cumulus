@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
@@ -297,12 +298,46 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
+	var mu sync.Mutex
 	emit := func(event string, data any) {
+		mu.Lock()
+		defer mu.Unlock()
 		b, _ := json.Marshal(data)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
-	emit("status", map[string]any{"stage": "started"})
+	// 心跳：长检索期间保活连接并让代理/浏览器不判超时。
+	heartbeat := make(chan struct{})
+	defer close(heartbeat)
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-heartbeat:
+				return
+			case <-r.Context().Done():
+				return
+			case <-t.C:
+				mu.Lock()
+				fmt.Fprint(w, ": ping\n\n")
+				flusher.Flush()
+				mu.Unlock()
+			}
+		}
+	}()
+	if verbose {
+		vlog := ss.dE.Verbose
+		if vlog != nil {
+			base := vlog
+			ss.dE.Verbose = func(f string, a ...any) {
+				line := fmt.Sprintf(f, a...)
+				log.Printf("[search %s] %s", query, line)
+				emit("status", map[string]any{"stage": "log", "text": line})
+			}
+			_ = base
+		}
+	}
 	ss.dE.OnFile = func(key string, best float64, windows int) {
 		emit("status", map[string]any{"stage": "file", "file": key, "score": best})
 	}
