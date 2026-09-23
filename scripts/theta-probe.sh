@@ -39,7 +39,7 @@ if curl -fsS "$SRV/v1/health" >/dev/null 2>&1; then
 		exit 1
 	fi
 else
-	(cd ../../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb)
+	(cd ../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb)
 	rm -rf "$STATE/data"
 	"$STATE/cumudb" -listen "127.0.0.1:$PORT" -data "$STATE/data" -log-level warn >"$STATE/db.log" 2>&1 &
 	for _ in $(seq 1 50); do curl -fsS "$SRV/v1/health" >/dev/null 2>&1 && break; sleep 0.2; done

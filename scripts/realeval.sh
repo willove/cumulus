@@ -20,7 +20,7 @@ SRV="http://127.0.0.1:$DB_PORT"
 
 db_up() {
 	if curl -fsS "$SRV/v1/health" >/dev/null 2>&1; then return 0; fi
-	(cd ../../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb) || exit 1
+	(cd ../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb) || exit 1
 	go build -o "$STATE/ask" ./cmd/ask || exit 1
 	"$STATE/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$STATE/data" -log-level warn >>"$STATE/cumudb.log" 2>&1 &
 	for _ in $(seq 1 50); do
