@@ -106,6 +106,7 @@ func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result,
 type searchIn struct {
 	Query   string   `json:"query"`
 	History []string `json:"history"`
+	Session string   `json:"session"` // KV 会话：折叠近几轮进改写，回答回写会话
 	Prior   bool     `json:"prior"`
 	L1Pre   bool     `json:"l1pre"`
 	Stream  bool     `json:"stream"`
@@ -159,6 +160,16 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 				return
 			}
 			opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History}
+			var sess *sessionStore
+			if in.Session != "" {
+				sess = &sessionStore{c: c}
+				hist, _, err := sessionHistory(r.Context(), *sess, in.Session, 6)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+					return
+				}
+				opt.History = hist
+			}
 			if stream {
 				in.Stream = true
 			}
@@ -173,10 +184,15 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 					return
 				}
+				if sess != nil {
+					if _, aerr := sess.appendTurn(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary); aerr == nil {
+						res.Session = in.Session
+					}
+				}
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
-			sseSearch(w, r, ss, in.Query)
+			sseSearch(w, r, ss, in.Query, sess, in.Session)
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
@@ -186,7 +202,7 @@ func registerSearchFace(mux *http.ServeMux, c *client.Client, st *ingest.Store, 
 // sseSearch streams one search as SSE events mapped onto the evoke-chat
 // engine: status → loading, content → appendContent, citations →
 // ChatSources, done → completeMessage.
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string) {
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
@@ -217,10 +233,16 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	if len(res.Citations.Refs) > 0 {
 		emit("citations", res.Citations)
 	}
-	emit("done", map[string]any{
+	done := map[string]any{
 		"mode": res.Mode, "loops": res.Loops, "conf": ans.Confidence,
 		"coverage": ans.Coverage, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS,
-	})
+	}
+	if sess != nil {
+		if _, aerr := sess.appendTurn(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
+			done["session"] = sessionID
+		}
+	}
+	emit("done", done)
 }

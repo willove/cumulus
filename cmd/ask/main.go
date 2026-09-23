@@ -28,7 +28,7 @@ Usage:
   ask put    -title T -body "text"
   ask ingest-jsonl -file data.jsonl [-job NAME] [-map map.json]
   ask ingest-files -dir D [-recursive] [-job NAME]
-  ask search -q "query" [-raw] [-hopts 168h]
+  ask search -q "query" [-session ID] [-raw] [-hopts 168h]
   ask get    <id>
   ask delete <id>
   ask ensure [-embed]           # 声明集合（-embed 兼补内容向量）
@@ -40,6 +40,7 @@ Usage:
   ask cluster list | get <id>
   ask conflicts list | detect <clusterA> <clusterB>
   ask cites  list               # 簇→源证据边（ask_cites）
+  ask session new | list | show <id> | rm <id>   # P2 会话（KV）
   ask eval-run -file ITEMS.jsonl -out RESULTS.jsonl [-judge] [-prior] [-limit N]
                                 # LENS 式评测：真实管线+Closed-Book 对照+判官，可续跑
 
@@ -226,6 +227,7 @@ func main() {
 		minhot := fs.Float64("minhot", 0, "neighbor min hotness (structured prune)")
 		minconf := fs.Float64("minconf", 0, "neighbor min confidence (structured prune)")
 		history := fs.String("history", "", "pipe-separated follow-up history (rewrite query)")
+		sessionID := fs.String("session", "", "chat session id (KV): folds recent turns, appends this turn")
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
 		l1pre := fs.Bool("l1pre", false, "narrow candidates via body_embed KNN (L1 cache)")
 		_ = fs.Parse(rest)
@@ -237,6 +239,15 @@ func main() {
 				}
 			}
 		}
+		var sess *sessionStore
+		if *sessionID != "" {
+			sess = &sessionStore{c: c}
+			hist, _, herr := sessionHistory(ctx, *sess, *sessionID, 6)
+			if herr != nil {
+				fatal(herr)
+			}
+			opt.History = hist // -session 优先于 -history
+		}
 		ss, err := newSearchStack(ctx, c, st, sources, opt)
 		if err != nil {
 			fatal(err)
@@ -244,6 +255,13 @@ func main() {
 		res, err := runSearch(ctx, ss, *q)
 		if err != nil {
 			fatal(err)
+		}
+		if sess != nil {
+			if _, aerr := sess.appendTurn(ctx, *sessionID, *q, *q, res.Answer.Summary); aerr != nil {
+				fmt.Fprintf(os.Stderr, "session append: %v\n", aerr)
+			} else {
+				res.Session = *sessionID
+			}
 		}
 		if *rawOut {
 			printJSON(res)
@@ -454,6 +472,9 @@ func main() {
 		_ = enc.Encode(out)
 		return
 
+	case "session":
+		runSessionCLI(ctx, c, rest)
+		return
 	case "eval-run":
 		// LENS 式真实语料评测（R-E1）：真实管线 + Closed-Book 对照 + 判官。
 		fs := flag.NewFlagSet("eval-run", flag.ExitOnError)

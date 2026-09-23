@@ -129,6 +129,8 @@ type Result struct {
 	// Widened counts files admitted mid-search by the widening pass (Sirchmunk
 	// ReAct 对齐): exploration may grow the candidate set, bounded.
 	Widened int `json:"widened,omitempty"`
+	// Session echoes the chat session id when the caller passed one (P2).
+	Session string `json:"session,omitempty"`
 	// B9 budget accounting: LatencyMS is always filled; Tokens carries the
 	// upstream-reported total (0 on the offline stub path — the CLI fills it
 	// from the chat client after Ask returns).

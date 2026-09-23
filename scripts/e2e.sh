@@ -325,6 +325,23 @@ for line in raw.splitlines():
     if line.startswith("data: ") and "mode" in line:
         json.loads(line[6:])
 print("ok")' ; check "POST /v1/search/stream emits SSE status/content/citations/done (P1 SSE face)" $?
+
+# --- Gate Q: chat sessions (P2, KV) ------------------------------------------
+SESS="e2e-$(date +%s)"
+"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" search -q "HTTP 摄取的内容里连接池最大是多少" -session "$SESS" -raw >/dev/null
+"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" search -q "它的来源文档标题是什么" -session "$SESS" -raw >/dev/null
+SESSJSON="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
+echo "$SESSJSON" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["id"].startswith("e2e-"), d
+assert len(d["messages"])==4, ("two turns recorded", len(d["messages"]))
+assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant"
+print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
+PSJ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d "{\"query\":\"连接池最大是多少\",\"session\":\"$SESS\"}")"
+echo "$PSJ" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("session"), r' ; check "HTTP /v1/search echoes session id (P2)" $?
+SESSN="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
+echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "session show lists appended HTTP turn (P2)" $?
 JDONE=0
 for _ in $(seq 1 50); do
 	JST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/ingest/jobs/servjob" 2>/dev/null || true)"
