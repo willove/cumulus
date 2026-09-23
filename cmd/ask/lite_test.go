@@ -9,8 +9,8 @@ import (
 	"github.com/cumubase/ask/internal/graph"
 	"github.com/cumubase/ask/internal/ingest"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // The portability claim, executed: the whole suite — put, ensure, ensure-embed,
@@ -93,7 +93,7 @@ func TestAskRunsOnCumuliteWithoutServer(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("embedded = %d, want 2", n)
 	}
-	res, err := engine.KNN(ctx, "ask_sources", client.KNNRequest{
+	res, err := engine.KNN(ctx, "ask_sources", contract.KNNRequest{
 		Field: "body_embed", Vector: []float64{3, 1, 0, 0}, K: 2, Metric: "cosine",
 	})
 	if err != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 const sessionKeyPrefix = "ask:session:"
@@ -88,7 +89,7 @@ func (st sessionStore) save(ctx context.Context, d *sessionDoc) error {
 func (st sessionStore) ensure(ctx context.Context, id, title string) (*sessionDoc, error) {
 	if d, err := st.load(ctx, id); err == nil {
 		return d, nil
-	} else if !client.IsNotFound(err) {
+	} else if !contract.IsNotFound(err) && !client.IsNotFound(err) {
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
@@ -137,7 +138,7 @@ func (st sessionStore) list(ctx context.Context) ([]*sessionDoc, error) {
 // a missing session yields an empty history (first turn).
 func sessionHistory(ctx context.Context, st sessionStore, id string, max int) ([]string, *sessionDoc, error) {
 	d, err := st.load(ctx, id)
-	if client.IsNotFound(err) {
+	if client.IsNotFound(err) || contract.IsNotFound(err) {
 		return nil, &sessionDoc{ID: id}, nil // first turn: create on append
 	}
 	if err != nil {

@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // CumuCiteStore persists cluster → source evidence edges (ask_cites).
@@ -45,7 +45,7 @@ func (s *CumuCiteStore) SaveCite(ctx context.Context, clusterID, sourceID string
 
 // List returns all cite edges (read face for CLI/assertions).
 func (s *CumuCiteStore) List(ctx context.Context) ([]map[string]any, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{Limit: 1000})
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func (s *CumuStore) Between(ctx context.Context, a, b string) ([]Conflict, error
 }
 
 func (s *CumuStore) All(ctx context.Context) ([]Conflict, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{Limit: 1000})
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/cumubase/ask/internal/source"
 	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // Result reports what a single put did.
@@ -151,7 +152,7 @@ func (s *Store) ActiveSources(ctx context.Context) ([]source.Source, error) {
 	const page = 1000
 	var out []source.Source
 	for skip := 0; ; skip += page {
-		res, err := s.c.Query(ctx, s.sources, client.Query{
+		res, err := s.c.Query(ctx, s.sources, contract.Query{
 			Filter: map[string]any{"status": source.StatusActive},
 			Skip:   skip,
 			Limit:  page,
@@ -196,7 +197,7 @@ func (s *Store) SourcesByIDs(ctx context.Context, ids []string) ([]source.Source
 		if end > len(ids) {
 			end = len(ids)
 		}
-		res, err := s.c.Query(ctx, s.sources, client.Query{
+		res, err := s.c.Query(ctx, s.sources, contract.Query{
 			Filter: map[string]any{"_id": map[string]any{"$in": ids[start:end]}},
 			Limit:  page,
 		})
@@ -226,7 +227,7 @@ func (s *Store) ActiveEvidence(ctx context.Context, minScore float64, limit int)
 	if minScore <= 0 {
 		minScore = 7
 	}
-	res, err := s.c.Query(ctx, s.evidence, client.Query{
+	res, err := s.c.Query(ctx, s.evidence, contract.Query{
 		Filter: map[string]any{"status": "live", "score": map[string]any{"$gte": minScore}},
 		Limit:  limit,
 	})
@@ -387,7 +388,7 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 // markClustersStale flags clusters anchored on a retired source 待复核
 // (emerging) — the reconcile-side trigger for the B8 re-validation.
 func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
-	res, err := s.c.Query(ctx, s.clusters, client.Query{
+	res, err := s.c.Query(ctx, s.clusters, contract.Query{
 		Filter: map[string]any{"source_id": docID},
 		Limit:  1000,
 	})
@@ -416,7 +417,7 @@ func (s *Store) Reclaim(ctx context.Context, includeStale bool) (int, error) {
 	if includeStale {
 		statuses = append(statuses, source.StatusStale)
 	}
-	res, err := s.c.Query(ctx, s.sources, client.Query{
+	res, err := s.c.Query(ctx, s.sources, contract.Query{
 		Filter: map[string]any{"status": map[string]any{"$in": statuses}},
 		Limit:  1000,
 	})
@@ -442,7 +443,7 @@ func (s *Store) Reclaim(ctx context.Context, includeStale bool) (int, error) {
 }
 
 func (s *Store) purgeEvidence(ctx context.Context, docID string) error {
-	res, err := s.c.Query(ctx, s.evidence, client.Query{
+	res, err := s.c.Query(ctx, s.evidence, contract.Query{
 		Filter: map[string]any{"doc_id": docID},
 		Limit:  1000,
 	})
@@ -471,7 +472,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	if embed == nil {
 		return 0, nil
 	}
-	if err := s.c.CreateIndexRequest(ctx, s.sources, client.IndexRequest{
+	if err := s.c.CreateIndexRequest(ctx, s.sources, contract.IndexRequest{
 		Name: "ask_body_embed", Field: "body_embed", Type: "vector",
 		Dims: dims, Metric: "cosine", Model: model,
 	}); err != nil && !strings.Contains(err.Error(), "INDEX_EXISTS") {
@@ -506,7 +507,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	// mode as the v1.19 ActiveSources truncation.
 	const page = 1000
 	for skip := 0; ; skip += page {
-		res, qe := s.c.Query(ctx, s.sources, client.Query{
+		res, qe := s.c.Query(ctx, s.sources, contract.Query{
 			Filter: map[string]any{"status": source.StatusActive},
 			Skip:   skip,
 			Limit:  page,
@@ -541,7 +542,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	// Report the true backfilled total (idempotent re-runs count everything).
 	n = 0
 	for skip := 0; ; skip += page {
-		res, qe := s.c.Query(ctx, s.sources, client.Query{
+		res, qe := s.c.Query(ctx, s.sources, contract.Query{
 			Filter: map[string]any{"status": source.StatusActive},
 			Skip:   skip,
 			Limit:  page,
@@ -783,7 +784,7 @@ func renderTemplate(tmpl string, rec map[string]any) (string, error) {
 // invalidateEvidence retires every live evidence window of a source and
 // returns how many were patched.
 func (s *Store) invalidateEvidence(ctx context.Context, docID string) (int, error) {
-	res, err := s.c.Query(ctx, s.evidence, client.Query{
+	res, err := s.c.Query(ctx, s.evidence, contract.Query{
 		Filter: map[string]any{"doc_id": docID, "status": "live"},
 		Limit:  1000,
 	})
@@ -813,7 +814,7 @@ func (s *Store) findByBusiness(ctx context.Context, businessKey, title string) (
 	} else {
 		return nil, nil
 	}
-	res, err := s.c.Query(ctx, s.sources, client.Query{Filter: filter, Limit: 8})
+	res, err := s.c.Query(ctx, s.sources, contract.Query{Filter: filter, Limit: 8})
 	if err != nil {
 		return nil, err
 	}
@@ -840,7 +841,7 @@ func (s *Store) findByBusiness(ctx context.Context, businessKey, title string) (
 func (s *Store) getSource(ctx context.Context, id string) (*source.Source, error) {
 	d, err := s.c.GetDocument(ctx, s.sources, id)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsNotFound(err) || contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -851,7 +852,7 @@ func (s *Store) getSource(ctx context.Context, id string) (*source.Source, error
 func (s *Store) getEvidence(ctx context.Context, id string) (map[string]any, error) {
 	d, err := s.c.GetDocument(ctx, s.evidence, id)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsNotFound(err) || contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err

@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/cumubase/ask/internal/cluster"
+	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/willove/cumudb/pkg/client"
@@ -74,7 +75,7 @@ func main() {
 
 	c := client.New(*server)
 	ctx := context.Background()
-	st := cluster.NewCumuStore(c, ns.Coll(*namespace, "ask_clusters"))
+	st := cluster.NewCumuStore(cumuport.New(c), ns.Coll(*namespace, "ask_clusters"))
 	clusters, err := st.All(ctx)
 	if err != nil {
 		fatal(err)

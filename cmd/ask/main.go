@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
+	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/eval"
 	"github.com/cumubase/ask/internal/graph"
@@ -156,7 +157,7 @@ func main() {
 		defer engine.Close()
 		port = engine
 	} else {
-		port = client.New(server)
+		port = cumuport.New(client.New(server))
 	}
 	c := port
 	st := ingest.New(c, sources, evidence, clustersColl, namespace)

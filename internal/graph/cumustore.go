@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // CumuStore persists weak edges in ask_weak_edges.
@@ -43,7 +43,7 @@ func (s *CumuStore) Save(ctx context.Context, e Edge) error {
 }
 
 func (s *CumuStore) From(ctx context.Context, id string) ([]Edge, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{
+	res, err := s.c.Query(ctx, s.coll, contract.Query{
 		Filter: map[string]any{"_from": id},
 		Limit:  500,
 	})
@@ -54,7 +54,7 @@ func (s *CumuStore) From(ctx context.Context, id string) ([]Edge, error) {
 }
 
 func (s *CumuStore) To(ctx context.Context, id string) ([]Edge, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{
+	res, err := s.c.Query(ctx, s.coll, contract.Query{
 		Filter: map[string]any{"_to": id},
 		Limit:  500,
 	})
@@ -65,7 +65,7 @@ func (s *CumuStore) To(ctx context.Context, id string) ([]Edge, error) {
 }
 
 func (s *CumuStore) All(ctx context.Context) ([]Edge, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{Limit: 1000})
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}

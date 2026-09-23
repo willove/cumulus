@@ -27,8 +27,8 @@ import (
 	"github.com/cumubase/ask/internal/llm"
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // firstNonEmpty picks the per-request override, falling back to the serve-level
@@ -206,12 +206,12 @@ type searchIn struct {
 // materializes once, bounded, then retries; failure → full list, 只慢不错).
 func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, query string) []source.Source {
 	embedFn, dims, embedModel := embedderFor()
-	knnOnce := func() (*client.KNNResult, error) {
+	knnOnce := func() (*contract.KNNResult, error) {
 		qv, err := embedFn(ctx, []string{query})
 		if err != nil || len(qv) != 1 {
 			return nil, fmt.Errorf("embed: %w", err)
 		}
-		return ss.c.KNN(ctx, ss.sourcesColl, client.KNNRequest{
+		return ss.c.KNN(ctx, ss.sourcesColl, contract.KNNRequest{
 			Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
 			Index:  "ask_body_embed",
 			Filter: map[string]any{"status": source.StatusActive},

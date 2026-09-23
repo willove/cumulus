@@ -32,8 +32,8 @@ import (
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/prompts"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // judgePass is the Correct threshold over the judge's 0–10 score.
@@ -281,7 +281,7 @@ func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn
 	if err != nil || len(qv) != 1 {
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
-	knn, err := c.KNN(ctx, sourcesColl, client.KNNRequest{
+	knn, err := c.KNN(ctx, sourcesColl, contract.KNNRequest{
 		Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
 		Filter: map[string]any{"status": source.StatusActive},
 	})

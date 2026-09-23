@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/willove/cumudb/pkg/client"
 )
 
@@ -57,7 +58,7 @@ func TestSessionReadOutcomes(t *testing.T) {
 				}
 			}))
 			defer backend.Close()
-			st := sessionStore{c: client.New(backend.URL), ns: "alpha"}
+			st := sessionStore{c: cumuport.New(client.New(backend.URL)), ns: "alpha"}
 			ctx := context.Background()
 			wantFailure := tc.name == "backend failure" || tc.name == "malformed document"
 			checkError := func(t *testing.T, err error) {

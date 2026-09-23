@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/willove/cumudb/pkg/client"
 )
 
@@ -67,7 +68,7 @@ func TestSessionFaceConcurrentNamespaces(t *testing.T) {
 	defer unblock()
 
 	mux := http.NewServeMux()
-	registerSessionFace(mux, client.New(backend.URL), "serve")
+	registerSessionFace(mux, cumuport.New(client.New(backend.URL)), "serve")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	alphaDone := make(chan *httptest.ResponseRecorder, 1)
@@ -143,7 +144,7 @@ func TestSessionFaceNamespaceMethods(t *testing.T) {
 					}))
 					defer backend.Close()
 					mux := http.NewServeMux()
-					registerSessionFace(mux, client.New(backend.URL), "serve")
+					registerSessionFace(mux, cumuport.New(client.New(backend.URL)), "serve")
 					// GET uses the query; POST and DELETE use the body, not the query.
 					queryNS, bodyNS := "ignored", namespace
 					if method == http.MethodGet {

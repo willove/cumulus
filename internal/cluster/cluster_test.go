@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/mcs"
 	"github.com/willove/cumudb/pkg/client"
 )
@@ -284,7 +285,7 @@ func TestCumuStoreTopicAliases(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			st := NewCumuStore(client.New(server.URL), "")
+			st := NewCumuStore(cumuport.New(client.New(server.URL)), "")
 			if err := st.Save(ctx, c); err != nil {
 				t.Fatal(err)
 			}

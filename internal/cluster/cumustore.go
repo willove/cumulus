@@ -9,6 +9,7 @@ import (
 	"github.com/cumubase/ask/internal/mcs"
 	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // CumuStore persists clusters in a cumudb collection (default ask_clusters).
@@ -63,7 +64,7 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 func (s *CumuStore) Get(ctx context.Context, id string) (*Cluster, error) {
 	d, err := s.c.GetDocument(ctx, s.coll, id)
 	if err != nil {
-		if client.IsNotFound(err) {
+		if client.IsNotFound(err) || contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -72,7 +73,7 @@ func (s *CumuStore) Get(ctx context.Context, id string) (*Cluster, error) {
 }
 
 func (s *CumuStore) FindByTopic(ctx context.Context, topicKey string) ([]Cluster, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{
+	res, err := s.c.Query(ctx, s.coll, contract.Query{
 		Filter: map[string]any{"$or": []map[string]any{
 			{"topic_key": topicKey},
 			{"topic_keys": map[string]any{"$in": []string{topicKey}}},
@@ -94,7 +95,7 @@ func (s *CumuStore) FindByTopic(ctx context.Context, topicKey string) ([]Cluster
 }
 
 func (s *CumuStore) All(ctx context.Context) ([]Cluster, error) {
-	res, err := s.c.Query(ctx, s.coll, client.Query{Limit: 1000})
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
 	if err != nil {
 		return nil, err
 	}
