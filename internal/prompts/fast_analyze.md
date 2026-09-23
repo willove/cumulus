@@ -18,7 +18,7 @@ User Query: "{{query}}"
 - intent=chat：问候、身份、闲聊、致谢、道别。
 - intent=doc_summary：整文档操作（总结/翻译/通读分析），不是找一段证据。
 - intent=search：其余信息检索问题。
-- primary 2–5 个高特异性词；fallback 更细（级联 miss 后降级）。
+- primary 2–5 个高特异性词，优先给**目标文档里最可能逐字出现的复合短语**（检索按子串匹配，逐字措辞即命中）；fallback 更细（级联 miss 后降级）。
 - idf_weight ∈ (0,1]，越独特越高。
 - 语言跟随 Query。
 
