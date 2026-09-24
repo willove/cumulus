@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/willove/cumulite"
+
+	"github.com/willove/cumulus/internal/adapt"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/eval"
@@ -30,6 +33,8 @@ Usage:
   cumulus-cluster put    -title T [-type md] [-uri U] [-key K] [-lang zh] -body-file F
   cumulus-cluster put    -title T -body "text"
   cumulus-cluster ingest-jsonl -file data.jsonl [-job NAME] [-map map.json]
+  cumulus-cluster ingest-adapt -dir DIR [-recursive] [-job NAME] [-id F] [-title F] [-body F] [-extra a,b]
+                                               # 异构语料适配：json/jsonl/csv/txt 自动判别+字段映射
   cumulus-cluster ingest-files -dir D [-recursive] [-job NAME] [-candidates scan.json]  # P9：-candidates 只吃扫描清单
   cumulus-cluster scan -dir D [-recursive] [-limit N] [-newer-than 168h] [-q "主题"] [-out scan.json]
                                             # 摄取候选发现（P9）：规则清单 + LLM 主题排名（opt-in），不开库
@@ -271,6 +276,58 @@ func main() {
 			fatal(err)
 		}
 		printJSON(map[string]any{"processed": n})
+	case "ingest-adapt":
+		// Heterogeneous corpus files: JSON / JSON-lines / CSV / text are
+		// autodetected and field-mapped (adapt package). Flags come before the
+		// subcommand's positional list, like the other subcommands.
+		fs := flag.NewFlagSet("ingest-adapt", flag.ExitOnError)
+		dir := fs.String("dir", "", "directory of corpus files")
+		recursive := fs.Bool("recursive", false, "walk subdirectories")
+		job := fs.String("job", "adapt", "job key (resumable cursor)")
+		fID := fs.String("id", "", "record field holding the business key (default autodetect)")
+		fTitle := fs.String("title", "", "record field holding the title (default autodetect)")
+		fBody := fs.String("body", "", "record field holding the text (default autodetect)")
+		fExtra := fs.String("extra", "", "comma-separated record fields copied into meta")
+		// Flags may follow the file list; reorder so the flag package sees them.
+		_ = fs.Parse(flagsFirst(rest, "recursive"))
+		var files []string
+		if *dir != "" {
+			var werr error
+			files, werr = filepath.Glob(filepath.Join(*dir, "*"))
+			if werr != nil {
+				fatal(werr)
+			}
+			if !*recursive {
+				kept := files[:0]
+				for _, f := range files {
+					if st, serr := os.Stat(f); serr == nil && !st.IsDir() {
+						kept = append(kept, f)
+					}
+				}
+				files = kept
+			}
+		}
+		// Explicit files after the flags win over -dir.
+		for _, a := range fs.Args() {
+			files = append(files, a)
+		}
+		if len(files) == 0 {
+			fatal(fmt.Errorf("ingest-adapt: -dir DIR or explicit files required"))
+		}
+		sort.Strings(files)
+		var extra []string
+		for _, e := range strings.Split(*fExtra, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				extra = append(extra, e)
+			}
+		}
+		n, err := st.IngestAdapted(ctx, files, adapt.Fields{
+			ID: *fID, Title: *fTitle, Body: *fBody, Extra: extra,
+		}, *job)
+		if err != nil {
+			fatal(err)
+		}
+		printJSON(map[string]any{"ingested": n, "files": len(files)})
 	case "ingest-files":
 		fs := flag.NewFlagSet("ingest-files", flag.ExitOnError)
 		dir := fs.String("dir", "", "directory of .md/.txt files")
