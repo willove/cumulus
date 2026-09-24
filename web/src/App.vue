@@ -6,7 +6,7 @@
 import { ref, onMounted, nextTick } from "vue";
 import { useChatEngine } from "@wil-works/evoke-chat";
 
-const pane = ref("chat"); // chat | clusters | ingest | settings | evals
+const pane = ref("chat"); // chat | clusters | ingest | settings | evals | monitor
 const sessions = ref([]);
 const current = ref("");
 const loading = ref(false);
@@ -156,11 +156,33 @@ const jobLabel = { queued: "排队中", running: "进行中", done: "已完成",
 function jobDone(j) { return j.state === "done" || j.state === "failed"; }
 function curJob() { return jobs.value.find((j) => j.id === jobCur.value) || null; }
 
+const mon = ref(null);
+const monBusy = ref(false);
+let monTimer = null;
+
+async function loadMonitor() {
+  monBusy.value = true;
+  try { mon.value = await (await fetch("/v1/monitor/overview")).json(); }
+  catch { mon.value = null; }
+  monBusy.value = false;
+}
+
 function openPane(p) {
   pane.value = p;
   if (p === "ingest") schedulePoll();
   if (p === "settings") return loadSettings();
   if (p === "evals") return loadEvals();
+  if (p === "monitor") { loadMonitor(); startMonPoll(); } else { stopMonPoll(); }
+}
+
+// The monitor auto-refreshes like an ops dashboard, but ONLY while its pane is
+// open — a hidden pane must not keep polling.
+function startMonPoll() {
+  if (monTimer) return;
+  monTimer = setInterval(() => { if (pane.value === "monitor") loadMonitor(); }, 5000);
+}
+function stopMonPoll() {
+  if (monTimer) { clearInterval(monTimer); monTimer = null; }
 }
 
 // Switching namespace reloads every scoped list (sessions, clusters) — the
@@ -385,6 +407,7 @@ onMounted(() => { loadSessions(); loadClusters(); });
         <button :class="{ on: pane === 'ingest' }" @click="openPane('ingest')">摄取</button>
         <button :class="{ on: pane === 'settings' }" @click="openPane('settings')">配置</button>
         <button :class="{ on: pane === 'evals' }" @click="openPane('evals')">评测</button>
+        <button :class="{ on: pane === 'monitor' }" @click="openPane('monitor')">监控</button>
       </div>
       <div class="nssel">
         <input v-model="nsSel" placeholder="命名空间（空 = 默认库）" @change="onNsChange" />
@@ -433,12 +456,72 @@ onMounted(() => { loadSessions(); loadClusters(); });
       <div class="head" v-else-if="pane === 'clusters'">知识簇浏览<span class="sid">簇内容 · query 集 · cites 证据边</span></div>
       <div class="head" v-else-if="pane === 'ingest'">目录摄取<span class="sid">异步任务 · 进度跟踪 · 可续跑（同名 job）</span></div>
       <div class="head" v-else-if="pane === 'settings'">配置<span class="sid">模型权重 · 端点</span></div>
+      <div class="head" v-else-if="pane === 'evals'">评测记分牌<span class="sid">LENS 协议 · 系统 vs Closed-Book</span></div>
+      <div class="head" v-else-if="pane === 'monitor'">运行监控<span class="sid">系统 · LLM · 检索路径 · 按 bucket</span></div>
       <div class="head" v-else>评测记分牌<span class="sid">LENS 协议 · 系统 vs Closed-Book</span></div>
       <div class="body" ref="box" v-if="pane === 'chat'">
         <eb-chatbot v-model="messages" :loading="loading" height="100%"
                     :show-tip="false" stoppable @send="onSend" />
         <div v-if="meta" class="meta">{{ meta }}</div>
         <eb-chat-sources v-if="sources.length" :items="sources" class="srcs" />
+      </div>
+      <div class="body mon" v-else-if="pane === 'monitor'">
+        <div v-if="!mon" class="hint">{{ monBusy ? "加载中……" : "暂无监控数据" }}</div>
+        <template v-else>
+          <div class="mgrid">
+            <div class="mcard"><div class="mt">系统</div>
+              <div class="mrow"><span>Heap</span><b>{{ mon.system.heap_mb.toFixed(1) }} MB</b></div>
+              <div class="mrow"><span>RSS/Sys</span><b>{{ mon.system.rss_mb.toFixed(1) }} MB</b></div>
+              <div class="mrow"><span>Goroutines</span><b>{{ mon.system.goroutines }}</b></div>
+              <div class="mrow"><span>GC</span><b>{{ mon.system.num_gc }}</b></div>
+              <div class="mrow"><span>存储目录</span><b>{{ mon.system.store_dir }}</b></div>
+              <div class="mrow"><span>存储文件</span><b>{{ (mon.system.store_files_bytes/1e6).toFixed(0) }} MB（上限，含预分配）</b></div>
+              <div class="mrow"><span>运行</span><b>{{ mon.uptime_sec }}s</b></div>
+            </div>
+            <div class="mcard"><div class="mt">LLM</div>
+              <div class="mrow"><span>调用数</span><b>{{ mon.llm.calls }}</b></div>
+              <div class="mrow"><span>Tokens</span><b>{{ mon.llm.tokens }}</b></div>
+              <div class="mrow"><span>每问 tokens</span><b>{{ mon.llm.tokens_per_query.toFixed(1) }}</b></div>
+              <div class="mrow"><span>每分钟调用</span><b>{{ mon.llm.calls_per_min.toFixed(2) }}</b></div>
+            </div>
+            <div class="mcard"><div class="mt">检索路径</div>
+              <div class="mrow"><span>簇复用命中</span><b>{{ mon.retrieval.reuse_hits }}/{{ mon.queries }}（{{ (mon.retrieval.reuse_rate*100).toFixed(0) }}%）</b></div>
+              <div class="mrow"><span>温命中 p50</span><b>{{ mon.retrieval.warm_p50_us }} µs</b></div>
+              <div class="mrow"><span>冷查询 p50</span><b>{{ mon.retrieval.cold_p50_us }} µs</b></div>
+              <div class="mrow"><span>升级 DEEP</span><b>{{ mon.retrieval.escalations }}</b></div>
+              <div class="mrow"><span>自纠错</span><b>{{ mon.retrieval.self_corrected }}</b></div>
+              <div class="mrow"><span>拒答</span><b>{{ mon.retrieval.refused }}</b></div>
+              <div class="mrow"><span>错误</span><b>{{ mon.retrieval.errors }}</b></div>
+              <div class="mrow"><span>平均置信</span><b>{{ mon.retrieval.avg_confidence.toFixed(3) }}</b></div>
+              <div class="mrow"><span>平均覆盖</span><b>{{ mon.retrieval.avg_coverage.toFixed(3) }}</b></div>
+              <div class="mrow"><span>档位分布</span><b>{{ JSON.stringify(mon.retrieval.by_mode) }}</b></div>
+            </div>
+            <div class="mcard"><div class="mt">按 bucket</div>
+              <table class="mtab">
+                <tr><th>bucket</th><th>查询</th><th>复用</th><th>p50</th></tr>
+                <tr v-for="n in mon.namespaces" :key="n.namespace">
+                  <td>{{ n.namespace || "（默认）" }}</td><td>{{ n.queries }}</td>
+                  <td>{{ n.reuse_hits }}</td><td>{{ n.avg_p50_us }} µs</td>
+                </tr>
+              </table>
+              <div v-if="!mon.namespaces.length" class="hint">暂无查询记录</div>
+            </div>
+          </div>
+          <div class="ct">最近查询</div>
+          <table class="mtab">
+            <tr><th>时间</th><th>bucket</th><th>档位</th><th>复用</th><th>置信</th><th>覆盖</th><th>采样</th><th>延迟</th></tr>
+            <tr v-for="(q, i) in mon.recent" :key="i">
+              <td>{{ new Date(q.at).toLocaleTimeString() }}</td>
+              <td>{{ q.namespace || "（默认）" }}</td>
+              <td>{{ q.mode }}</td>
+              <td>{{ q.reused ? "✓" : "" }}</td>
+              <td>{{ q.confidence.toFixed(2) }}</td>
+              <td>{{ q.coverage.toFixed(2) }}</td>
+              <td>{{ q.samples }}</td>
+              <td>{{ q.latency_us }} µs</td>
+            </tr>
+          </table>
+        </template>
       </div>
       <div class="body clu" v-else-if="pane === 'clusters'">
         <div v-if="!clusterCur" class="hint">从左栏选一个知识簇查看内容与证据边。</div>
@@ -684,4 +767,13 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .cites { margin-top: 12px; }
 .cites .ct { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
 .cites .cite { font-size: 12px; color: #44505f; padding: 3px 0; }
+  .mgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .mcard { border: 1px solid var(--border, #2a2f3a); border-radius: 10px; padding: 12px 14px; }
+  .mcard .mt { font-weight: 700; margin-bottom: 8px; }
+  .mrow { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 2px 0; }
+  .mrow span { opacity: .65; }
+  .mtab { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0 12px; }
+  .mtab th, .mtab td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border, #2a2f3a); }
+  .mtab th { opacity: .6; font-weight: 600; }
+  .body.mon { overflow: auto; }
 </style>

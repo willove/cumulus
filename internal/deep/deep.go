@@ -147,6 +147,10 @@ type Result struct {
 	// token-budget stop (judge tokens never enter TokenBudget).
 	Tokens    int64 `json:"tokens,omitempty"`
 	LatencyMS int64 `json:"latency_ms,omitempty"`
+	// LatencyUS is microsecond precision. LatencyMS truncates, so a sub-
+	// millisecond offline FAST query reads as 0 — useless for a warm/cold
+	// comparison. This is the field ops tooling should read.
+	LatencyUS int64 `json:"latency_us,omitempty"`
 	BudgetHit bool  `json:"budget_hit,omitempty"`
 	// Admitted lists source IDs this Ask actually scored (admission + widen
 	// + self-correct). ir-rag 1.5: not-retrieved gold outside this set is a
@@ -324,7 +328,11 @@ func (e *Engine) thresholdFor(fx []facts.Fact) float64 {
 // Ask runs the confidence-gated path: insufficient confidence escalates.
 func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
 	started := time.Now()
-	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
+	defer func() {
+		d := time.Since(started)
+		res.LatencyMS = d.Milliseconds()
+		res.LatencyUS = d.Microseconds()
+	}()
 	if e.Sources == nil {
 		e.Sources = sources
 	}
@@ -356,7 +364,11 @@ type SourceLoader func(ctx context.Context) ([]source.Source, error)
 // the corpus and continues on the normal path.
 func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (res Result, err error) {
 	started := time.Now()
-	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
+	defer func() {
+		d := time.Since(started)
+		res.LatencyMS = d.Milliseconds()
+		res.LatencyUS = d.Microseconds()
+	}()
 	if load == nil {
 		return Result{}, fmt.Errorf("deep: AskLazy requires a loader")
 	}
@@ -388,7 +400,11 @@ func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (
 // on a warm hit); `load` materializes the full corpus when DEEP actually
 // escalates (nil = caller already provided it).
 func (e *Engine) afterBase(ctx context.Context, started time.Time, query string, base kb.Result, citeCorpus []source.Source, thr float64, fx []facts.Fact, load SourceLoader) (res Result, err error) {
-	defer func() { res.LatencyMS = time.Since(started).Milliseconds() }()
+	defer func() {
+		d := time.Since(started)
+		res.LatencyMS = d.Milliseconds()
+		res.LatencyUS = d.Microseconds()
+	}()
 	e.BudgetHit = false
 	res = Result{
 		Answer:     base.Answer,

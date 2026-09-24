@@ -573,7 +573,7 @@ func main() {
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
 		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also CLUS_VERBOSE=1)")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, sources, namespace, *verbose)
+		runServe(ctx, c, st, *listen, sources, namespace, *verbose, data)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {

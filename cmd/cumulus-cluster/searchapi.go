@@ -28,6 +28,7 @@ import (
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
 )
@@ -356,7 +357,7 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 // unrelated corpora accumulate. ensure declares the target namespace's
 // collections: the search path persists clusters, so a namespace that was only
 // ever searched in must not die on the first write.
-func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer, buckets *bucket.Store) {
+func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer, buckets *bucket.Store, tracker *monitor.Tracker) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -437,11 +438,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
 				bumpBucket(r.Context(), buckets, in.NS, ss)
+				trackQuery(tracker, in.NS, res, "", "")
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
-			sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1")
 			bumpBucket(r.Context(), buckets, in.NS, ss)
+			trackQuery(tracker, in.NS, sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1"), embedderLabel(), "")
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
@@ -464,11 +466,27 @@ func bumpBucket(ctx context.Context, buckets *bucket.Store, name string, ss *sea
 	_ = buckets.Touch(ctx, name, srcCount, clusterCount)
 }
 
+// trackQuery folds one finished retrieval into the monitor. Best effort: the
+// tracker is telemetry, never a correctness source.
+func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMsg string) {
+	if tr == nil {
+		return
+	}
+	a := res.Answer
+	tr.Record(monitor.Query{
+		Namespace: ns, Mode: res.Mode, Escalated: res.Escalated, Reused: res.Reused,
+		Confidence: a.Confidence, Coverage: a.Coverage, Samples: len(a.Samples),
+		Loops: res.Loops, Widened: res.Widened, LLMCalls: a.LLMCalls,
+		Tokens: res.Tokens, LatencyMS: res.LatencyMS, LatencyUS: res.LatencyUS, Embedder: embedder,
+		SelfCorr: res.SelfCorrected, Refused: a.Refused, Error: errMsg,
+	})
+}
+
 // sseSearch streams one search as SSE events mapped onto the evoke-chat
 // engine: status → loading/progress, content → appendContent, citations →
 // ChatSources, done → completeMessage. A 5s heartbeat keeps proxies and
 // browsers from timing out during long DEEP searches.
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) {
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) deep.Result {
 	if verbose {
 		vlog := func(f string, a ...any) {
 			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
@@ -479,7 +497,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
-		return
+		return deep.Result{}
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -526,7 +544,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	res, err := runSearch(r.Context(), ss, query)
 	if err != nil {
 		emit("error", map[string]any{"error": err.Error()})
-		return
+		return deep.Result{}
 	}
 	ans := res.Answer
 	if ans.Skipped {
@@ -548,4 +566,11 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		}
 	}
 	emit("done", done)
+	return res
+}
+
+// embedderLabel names the embedder that actually served the last query, so the
+// monitor does not have to guess. It is advisory: an empty label means "unknown".
+func embedderLabel() string {
+	return ""
 }

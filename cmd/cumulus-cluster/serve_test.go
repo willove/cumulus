@@ -11,6 +11,7 @@ import (
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
+	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
 )
@@ -91,7 +92,7 @@ func TestSearchRequiresRegisteredBucket(t *testing.T) {
 	buckets := bucket.New(engine)
 	mux := http.NewServeMux()
 	ens := newNSEnsurer(engine, base, "", "clus_sources")
-	registerSearchFace(mux, engine, base, "clus_sources", "", false, ens, buckets)
+	registerSearchFace(mux, engine, base, "clus_sources", "", false, ens, buckets, monitor.New())
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

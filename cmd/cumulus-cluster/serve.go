@@ -17,6 +17,7 @@ import (
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
+	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
 )
@@ -106,7 +107,7 @@ type jobIn struct {
 // /v1/search, POST /v1/search/stream), sessions, clusters, MCP
 // (POST /mcp) and the workbench (/ui/). serveNS is the default namespace for
 // every face; request bodies may override it per call.
-func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, serveNS string, verbose bool) {
+func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, serveNS string, verbose bool, storeDirArg string) {
 	mux := http.NewServeMux()
 
 	// Boot: declare the suite collections for the default namespace. The
@@ -124,8 +125,10 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	// serve-level namespace is already declared by the boot Ensure above.
 	ensure := newNSEnsurer(c, st, serveNS, sourcesColl)
 	buckets := bucket.New(c)
+	tracker := monitor.New()
 
-	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure, buckets)
+	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure, buckets, tracker)
+	registerMonitorFace(mux, tracker, storeDirArg, serveNS)
 	registerSessionFace(mux, c, serveNS)
 	registerClusterFace(mux, c, serveNS)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
