@@ -219,3 +219,51 @@ func TestKeyIsUniquePerRecord(t *testing.T) {
 		t.Fatalf("explicit id must win: %q", got2[0].Key)
 	}
 }
+
+// Parquet is detected by magic, not extension, and is routed to StreamFile —
+// Stream alone cannot serve it because the reader needs a path.
+func TestParquetDetectedAndRouted(t *testing.T) {
+	if !looksLikeParquet([]byte("PAR1\x00\x00")) {
+		t.Fatal("PAR1 magic must be recognised")
+	}
+	if looksLikeParquet([]byte("{\"a\":1}")) {
+		t.Fatal("JSON must not be mistaken for parquet")
+	}
+	var got []Doc
+	err := Stream(context.Background(), "x.parquet", strings.NewReader("PAR1data"), Fields{}, func(d Doc) error {
+		got = append(got, d)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "StreamFile") {
+		t.Fatalf("Stream must point at StreamFile for parquet: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("nothing should be emitted: %+v", got)
+	}
+}
+
+// The schema is discovered, never assumed: a file whose text column is "content"
+// and whose id column is "id" must map correctly, and one whose columns are
+// "query"/"positive"/"negative" (a reranking set) must not silently vanish.
+func TestParquetSchemaAutodetect(t *testing.T) {
+	// This mirrors what StreamParquetFile builds from a real schema: the same
+	// docFrom mapping must work for both shapes.
+	baike := map[string]any{"title": "灯草塘村", "content": "隶属于云南省曲靖市。", "id": "10001", "url": "http://x"}
+	d1, ok := docFrom(baike, Fields{})
+	if !ok || d1.Body != "隶属于云南省曲靖市。" || d1.Title != "灯草塘村" || d1.Key != "10001" {
+		t.Fatalf("baike shape: %+v ok=%v", d1, ok)
+	}
+	rerank := map[string]any{"query": "问题是什么", "positive": "相关正文", "negative": "干扰正文"}
+	d2, ok := docFrom(rerank, Fields{})
+	if !ok {
+		t.Fatal("reranking shape must produce a document")
+	}
+	// The relevant passage is the document; the distractor must NOT become
+	// corpus content (indexing it would put wrong answers in the library).
+	if d2.Body != "相关正文" {
+		t.Fatalf("reranking body must be the positive passage: %+v", d2)
+	}
+	if d2.Title != "问题是什么" {
+		t.Fatalf("the query is the natural title: %+v", d2)
+	}
+}

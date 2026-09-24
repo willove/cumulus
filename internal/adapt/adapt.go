@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -119,11 +120,30 @@ func looksBinary(b []byte) bool {
 	return float64(bad)/float64(len(b)) > 0.10
 }
 
+// StreamFile adapts one file on disk. It prefers the parquet reader (which
+// needs a path, not a stream) and otherwise opens the file and streams it.
+func StreamFile(ctx context.Context, path string, f Fields, emit func(Doc) error) error {
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	br := bufio.NewReaderSize(fh, 256<<10)
+	prefix, _ := br.Peek(8)
+	if looksLikeParquet(prefix) {
+		return StreamParquetFile(ctx, path, f, emit)
+	}
+	return Stream(ctx, path, br, f, emit)
+}
+
 // Stream converts r into documents, calling emit once per record. The reader is
 // consumed lazily; a very large file costs O(1) memory per record.
 func Stream(ctx context.Context, name string, r io.Reader, f Fields, emit func(Doc) error) error {
 	br := bufio.NewReaderSize(r, 256<<10)
 	prefix, _ := br.Peek(8192)
+	if looksLikeParquet(prefix) {
+		return fmt.Errorf("adapt: %s is parquet; use StreamFile (needs a path, not a stream)", name)
+	}
 	switch Detect(name, prefix) {
 	case KindCSV:
 		return streamCSV(ctx, br, f, emit)
@@ -366,6 +386,13 @@ func docFrom(raw map[string]any, f Fields) (Doc, bool) {
 	bodyKey, titleKey := f.Body, f.Title
 	if bodyKey == "" {
 		bodyKey = autodetectBody(raw)
+		// Reranking triples carry both the relevant passage and a distractor.
+		// Indexing the distractor would put wrong answers in the corpus, so
+		// "positive" wins outright and "negative" is kept only as metadata.
+		// This is a stated domain rule, not autodetection.
+		if hasKey(raw, "positive") && bodyKey != "positive" {
+			bodyKey = "positive"
+		}
 	}
 	body := flatten(raw[bodyKey])
 	if strings.TrimSpace(body) == "" {
@@ -442,7 +469,13 @@ func flatten(v any) string {
 }
 
 var bodyKeys = []string{"content", "body", "text", "contentText", "content_text", "paragraphs", "article", "passage"}
-var titleKeys = []string{"title", "subtitle", "subTitle", "name", "heading", "chapter", "author"}
+var titleKeys = []string{"title", "subtitle", "subTitle", "name", "heading", "chapter", "author", "query", "question"}
+
+// hasKey reports whether a record carries a non-empty value under key.
+func hasKey(raw map[string]any, key string) bool {
+	v, ok := raw[key]
+	return ok && strings.TrimSpace(flatten(v)) != ""
+}
 
 // firstPresent returns the first present, non-empty field among names.
 func firstPresent(m map[string]any, names ...string) any {

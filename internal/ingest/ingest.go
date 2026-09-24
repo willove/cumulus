@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -149,13 +148,35 @@ func (s *Store) put(ctx context.Context, src source.Source, capBytes int) (Resul
 	return Result{ID: src.ID, Status: status, Version: next, Digest: src.Digest, StaleID: stale}, nil
 }
 
-// liveRevisions builds business-key → latest ACTIVE revision for the keys this
-// batch touches, with ONE paginated scan of the collection. The engine indexes
-// vectors only, so a filtered query on business_key is a full scan; doing that
-// per document makes a bulk ingest O(n²) — measured: 3k records 27s, then 6k
-// more 207s (9ms → 34ms per record). One scan per batch is O(n).
-func (s *Store) liveRevisions(ctx context.Context, want map[string]bool) (map[string]source.Source, error) {
-	out := make(map[string]source.Source, len(want))
+// liveRev is the slim per-identity state the batch path needs. It deliberately
+// holds no body: a million-key index costs memory, and the body is not needed
+// to decide revision arithmetic.
+type liveRev struct {
+	id         string
+	version    int
+	digest     string
+	status     string
+	ingestedAt time.Time
+	bizKey     string
+}
+
+// BatchIngester does bulk upserts against ONE pre-loaded revision index, so a
+// whole job is O(n) instead of O(n²). The engine indexes vectors only, so a
+// filtered query on business_key is a full collection scan; doing that per
+// document (or per 512-document batch) still left a quadratic term — measured:
+// 3k records 27s, 6.4k more 207s, 107k >600s. One scan per job fixes it.
+//
+// Use it for bulk paths only (ingest-adapt / ingest-files / ingest-jsonl). It is
+// not safe to share across concurrent jobs: the in-memory index would go stale.
+type BatchIngester struct {
+	st   *Store
+	live map[string]liveRev
+}
+
+// NewBatchIngester scans the sources collection once and returns an ingester
+// whose index is the current live-revision state of every business identity.
+func (s *Store) NewBatchIngester(ctx context.Context) (*BatchIngester, error) {
+	live := map[string]liveRev{}
 	const page = 1000
 	for skip := 0; ; skip += page {
 		res, err := s.c.Query(ctx, s.sources, contract.Query{Limit: page, Skip: skip})
@@ -164,55 +185,36 @@ func (s *Store) liveRevisions(ctx context.Context, want map[string]bool) (map[st
 		}
 		for _, d := range res.Documents {
 			key, _ := d["business_key"].(string)
-			if key == "" || !want[key] {
+			if key == "" {
 				continue
 			}
-			src, err := fromDoc(d)
-			if err != nil {
-				continue // a malformed row is not a reason to fail the scan
+			r := liveRev{
+				id:     docStr(d, "_id"),
+				digest: docStr(d, "digest"),
+				status: docStr(d, "status"),
+				bizKey: key,
 			}
-			if prev, ok := out[key]; !ok || laterThan(*src, prev) {
-				out[key] = *src
+			if v, ok := d["version"].(float64); ok {
+				r.version = int(v)
+			}
+			r.ingestedAt = docTime(d, "ingested_at")
+			if prev, ok := live[key]; !ok || r.version > prev.version ||
+				(r.version == prev.version && r.ingestedAt.After(prev.ingestedAt)) {
+				live[key] = r
 			}
 		}
 		if len(res.Documents) < page {
-			return out, nil
+			return &BatchIngester{st: s, live: live}, nil
 		}
 	}
 }
 
-// laterThan reports whether a supersedes b as the live revision of one identity.
-func laterThan(a, b source.Source) bool {
-	if a.Version != b.Version {
-		return a.Version > b.Version
-	}
-	return a.UpdatedAt.After(b.UpdatedAt)
-}
-
-// PutBatch upserts many sources with the revision arithmetic done in memory
-// against ONE pre-loaded index, so a bulk ingest costs O(n) instead of O(n²).
-// Semantics match Put: same digest → unchanged, different digest → next revision
-// with the previous live revisions retired and their evidence invalidated.
-//
-// It is for BULK paths only (ingest-adapt / ingest-files / ingest-jsonl). The
-// single-document Put stays as-is for interactive use, where one filtered query
-// is the right cost.
-func (s *Store) PutBatch(ctx context.Context, srcs []source.Source) (int, error) {
-	if len(srcs) == 0 {
-		return 0, nil
-	}
-	want := make(map[string]bool, len(srcs))
-	for _, src := range srcs {
-		if src.BusinessKey != "" {
-			want[src.BusinessKey] = true
-		}
-	}
-	live, err := s.liveRevisions(ctx, want)
-	if err != nil {
-		return 0, err
-	}
-	now := time.Now().UTC()
+// PutBatch upserts many sources. Semantics match Put exactly: same digest →
+// unchanged, changed digest → next revision with the previous live revision
+// retired and its evidence invalidated. Returns how many were stored.
+func (b *BatchIngester) PutBatch(ctx context.Context, srcs []source.Source) (int, error) {
 	n := 0
+	now := time.Now().UTC()
 	for i := range srcs {
 		src := srcs[i]
 		if src.Body == "" {
@@ -222,25 +224,22 @@ func (s *Store) PutBatch(ctx context.Context, srcs []source.Source) (int, error)
 		if src.Status == "" {
 			src.Status = source.StatusActive
 		}
-		// Identity is the business key, else the title (same rule as Put).
 		identity := src.BusinessKey
 		if identity == "" {
 			identity = src.Title
 		}
-		prev, hasPrev := live[identity]
-		if hasPrev && prev.Digest == src.Digest && prev.Status == source.StatusActive {
+		prev, hasPrev := b.live[identity]
+		if hasPrev && prev.digest == src.Digest && prev.status == source.StatusActive {
 			continue // unchanged
 		}
 		next := 1
-		if hasPrev && prev.Version >= next {
-			next = prev.Version + 1
+		if hasPrev && prev.version >= next {
+			next = prev.version + 1
 		}
-		status := "created"
-		if hasPrev && prev.Status == source.StatusActive {
-			status = "updated"
-			src.IngestedAt = prev.IngestedAt
+		if hasPrev && prev.status == source.StatusActive {
+			src.IngestedAt = prev.ingestedAt
 			if src.BusinessKey == "" {
-				src.BusinessKey = prev.BusinessKey
+				src.BusinessKey = prev.bizKey
 			}
 		} else {
 			src.IngestedAt = now
@@ -248,32 +247,51 @@ func (s *Store) PutBatch(ctx context.Context, srcs []source.Source) (int, error)
 		src.ID = source.RevisionID(identity, src.Title, src.Digest, next)
 		src.Version = next
 		src.UpdatedAt = now
-		if _, ierr := s.c.Insert(ctx, s.sources, []map[string]any{toDoc(src)}); ierr != nil {
+		if _, ierr := b.st.c.Insert(ctx, b.st.sources, []map[string]any{toDoc(src)}); ierr != nil {
 			// Another writer stored this revision first: that write is the
-			// state, so report it instead of failing the batch.
-			if existing, gerr := s.getSource(ctx, src.ID); gerr == nil && existing != nil {
+			// state, so skip rather than fail the whole batch.
+			if existing, gerr := b.st.getSource(ctx, src.ID); gerr == nil && existing != nil {
 				continue
 			}
 			return n, ierr
 		}
-		// Retire the previous live revisions of this identity and invalidate
-		// their evidence, exactly as Put does.
-		retired := []string{}
-		if hasPrev && prev.Status == source.StatusActive && prev.ID != src.ID {
-			if _, perr := s.c.PatchDocument(ctx, s.sources, prev.ID, map[string]any{
+		retired := ""
+		if hasPrev && prev.status == source.StatusActive && prev.id != src.ID {
+			if _, perr := b.st.c.PatchDocument(ctx, b.st.sources, prev.id, map[string]any{
 				"$set": map[string]any{"status": source.StatusStale, "updated_at": now},
 			}); perr == nil {
-				retired = append(retired, prev.ID)
+				retired = prev.id
 			}
 		}
-		for _, id := range retired {
-			_, _ = s.invalidateEvidence(ctx, id)
+		if retired != "" {
+			_, _ = b.st.invalidateEvidence(ctx, retired)
 		}
-		live[identity] = src
+		b.live[identity] = liveRev{
+			id: src.ID, version: next, digest: src.Digest,
+			status: source.StatusActive, ingestedAt: src.IngestedAt, bizKey: src.BusinessKey,
+		}
 		n++
-		_ = status
 	}
 	return n, nil
+}
+
+func docStr(d map[string]any, k string) string {
+	s, _ := d[k].(string)
+	return s
+}
+
+func docTime(d map[string]any, k string) time.Time {
+	s, _ := d[k].(string)
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Time{}
 }
 
 // revisions returns every stored revision under one business identity, any
@@ -1006,6 +1024,13 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	skip := map[string]int{}
 	doneFiles := 0 // files fully processed (the unit Total counts)
 	records := 0   // documents stored (reported separately)
+	// One revision index for the whole job. The alternative — rebuilding it per
+	// batch — still rescanned the collection every 512 records and kept a
+	// quadratic term (107k records did not finish inside 10 minutes).
+	bi, berr := s.NewBatchIngester(ctx)
+	if berr != nil {
+		return 0, berr
+	}
 	progress := func(phase string) {
 		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 			State: "running", Phase: phase, Total: len(files),
@@ -1032,7 +1057,7 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			progress("extracting")
 			continue
 		}
-		n, aerr := s.adaptOne(ctx, fh, path, f)
+		n, aerr := s.adaptOne(ctx, bi, path, f)
 		fh.Close()
 		if aerr != nil {
 			// An unrecognized container or a malformed record is a skipped
@@ -1060,9 +1085,9 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 // adaptOne streams one open file into the store, returning how many records it
 // stored. Bodyless or unreadable records are skipped; a store-level error fails
 // the file (and therefore the job), matching the plain walk's rule.
-func (s *Store) adaptOne(ctx context.Context, r io.Reader, path string, f adapt.Fields) (int, error) {
-	// Bounded batches: the revision index is built once per batch, so records
-	// inside a batch are O(1) each while the batch itself stays in memory.
+func (s *Store) adaptOne(ctx context.Context, b *BatchIngester, path string, f adapt.Fields) (int, error) {
+	// Bounded batches: memory stays flat while the revision index — built ONCE
+	// per job by NewBatchIngester — makes each record O(1).
 	const batchSize = 512
 	var batch []source.Source
 	n := 0
@@ -1070,7 +1095,7 @@ func (s *Store) adaptOne(ctx context.Context, r io.Reader, path string, f adapt.
 		if len(batch) == 0 {
 			return nil
 		}
-		put, err := s.PutBatch(ctx, batch)
+		put, err := b.PutBatch(ctx, batch)
 		n += put
 		if err != nil {
 			return err
@@ -1078,7 +1103,9 @@ func (s *Store) adaptOne(ctx context.Context, r io.Reader, path string, f adapt.
 		batch = batch[:0]
 		return nil
 	}
-	err := adapt.Stream(ctx, path, r, f, func(d adapt.Doc) error {
+	// StreamFile dispatches parquet to its own reader; everything else is
+	// streamed from the handle we were given.
+	err := adapt.StreamFile(ctx, path, f, func(d adapt.Doc) error {
 		if strings.TrimSpace(d.Body) == "" {
 			return nil
 		}

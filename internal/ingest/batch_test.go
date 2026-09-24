@@ -14,21 +14,25 @@ import (
 func TestPutBatchKeepsRevisionSemantics(t *testing.T) {
 	ctx := context.Background()
 	st, _ := newTestStore(t)
-	batch := func(id, key, body string) []source.Source {
+	bi, err := st.NewBatchIngester(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := func(key, body string) []source.Source {
 		return []source.Source{source.New("T", "md", "", key, "zh", body, nil)}
 	}
 	// First batch: two distinct identities.
-	n, err := st.PutBatch(ctx, batch("", "k1", "第一版"))
+	n, err := bi.PutBatch(ctx, batch("k1", "第一版"))
 	if err != nil || n != 1 {
 		t.Fatalf("batch1: n=%d err=%v", n, err)
 	}
 	// Identical content → unchanged, nothing stored.
-	n, err = st.PutBatch(ctx, batch("", "k1", "第一版"))
+	n, err = bi.PutBatch(ctx, batch("k1", "第一版"))
 	if err != nil || n != 0 {
 		t.Fatalf("identical re-ingest must be a no-op: n=%d err=%v", n, err)
 	}
 	// Changed content → new revision, old one retired.
-	n, err = st.PutBatch(ctx, batch("", "k1", "第二版"))
+	n, err = bi.PutBatch(ctx, batch("k1", "第二版"))
 	if err != nil || n != 1 {
 		t.Fatalf("update: n=%d err=%v", n, err)
 	}
@@ -41,7 +45,7 @@ func TestPutBatchKeepsRevisionSemantics(t *testing.T) {
 	}
 	// Re-ingest inside the SAME batch: the second copy must be recognised as
 	// unchanged, which is what the in-memory index is for.
-	n, err = st.PutBatch(ctx, append(batch("", "k2", "B"), batch("", "k2", "B")...))
+	n, err = bi.PutBatch(ctx, append(batch("k2", "B"), batch("k2", "B")...))
 	if err != nil || n != 1 {
 		t.Fatalf("in-batch duplicate must dedupe: n=%d err=%v", n, err)
 	}
@@ -52,18 +56,22 @@ func TestPutBatchKeepsRevisionSemantics(t *testing.T) {
 func TestPutBatchManyDistinctKeys(t *testing.T) {
 	ctx := context.Background()
 	st, _ := newTestStore(t)
+	bi, err := st.NewBatchIngester(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var first []source.Source
 	for i := 0; i < 600; i++ {
 		first = append(first, source.New("T", "md", "", itoa(i), "zh", "body "+itoa(i), nil))
 	}
-	if n, err := st.PutBatch(ctx, first); err != nil || n != 600 {
+	if n, err := bi.PutBatch(ctx, first); err != nil || n != 600 {
 		t.Fatalf("first batch: n=%d err=%v", n, err)
 	}
 	var second []source.Source
 	for i := 600; i < 1500; i++ {
 		second = append(second, source.New("T", "md", "", itoa(i), "zh", "body "+itoa(i), nil))
 	}
-	if n, err := st.PutBatch(ctx, second); err != nil || n != 900 {
+	if n, err := bi.PutBatch(ctx, second); err != nil || n != 900 {
 		t.Fatalf("second batch: n=%d err=%v", n, err)
 	}
 	live, err := st.ActiveSources(ctx)
