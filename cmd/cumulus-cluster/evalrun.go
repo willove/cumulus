@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -98,6 +99,7 @@ type evalReport struct {
 	Resumed    int            `json:"resumed"`
 	Judged     bool           `json:"judged"`
 	Frozen     eval.Frozen    `json:"frozen"`
+	ConfigText string         `json:"config_text"` // the human-readable config the hash covers
 	// Cost split (3.2): search_tokens / judge_tokens / rejected_proposals.
 	SearchTokens      int64 `json:"search_tokens"`
 	JudgeTokens       int64 `json:"judge_tokens"`
@@ -256,9 +258,10 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	}
 	{
 		r := aggregateResults(all, judgeOn && stack.chat != nil, resumed)
+		r.ConfigText = evalConfig(stack, prior, l1pre, judgeOn, namespace)
 		// A6: bind the scorecard to items + corpus (active sources) + config
 		// so an ablation row cannot silently change the sample set.
-		r.Frozen = eval.Freeze(itemsRaw, corpusFingerprint(list), []byte(evalConfig(prior, l1pre, judgeOn, namespace)), 0)
+		r.Frozen = eval.Freeze(itemsRaw, corpusFingerprint(list), []byte(evalConfig(stack, prior, l1pre, judgeOn, namespace)), 0)
 		// B3: the run also lands in clus_evals so the workbench scoreboard
 		// can list/detail it. Best-effort: the JSONL stays the primary
 		// artifact, and a failed scoreboard write must not fail a 3h run.
@@ -284,7 +287,9 @@ func saveEvalRun(ctx context.Context, c cumulite.Port, namespace, tag string, r 
 		System: r.System, ClosedBook: r.ClosedBook, McNemar: r.McNemar, Modes: r.Modes,
 		SearchTokens: r.SearchTokens, JudgeTokens: r.JudgeTokens,
 		RejectedProposals: r.RejectedProposals,
-		Extra:             map[string]any{"nr_breakdown": r.NRBreakdown, "frozen": r.Frozen},
+		Frozen:            &r.Frozen,
+		ConfigText:        r.Frozen.ConfigSHA + " ← " + r.ConfigText,
+		Extra:             map[string]any{"nr_breakdown": r.NRBreakdown},
 	}); err != nil {
 		return err
 	}
@@ -306,8 +311,69 @@ func corpusFingerprint(list []source.Source) []byte {
 }
 
 // evalConfig captures knobs that change which path ran (prior/L1/judge/ns).
-func evalConfig(prior, l1pre, judge bool, namespace string) string {
-	return fmt.Sprintf("prior=%v;l1pre=%v;judge=%v;ns=%s", prior, l1pre, judge, namespace)
+// evalConfig is the CONFIG half of the A.6 binding, and it must name everything
+// that can change a number without changing the items or the corpus. It used to
+// carry only the four booleans + ns, so two ablations on DIFFERENT models
+// produced byte-identical ConfigSHA — the scoreboard showed them as the same
+// configuration, and a model swap looked like a no-op.
+func evalConfig(stack prodStack, prior, l1pre, judge bool, namespace string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "prior=%v;l1pre=%v;judge=%v;ns=%s", prior, l1pre, judge, namespace)
+	// Model identity, masked endpoint, and the embedder that actually served.
+	fmt.Fprintf(&b, ";chat_model=%s", envOr("AIGATE_CHAT_MODEL", "<offline-stub>"))
+	fmt.Fprintf(&b, ";base_url=%s", maskHost(os.Getenv("AIGATE_BASE_URL")))
+	fmt.Fprintf(&b, ";embed_model=%s", os.Getenv("AIGATE_EMBED_MODEL"))
+	if os.Getenv("CLUS_EMBED") == "minilm" {
+		fmt.Fprintf(&b, ";embed_seat=minilm")
+	} else {
+		fmt.Fprintf(&b, ";embed_seat=%s", embedSeatLabel())
+	}
+	// The reuse/merge lines: changing them changes which queries hit a cluster
+	// and therefore every reuse-dependent metric.
+	fmt.Fprintf(&b, ";reuse_theta=%.4f;merge_theta=%.4f;split_cap=%d",
+		kb.DefaultReuseTheta, kb.DefaultMergeTheta, cluster.DefaultSplitCap)
+	// The search-path knobs that move tokens and latency.
+	fmt.Fprintf(&b, ";max_loops=%d;widen_budget=%d;correct_budget=%d",
+		deep.MaxLoops, deep.WidenBudget, deep.CorrectBudget)
+	// Which mechanisms were on.
+	if os.Getenv("CLUS_ABSTAIN") == "1" {
+		b.WriteString(";abstain=1")
+	}
+	if os.Getenv("CLUS_QUERY_SIM") == "1" {
+		b.WriteString(";query_sim=1")
+	}
+	if v := os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"); v != "" {
+		fmt.Fprintf(&b, ";token_budget=%s", v)
+	}
+	if stack.chat != nil {
+		b.WriteString(";endpoint=live")
+	} else {
+		b.WriteString(";endpoint=offline-stub")
+	}
+	return b.String()
+}
+
+// maskHost keeps the endpoint identifiable across runs without recording
+// credentials or the full path.
+func maskHost(u string) string {
+	if u == "" {
+		return "<unset>"
+	}
+	if parsed, err := url.Parse(u); err == nil && parsed.Host != "" {
+		return parsed.Scheme + "://" + parsed.Host
+	}
+	// No host means no usable endpoint identity (and "not a url" parses fine
+	// as a relative reference), so treat it as unparseable.
+	return "<unparseable>"
+}
+
+// embedSeatLabel names the embedder the search stack would actually build, so a
+// silent hash fallback is visible in the binding.
+func embedSeatLabel() string {
+	if os.Getenv("AIGATE_EMBED_MODEL") != "" {
+		return "aigate"
+	}
+	return "local-hash-64"
 }
 
 // narrowByKNN narrows the active-source list to the body_embed KNN hits for

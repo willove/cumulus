@@ -32,8 +32,17 @@ type RunDoc struct {
 	JudgeTokens       int64 `json:"judge_tokens"`
 	RejectedProposals int   `json:"rejected_proposals"`
 
-	// Extra carries the cmd-level breakdowns (nr_breakdown, frozen) opaque
-	// to this package — the scoreboard renders what it understands.
+	// Frozen binds the row to the exact artifacts it ran on (A.6). It is
+	// TYPED, not buried in Extra: an unreadable binding is the same as no
+	// binding, and the whole point is that a reader can tell whether two rows
+	// are comparable. The raw config string is carried alongside the hash so
+	// a human can see WHICH knob differs.
+	Frozen *Frozen `json:"frozen,omitempty"`
+	// ConfigText is the human-readable config the ConfigSHA was taken over.
+	ConfigText string `json:"config_text,omitempty"`
+
+	// Extra carries the cmd-level breakdowns (nr_breakdown) opaque to this
+	// package — the scoreboard renders what it understands.
 	Extra map[string]any `json:"extra,omitempty"`
 }
 
@@ -73,6 +82,12 @@ func (s *CumuStore) SaveRun(ctx context.Context, d RunDoc) error {
 		"system": d.System, "closed_book": d.ClosedBook, "mcnemar": d.McNemar,
 		"modes": d.Modes, "search_tokens": d.SearchTokens, "judge_tokens": d.JudgeTokens,
 		"rejected_proposals": d.RejectedProposals,
+	}
+	if d.Frozen != nil {
+		doc["frozen"] = d.Frozen
+	}
+	if d.ConfigText != "" {
+		doc["config_text"] = d.ConfigText
 	}
 	if len(d.Extra) > 0 {
 		doc["extra"] = d.Extra
@@ -149,6 +164,18 @@ func docToRun(d map[string]any) RunDoc {
 	r.SearchTokens = int64f(d["search_tokens"])
 	r.JudgeTokens = int64f(d["judge_tokens"])
 	r.RejectedProposals = intf(d["rejected_proposals"])
+	// A.6 binding, read back as data rather than left in Extra: a reader must be
+	// able to tell whether two rows are comparable, and "which knob differs"
+	// needs the config text, not just its hash.
+	if m, ok := d["frozen"].(map[string]any); ok {
+		r.Frozen = &Frozen{
+			ItemsSHA:  str(m["items_sha"]),
+			CorpusSHA: str(m["corpus_sha"]),
+			ConfigSHA: str(m["config_sha"]),
+			OrderSeed: intf(m["order_seed"]),
+		}
+	}
+	r.ConfigText = str(d["config_text"])
 	if m, ok := d["extra"].(map[string]any); ok {
 		r.Extra = m
 	}

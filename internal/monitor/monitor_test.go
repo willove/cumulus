@@ -132,3 +132,25 @@ func TestConcurrentRecord(t *testing.T) {
 		t.Fatalf("lost records under concurrency: %d", s.Queries)
 	}
 }
+
+// The knowledge block is attached by the API layer (the tracker owns no cluster
+// store) and must round-trip into the snapshot.
+func TestKnowledgeAttaches(t *testing.T) {
+	tr := New()
+	if s := tr.Snapshot(0, ""); s.Knowledge != nil {
+		t.Fatal("no knowledge block before one is attached")
+	}
+	tr.WithKnowledge(&Knowledge{
+		Clusters: 3, ByLifecycle: map[string]int{"stable": 2, "emerging": 1},
+		AvgConfidence: 0.8, AvgHotness: 0.4, Contested: 1, NeedingReview: 1,
+	})
+	s := tr.Snapshot(0, "")
+	if s.Knowledge == nil || s.Knowledge.Clusters != 3 || s.Knowledge.ByLifecycle["emerging"] != 1 {
+		t.Fatalf("knowledge block lost: %+v", s.Knowledge)
+	}
+	// A later refresh must not drop it.
+	tr.Record(rec("law", "FAST", false, 10, 0.5))
+	if tr.Snapshot(0, "").Knowledge == nil {
+		t.Fatal("knowledge block must survive subsequent queries")
+	}
+}

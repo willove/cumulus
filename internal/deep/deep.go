@@ -30,14 +30,18 @@ const EscalateBelow = 0.35
 // MaxLoops bounds the DEEP tool loop (Sirchmunk max_loops analogue).
 const MaxLoops = 6
 
-// widenBudget is the widening pass's own file allowance, independent of
-// MaxLoops (the initial admission must not starve exploration).
-const widenBudget = 4
+// WidenBudget is the widening pass's own file allowance, independent of
+// MaxLoops (the initial admission must not starve exploration). Exported
+// because it is part of the observable DEEP cost model — the eval scoreboard
+// binds it into the config fingerprint so two runs with different budgets are
+// not reported as the same configuration.
+const WidenBudget = 4
 
-// correctBudget is the self-correction file allowance (D4): admission
+// CorrectBudget is the self-correction file allowance (D4): admission
 // usually spends MaxLoops on the first wave; missing-fact re-sampling must
-// not share that clock or the weakest-requirement pass never runs.
-const correctBudget = 3
+// not share that clock or the weakest-requirement pass never runs. Exported
+// for the same reason as WidenBudget.
+const CorrectBudget = 3
 
 // maxKeepWindows is the synthesis budget: only the top-scored windows are
 // handed to the synthesizer / returned in the answer.
@@ -943,7 +947,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// Prefer files admission never reached, then re-sample tried ones with
 	// the missing-fact queries.
 	selfCorrected := false
-	if !rep.Complete && correctBudget > 0 && !e.budgetHit() {
+	if !rep.Complete && CorrectBudget > 0 && !e.budgetHit() {
 		selfCorrected = true
 		var order []source.Source
 		for _, s := range sources {
@@ -998,7 +1002,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				if cancelled(ctx) {
 					break outer_correct
 				}
-				if correctUsed >= correctBudget || e.budgetHit() {
+				if correctUsed >= CorrectBudget || e.budgetHit() {
 					break outer_correct
 				}
 				correctUsed++
@@ -1045,7 +1049,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// wrong-doc windows "complete". The budget term uses the REAL loop count
 	// (passing 0 made the predicate collapse to !Complete, so the "budget
 	// aware" gate never saw the budget).
-	if (facts.NeedContinue(rep, loops, MaxLoops+correctBudget+widenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
+	if (facts.NeedContinue(rep, loops, MaxLoops+CorrectBudget+WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -1053,7 +1057,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for k := range lawAffinity(keptIDs, sources) {
 			affinity[k] = true
 		}
-		if extra, err := e.Widen(ctx, query, widenExclude(), widenBudget, affinity); err == nil && len(extra) > 0 {
+		if extra, err := e.Widen(ctx, query, widenExclude(), WidenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
 				if e.budgetHit() || cancelled(ctx) {
@@ -1126,7 +1130,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for id := range keptIDs {
 			exclude[id] = true
 		}
-		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
+		if extra, err := e.Widen(ctx, query, exclude, WidenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
 				if e.budgetHit() || cancelled(ctx) {

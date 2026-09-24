@@ -1103,10 +1103,26 @@ assert r["_id"] and r["system"]["n"]==2, r
 assert isinstance(r["modes"], dict) and "search_tokens" in r, r
 tx=r["system"].get("taxonomy") or {}
 assert tx.get("correct",0)+tx.get("answered_but_wrong",0)+tx.get("retrieved_but_unanswered",0)+tx.get("not_retrieved",0)==2, tx
+# A.6 binding must round-trip through the store: the frozen hashes AND the
+# human-readable config, otherwise a reader cannot tell whether two rows are
+# comparable (and the old code dropped both).
+fz=r.get("frozen") or {}
+assert fz.get("items_sha") and fz.get("config_sha"), fz
+ct=r.get("config_text") or ""
+assert "reuse_theta" in ct and "embed_seat" in ct, ct
 print("ok")' ; check "scoreboard: the detail carries taxonomy/modes/cost lines" $?
 EB404="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SPORT5/v1/evals/run:missing")"
 [ "$EB404" = "404" ] ; check "scoreboard: an unknown run id answers 404" $?
+# The store directory is exclusive, so the CLI half of this gate can only run
+# once serve is down.
 kill "$SERVE5_PID" 2>/dev/null
+sleep 0.3
+# The binding must DIFFERENTIATE configs: two runs with a different chat model
+# must not share a config hash (they used to — the fingerprint was 4 booleans,
+# so a model swap looked like a no-op on the scoreboard).
+SHA_A="$($A eval-run -file "$OID" -out "$WORK/evalres2.jsonl" -tag sha-b 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); i=t.index("{"); print(json.loads(t[i:])["frozen"]["config_sha"])')"
+SHA_B="$(AIGATE_CHAT_MODEL=other-model $A eval-run -file "$OID" -out "$WORK/evalres3.jsonl" -tag sha-c 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); i=t.index("{"); print(json.loads(t[i:])["frozen"]["config_sha"])')"
+[ -n "$SHA_A" ] && [ -n "$SHA_B" ] && [ "$SHA_A" != "$SHA_B" ] ; check "scoreboard: a different chat model changes the config binding" $?
 
 echo "clus-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

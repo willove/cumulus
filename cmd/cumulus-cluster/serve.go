@@ -128,7 +128,9 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	tracker := monitor.New()
 
 	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure, buckets, tracker)
-	registerMonitorFace(mux, tracker, storeDirArg, serveNS)
+	registerMonitorFace(mux, tracker, storeDirArg, serveNS, func(ctx context.Context, nsName string) *monitor.Knowledge {
+		return clusterKnowledge(ctx, c, nsName)
+	})
 	registerSessionFace(mux, c, serveNS)
 	registerClusterFace(mux, c, serveNS)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)

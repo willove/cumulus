@@ -162,7 +162,14 @@ let monTimer = null;
 
 async function loadMonitor() {
   monBusy.value = true;
-  try { mon.value = await (await fetch("/v1/monitor/overview")).json(); }
+  try {
+    const q = nsSel.value ? "?ns=" + encodeURIComponent(nsSel.value) : "";
+    mon.value = await (await fetch("/v1/monitor/overview" + q)).json();
+    // 知识块按 bucket 读；overview 已带，缺失时单独取一次。
+    if (mon.value && !mon.value.knowledge) {
+      mon.value.knowledge = await (await fetch("/v1/monitor/knowledge" + q)).json();
+    }
+  }
   catch { mon.value = null; }
   monBusy.value = false;
 }
@@ -562,6 +569,18 @@ onMounted(() => { loadSessions(); loadClusters(); });
               <div class="mrow"><span>平均置信</span><b>{{ mon.retrieval.avg_confidence.toFixed(3) }}</b></div>
               <div class="mrow"><span>平均覆盖</span><b>{{ mon.retrieval.avg_coverage.toFixed(3) }}</b></div>
               <div class="mrow"><span>档位分布</span><b>{{ JSON.stringify(mon.retrieval.by_mode) }}</b></div>
+            </div>
+            <div class="mcard"><div class="mt">知识层</div>
+              <template v-if="mon.knowledge">
+                <div class="mrow"><span>簇总数</span><b>{{ mon.knowledge.clusters }}</b></div>
+                <div class="mrow"><span>平均置信</span><b>{{ mon.knowledge.avg_confidence.toFixed(3) }}</b></div>
+                <div class="mrow"><span>平均热度</span><b>{{ mon.knowledge.avg_hotness.toFixed(3) }}</b></div>
+                <div class="mrow"><span>证据窗</span><b>{{ mon.knowledge.evidence_windows }}</b></div>
+                <div class="mrow"><span>待复核(emerging)</span><b>{{ mon.knowledge.needing_review }}</b></div>
+                <div class="mrow"><span>争议(contested)</span><b>{{ mon.knowledge.contested }}</b></div>
+                <div class="mrow"><span>生命周期分布</span><b>{{ JSON.stringify(mon.knowledge.by_lifecycle) }}</b></div>
+              </template>
+              <div v-else class="hint">该 bucket 暂无知识簇</div>
             </div>
             <div class="mcard"><div class="mt">按 bucket</div>
               <table class="mtab">

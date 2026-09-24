@@ -48,11 +48,12 @@ type Query struct {
 // Tracker accumulates query records. It is safe for concurrent use: serve's
 // HTTP handlers run searches in parallel goroutines.
 type Tracker struct {
-	mu       sync.Mutex
-	started  time.Time
-	queries  []Query // ring-bounded; see maxQueries
-	llmCalls int64
-	llmTok   int64
+	mu        sync.Mutex
+	started   time.Time
+	knowledge *Knowledge
+	queries   []Query // ring-bounded; see maxQueries
+	llmCalls  int64
+	llmTok    int64
 	// per-mode and reuse counters are derived from queries on read, so a
 	// truncation of the ring cannot make them disagree with each other.
 }
@@ -93,14 +94,29 @@ func (t *Tracker) RecordLLM(calls int, tokens int64) {
 
 // Snapshot is the read model served over HTTP.
 type Snapshot struct {
-	StartedAt  time.Time `json:"started_at"`
-	UptimeSec  int64     `json:"uptime_sec"`
-	Queries    int       `json:"queries"` // retained in the ring
-	System     System    `json:"system"`
-	LLM        LLM       `json:"llm"`
-	Retrieval  Retrieval `json:"retrieval"`
-	Namespaces []NSStat  `json:"namespaces"`
-	Recent     []Query   `json:"recent"`
+	StartedAt  time.Time  `json:"started_at"`
+	UptimeSec  int64      `json:"uptime_sec"`
+	Queries    int        `json:"queries"` // retained in the ring
+	System     System     `json:"system"`
+	LLM        LLM        `json:"llm"`
+	Retrieval  Retrieval  `json:"retrieval"`
+	Knowledge  *Knowledge `json:"knowledge,omitempty"` // nil when no cluster store is wired
+	Namespaces []NSStat   `json:"namespaces"`
+	Recent     []Query    `json:"recent"`
+}
+
+// Knowledge is the self-evolving layer's population snapshot — the "资料库
+// 自整理" half of the monitor. Counts alone would hide drift (a rising
+// `emerging` count means clusters waiting for re-validation), so the lifecycle
+// distribution is reported explicitly.
+type Knowledge struct {
+	Clusters        int            `json:"clusters"`
+	ByLifecycle     map[string]int `json:"by_lifecycle"`
+	AvgConfidence   float64        `json:"avg_confidence"`
+	AvgHotness      float64        `json:"avg_hotness"`
+	EvidenceWindows int            `json:"evidence_windows"`
+	Contested       int            `json:"contested"`      // has a conflict edge
+	NeedingReview   int            `json:"needing_review"` // emerging: prior went stale
 }
 
 // System is the process/storage block (Sirchmunk's monitor shapes).
@@ -156,9 +172,26 @@ type NSStat struct {
 	AvgP50US  int64  `json:"avg_p50_us"`
 }
 
+// WithKnowledge attaches a knowledge snapshot to subsequent reads. The tracker
+// owns no cluster store (that is the engine's job), so the API layer computes
+// the block and hands it over.
+func (t *Tracker) WithKnowledge(k *Knowledge) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.knowledge = k
+}
+
+// KnowledgeStats returns the attached knowledge block, or nil.
+func (t *Tracker) KnowledgeStats() *Knowledge {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.knowledge
+}
+
 // Snapshot renders the current state. storeBytes/storeDir are supplied by the
 // caller because the engine port is what knows them.
 func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
+	k := t.KnowledgeStats()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -179,6 +212,7 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 		},
 		LLM:       LLM{Calls: t.llmCalls, Tokens: t.llmTok},
 		Retrieval: Retrieval{ByMode: map[string]int{}},
+		Knowledge: k,
 	}
 	var warm, cold []int64 // microseconds
 	var confSum, covSum float64

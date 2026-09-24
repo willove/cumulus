@@ -122,3 +122,65 @@ func judgeCorrectDoc() string {
 	}
 	return string(b)
 }
+
+// The A.6 config binding must name every knob that moves a number. It used to
+// carry only prior/l1pre/judge/ns, so two ablations on DIFFERENT models
+// produced byte-identical ConfigSHA — the scoreboard showed them as the same
+// configuration and a model swap looked like a no-op.
+func TestEvalConfigFingerprintCoversModelAndBudgets(t *testing.T) {
+	st := prodStack{} // offline stubs
+	base := evalConfig(st, false, false, false, "ev")
+
+	cases := []struct {
+		name  string
+		setup func()
+		want  string
+	}{
+		{"chat model", func() { t.Setenv("AIGATE_CHAT_MODEL", "model-B") }, "model-B"},
+		{"embed model", func() { t.Setenv("AIGATE_EMBED_MODEL", "text-embedding-3-small") }, "text-embedding-3-small"},
+		{"minilm seat", func() { t.Setenv("CLUS_EMBED", "minilm") }, "embed_seat=minilm"},
+		{"abstain on", func() { t.Setenv("CLUS_ABSTAIN", "1") }, "abstain=1"},
+		{"query sim on", func() { t.Setenv("CLUS_QUERY_SIM", "1") }, "query_sim=1"},
+		{"token budget", func() { t.Setenv("CLUS_SEARCH_TOKEN_BUDGET", "5000") }, "token_budget=5000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.setup()
+			got := evalConfig(st, false, false, false, "ev")
+			if !strings.Contains(got, c.want) {
+				t.Fatalf("config must name %q: %s", c.want, got)
+			}
+			if got == base {
+				t.Fatalf("changing %s must change the fingerprint", c.name)
+			}
+		})
+	}
+
+	// A different budget/model must produce a different HASH, not just text.
+	var prev string
+	for _, alt := range []func(){
+		func() { t.Setenv("AIGATE_CHAT_MODEL", "m1") },
+		func() { t.Setenv("AIGATE_CHAT_MODEL", "m2") },
+		func() { t.Setenv("AIGATE_CHAT_MODEL", "") },
+	} {
+		alt()
+		sha := eval.Freeze(nil, nil, []byte(evalConfig(st, false, false, false, "ev")), 0).ConfigSHA
+		if sha == prev && prev != "" {
+			t.Fatal("distinct configs must hash differently")
+		}
+		prev = sha
+	}
+}
+
+// maskHost must keep the endpoint identifiable without exposing credentials.
+func TestMaskHost(t *testing.T) {
+	if got := maskHost(""); got != "<unset>" {
+		t.Fatalf("empty: %q", got)
+	}
+	if got := maskHost("https://api.minimaxi.com/v1"); got != "https://api.minimaxi.com" {
+		t.Fatalf("host only: %q", got)
+	}
+	if got := maskHost("not a url"); got != "<unparseable>" {
+		t.Fatalf("garbage: %q", got)
+	}
+}

@@ -177,11 +177,11 @@ func TestGateDConflictDiscoverable(t *testing.T) {
 // D1: widen must exclude only files this run tried — never the full candidate
 // list (L1Pre=false used to starve the extra budget on the same corpus).
 // Fixture: admission takes MaxLoops; self-correction may pull up to
-// correctBudget untried files; one file remains untouched and must be eligible.
+// CorrectBudget untried files; one file remains untouched and must be eligible.
 func TestWidenExcludeOnlyTried(t *testing.T) {
 	ctx := context.Background()
 	e := newEngine()
-	n := MaxLoops + correctBudget + 1
+	n := MaxLoops + CorrectBudget + 1
 	var srcs []source.Source
 	for i := 0; i < n; i++ {
 		// Distinct bodies → distinct content-addressed IDs (source.IDFor).
