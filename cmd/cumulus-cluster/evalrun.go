@@ -239,10 +239,16 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if _, err := w.WriteString(string(line) + "\n"); err != nil {
 			return err
 		}
+		// Flush after EVERY item. The header promises "中断不丢已完成项" and
+		// the resume logic keys off exactly that file; buffering to the end of
+		// the loop meant any interrupt, per-item timeout path or mid-loop
+		// error silently discarded the whole batch — and a -limit chunked run
+		// then re-ran everything from scratch. Items are minutes each, so a
+		// per-item fsync-costed flush is the correct trade.
+		if err := w.Flush(); err != nil {
+			return err
+		}
 		processed++
-	}
-	if err := w.Flush(); err != nil {
-		return err
 	}
 	all, err := readResults(outPath)
 	if err != nil {
@@ -510,14 +516,22 @@ func readEvalItems(path string) ([]eval.Item, error) {
 }
 
 // readDoneIDs scans a results JSONL for already-recorded item ids (resume).
+//
+// A parse failure is no longer swallowed. It used to return an empty done-set
+// with a nil error, so one malformed or torn line (exactly what an interrupted
+// pre-flush run left behind) looked like "nothing done yet": the run
+// re-processed every item and appended duplicate ids, and aggregateResults then
+// double-counted them into every metric.
 func readDoneIDs(path string) (map[string]bool, error) {
 	done := map[string]bool{}
 	lines, err := readResults(path)
-	if err != nil || lines == nil {
-		return done, nil
+	if err != nil {
+		return nil, fmt.Errorf("resume: results file %s is unreadable: %w", path, err)
 	}
 	for _, r := range lines {
-		done[r.ID] = true
+		if r.ID != "" {
+			done[r.ID] = true
+		}
 	}
 	return done, nil
 }

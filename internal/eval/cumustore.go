@@ -54,7 +54,16 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 // SaveRun upserts one run by its id.
 func (s *CumuStore) SaveRun(ctx context.Context, d RunDoc) error {
 	if d.ID == "" {
+		// run:<unixmilli> is not unique on its own: two runs inside the same
+		// millisecond collided and silently replaced each other's scoreboard
+		// row (GetDocument → ReplaceDocument). Suffix until free.
 		d.ID = "run:" + fmt.Sprint(time.Now().UnixMilli())
+		for n := 1; ; n++ {
+			if existing, err := s.c.GetDocument(ctx, s.coll, d.ID); err != nil || existing == nil {
+				break
+			}
+			d.ID = fmt.Sprintf("run:%d-%d", time.Now().UnixMilli(), n)
+		}
 	}
 	if d.At == "" {
 		d.At = time.Now().UTC().Format(time.RFC3339)

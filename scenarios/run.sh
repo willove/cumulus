@@ -19,7 +19,7 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || { echo "scenario: FAIL building cumulus-cluster"; exit 1; }
-"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null
+"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null || { echo "scenario: FAIL ensure"; exit 1; }
 
 run_scenario() {
 	dir="$1"

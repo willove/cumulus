@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	CLUS_EMBED=minilm thetaprobe -data DIR -seeds seeds.jsonl [-ns default]
+//	CLUS_EMBED=minilm thetaprobe -lite DIR -seeds seeds.jsonl [-ns default]
 package main
 
 import (

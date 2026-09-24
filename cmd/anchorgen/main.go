@@ -13,7 +13,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
@@ -37,7 +36,14 @@ const prompt = "把下面这条法律条文改写成一个普通人会问出的�
 	"要求：问题里不得出现法律名称、条文编号；不要复述条文原文；只问这件事本身。\n" +
 	"只输出 JSON：{\"q\": \"问题\"}\n\n条文：%s"
 
-var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>`)
+// envOr mirrors main.envOr: an explicit environment value wins, else the
+// default. Local because this is a separate command package.
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
 
 func main() {
 	n := flag.Int("n", 40, "sample size (deterministic stride)")
@@ -46,12 +52,15 @@ func main() {
 	if key == "" {
 		fatal("ANCHOR_KEY not set")
 	}
+	// Same endpoint convention as the CLI (AIGATE_*/LLM_* via env.go); a
+	// hardcoded URL here meant the tool silently ignored -env switching.
+	base := envOr("AIGATE_BASE_URL", "https://api.minimaxi.com/v1")
 	chat := &llm.ChatClient{
-		BaseURL:        "https://api.minimaxi.com/v1",
+		BaseURL:        base,
 		APIKey:         key,
-		Model:          "MiniMax-M3",
+		Model:          envOr("AIGATE_CHAT_MODEL", "MiniMax-M3"),
 		Caller:         "anchorgen",
-		ReasoningSplit: true,
+		ReasoningSplit: strings.Contains(strings.ToLower(base), "minimaxi.com"),
 	}
 
 	var rows []row

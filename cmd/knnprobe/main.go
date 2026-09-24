@@ -3,7 +3,7 @@
 // diagnostic for the L1 prefilter; not part of the gates.
 // Usage:
 //
-//	CLUS_EMBED=minilm knnprobe -data DIR -q "查询" [-k 40]
+//	CLUS_EMBED=minilm knnprobe -lite DIR -q "查询" [-k 40]
 //	CLUS_EMBED=minilm knnprobe -data DIR -items items.jsonl -out ranks.json [-k 8]
 //
 // The -items mode writes {"id":…,"rank":…} (0 = gold not in top-K) per item.
@@ -71,8 +71,12 @@ func main() {
 
 	rankOf := func(q, gold string) (int, float64, error) {
 		qv, err := embedFn(context.Background(), []string{q})
-		if err != nil || len(qv) != 1 {
+		if err != nil {
 			return 0, 0, err
+		}
+		if len(qv) != 1 {
+			// A nil error here used to flow straight into a nil-map read.
+			return 0, 0, fmt.Errorf("embedder returned %d vectors for %q", len(qv), q)
 		}
 		res, err := c.KNN(context.Background(), *coll, contract.KNNRequest{
 			Field: *field, Vector: qv[0], K: *k, Metric: "cosine",
@@ -153,8 +157,11 @@ func main() {
 
 func knnList(c cumulite.Port, coll, field string, embedFn func(ctx context.Context, texts []string) ([][]float64, error), q string, k int) (*contract.KNNResult, error) {
 	qv, err := embedFn(context.Background(), []string{q})
-	if err != nil || len(qv) != 1 {
+	if err != nil {
 		return nil, err
+	}
+	if len(qv) != 1 {
+		return nil, fmt.Errorf("embedder returned %d vectors for %q", len(qv), q)
 	}
 	return c.KNN(context.Background(), coll, contract.KNNRequest{
 		Field: field, Vector: qv[0], K: k, Metric: "cosine",

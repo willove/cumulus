@@ -48,7 +48,7 @@ while IFS= read -r q; do
 	[ -n "$q" ] || continue
 	"$STATE/cumulus-cluster" -data "$STORE" search -q "$q" -raw >/dev/null 2>&1 || true
 done < "$STATE/build.txt"
-CLUSTERS=$("$STATE/cumulus-cluster" -data "$STORE" cluster list -limit 200 | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
+CLUSTERS=$("$STATE/cumulus-cluster" -data "$STORE" cluster list | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')
 echo "theta-probe: build_queries=$(wc -l <"$STATE/build.txt") clusters=$CLUSTERS"
 if [ "$CLUSTERS" -lt 2 ]; then
 	echo "theta-probe: <2 clusters — 提高 N" >&2
@@ -57,6 +57,6 @@ fi
 
 # 4) 探针：argmax 簇的锚定法条 vs expect_key；分布 + θ 网格（不设线）
 go build -o "$STATE/thetaprobe" ./cmd/thetaprobe
-CLUS_EMBED="${CLUS_EMBED:-}" "$STATE/thetaprobe" -data "$STORE" -seeds "$STATE/seeds.jsonl" | tee "$STATE/probe.json"
+CLUS_EMBED="${CLUS_EMBED:-}" "$STATE/thetaprobe" -lite "$STORE" -seeds "$STATE/seeds.jsonl" | tee "$STATE/probe.json"
 echo "theta-probe: 口语问句样例：" >&2
 head -3 "$STATE/seeds.jsonl" | python3 scripts/show_queries.py >&2

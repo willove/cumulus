@@ -134,7 +134,14 @@ func BuildStructure(body string) []Span {
 			marks[j], marks[j-1] = marks[j-1], marks[j]
 		}
 	}
-	out := make([]Span, 0, len(marks))
+	out := make([]Span, 0, len(marks)+1)
+	// Text before the first mark belongs to no heading, but it still has to be
+	// reachable: SSOT §3.4.6 #2 requires the structure to map every character
+	// back onto the body ("字符级对拍"), and a preamble is the norm in real
+	// documents. Give it its own span so the spans tile the body exactly.
+	if marks[0].at > 0 {
+		out = append(out, Span{Kind: "preamble", Label: "正文开头", Start: 0, End: marks[0].at})
+	}
 	for i, m := range marks {
 		end := n
 		if i+1 < len(marks) {

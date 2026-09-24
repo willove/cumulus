@@ -6,6 +6,7 @@ package prompts
 import (
 	"embed"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -37,10 +38,20 @@ func Load(name string) (string, error) {
 
 // Render replaces {{key}} placeholders. Unknown keys are left intact so a
 // frozen regression can detect missing injections rather than silent blanks.
+//
+// Keys are substituted in sorted order, not map order: if a value itself
+// contains "{{other}}", map iteration order (randomized in Go) decided whether
+// the nested placeholder got expanded — the same inputs could produce different
+// prompts, which defeats the frozen-regression contract.
 func Render(tmpl string, vars map[string]string) string {
 	out := tmpl
-	for k, v := range vars {
-		out = strings.ReplaceAll(out, "{{"+k+"}}", v)
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = strings.ReplaceAll(out, "{{"+k+"}}", vars[k])
 	}
 	return out
 }

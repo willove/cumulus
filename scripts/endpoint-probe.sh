@@ -24,7 +24,7 @@ STORE="$WORK/data"
 trap 'rm -rf "$WORK"' EXIT
 
 go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || exit 1
-"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null
+"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null || { echo "endpoint-probe: FAIL ensure"; exit 1; }
 
 python3 - "$WORK" <<'PY'
 import sys, os
