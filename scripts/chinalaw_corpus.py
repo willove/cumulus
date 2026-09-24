@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an ask ingest corpus from a directory of plain-text statute files.
+"""Build a cumulus-cluster ingest corpus from a directory of plain-text statute files.
 
 Chinese_Law layout (KuugoRen/Chinese_Law): one file per statute, one article
 per non-empty line. Keys are deterministic so gold_sources stay stable across

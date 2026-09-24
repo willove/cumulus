@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 func TestFASTFindsKnownAnswer(t *testing.T) {

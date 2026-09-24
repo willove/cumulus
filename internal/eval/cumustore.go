@@ -1,0 +1,197 @@
+package eval
+
+// Run persistence (B3): the scoreboard reads eval runs from the store, so a
+// run survives the CLI process and the workbench can list/detail it. The
+// per-item JSONL stays the operator's artifact; the store keeps the
+// comparable aggregate (the scoreboard never needs the raw lines).
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
+)
+
+// RunDoc is one persisted eval run.
+type RunDoc struct {
+	ID     string `json:"_id"` // run:<unixmilli>
+	Tag    string `json:"tag"`
+	At     string `json:"at"`
+	N      int    `json:"n"`
+	Judged bool   `json:"judged"`
+
+	System     Report         `json:"system"`
+	ClosedBook Report         `json:"closed_book"`
+	McNemar    McNemar        `json:"mcnemar"`
+	Modes      map[string]int `json:"modes"`
+
+	SearchTokens      int64 `json:"search_tokens"`
+	JudgeTokens       int64 `json:"judge_tokens"`
+	RejectedProposals int   `json:"rejected_proposals"`
+
+	// Extra carries the cmd-level breakdowns (nr_breakdown, frozen) opaque
+	// to this package — the scoreboard renders what it understands.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// CumuStore persists eval runs in clus_evals (namespace-scoped like every
+// other suite collection).
+type CumuStore struct {
+	c    cumulite.Port
+	coll string
+}
+
+func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
+	if coll == "" {
+		coll = "clus_evals"
+	}
+	return &CumuStore{c: c, coll: coll}
+}
+
+// SaveRun upserts one run by its id.
+func (s *CumuStore) SaveRun(ctx context.Context, d RunDoc) error {
+	if d.ID == "" {
+		d.ID = "run:" + fmt.Sprint(time.Now().UnixMilli())
+	}
+	if d.At == "" {
+		d.At = time.Now().UTC().Format(time.RFC3339)
+	}
+	doc := map[string]any{
+		"_id": d.ID, "tag": d.Tag, "at": d.At, "n": d.N, "judged": d.Judged,
+		"system": d.System, "closed_book": d.ClosedBook, "mcnemar": d.McNemar,
+		"modes": d.Modes, "search_tokens": d.SearchTokens, "judge_tokens": d.JudgeTokens,
+		"rejected_proposals": d.RejectedProposals,
+	}
+	if len(d.Extra) > 0 {
+		doc["extra"] = d.Extra
+	}
+	if existing, err := s.c.GetDocument(ctx, s.coll, d.ID); err == nil && existing != nil {
+		_, err := s.c.ReplaceDocument(ctx, s.coll, d.ID, doc)
+		return err
+	}
+	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
+	return err
+}
+
+// ListRuns returns the newest runs first (bounded).
+func (s *CumuStore) ListRuns(ctx context.Context, limit int) ([]RunDoc, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 500})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RunDoc, 0, len(res.Documents))
+	for _, d := range res.Documents {
+		out = append(out, docToRun(d))
+	}
+	// Newest first by id (run:<unixmilli> sorts lexicographically in time order).
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// GetRun returns one run or nil (a missing run is not an error — the
+// scoreboard turns it into a 404).
+func (s *CumuStore) GetRun(ctx context.Context, id string) (*RunDoc, error) {
+	d, err := s.c.GetDocument(ctx, s.coll, id)
+	if err != nil {
+		if contract.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if d == nil {
+		return nil, nil
+	}
+	r := docToRun(d)
+	return &r, nil
+}
+
+func docToRun(d map[string]any) RunDoc {
+	r := RunDoc{
+		ID:     str(d["_id"]),
+		Tag:    str(d["tag"]),
+		At:     str(d["at"]),
+		N:      intf(d["n"]),
+		Judged: boolf(d["judged"]),
+	}
+	if m, ok := d["system"].(map[string]any); ok {
+		r.System = docToReport(m)
+	}
+	if m, ok := d["closed_book"].(map[string]any); ok {
+		r.ClosedBook = docToReport(m)
+	}
+	if m, ok := d["mcnemar"].(map[string]any); ok {
+		r.McNemar = McNemar{BOnly: intf(m["b_only"]), COnly: intf(m["c_only"]), P: floatf(m["p"]), N: intf(m["n"])}
+	}
+	if m, ok := d["modes"].(map[string]any); ok {
+		r.Modes = map[string]int{}
+		for k, v := range m {
+			r.Modes[k] = intf(v)
+		}
+	}
+	r.SearchTokens = int64f(d["search_tokens"])
+	r.JudgeTokens = int64f(d["judge_tokens"])
+	r.RejectedProposals = intf(d["rejected_proposals"])
+	if m, ok := d["extra"].(map[string]any); ok {
+		r.Extra = m
+	}
+	return r
+}
+
+func docToReport(m map[string]any) Report {
+	r := Report{
+		N:      intf(m["n"]),
+		EM:     floatf(m["em"]),
+		EvRec:  floatf(m["ev_rec"]),
+		Ground: floatf(m["ground"]),
+	}
+	if tx, ok := m["taxonomy"].(map[string]any); ok {
+		r.Taxonomy = Taxonomy{
+			Correct:       intf(tx["correct"]),
+			RetrievedOnly: intf(tx["retrieved_but_unanswered"]),
+			AnsweredWrong: intf(tx["answered_but_wrong"]),
+			NotRetrieved:  intf(tx["not_retrieved"]),
+		}
+	}
+	return r
+}
+
+func str(v any) string { s, _ := v.(string); return s }
+func boolf(v any) bool { b, _ := v.(bool); return b }
+func intf(v any) int {
+	switch x := v.(type) {
+	case float64:
+		return int(x)
+	case int:
+		return x
+	}
+	return 0
+}
+func int64f(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	}
+	return 0
+}
+func floatf(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int:
+		return float64(x)
+	}
+	return 0
+}

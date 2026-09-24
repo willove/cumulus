@@ -38,7 +38,7 @@ type Head struct {
 	// state (no samples at all), p_fail ≥ this refuses BEFORE DEEP burns
 	// budget (ir-rag 3.1 / RCS "少烧钱"). It forfeits DEEP's recovery
 	// chance (真机有 DEEP 救回拒答的先例), so callers keep it OFF unless
-	// the operator opts in — see ASK_EARLY_ABSTAIN.
+	// the operator opts in — see CLUS_EARLY_ABSTAIN.
 	EarlyAbove float64
 }
 

@@ -1,11 +1,12 @@
 {
-  "name": "ask-web",
+  "name": "cumulus-cluster-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "node --test src/*.test.mjs"
   },
   "dependencies": {
     "@wil-works/evoke-business-ui": "file:/Users/willove/wil-works/evoke-ui-project/packages/evoke-business-ui",

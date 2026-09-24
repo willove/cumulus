@@ -3,8 +3,8 @@
 // diagnostic for the L1 prefilter; not part of the gates.
 // Usage:
 //
-//	ASK_EMBED=minilm knnprobe -data DIR -q "查询" [-k 40]
-//	ASK_EMBED=minilm knnprobe -data DIR -items items.jsonl -out ranks.json [-k 8]
+//	CLUS_EMBED=minilm knnprobe -data DIR -q "查询" [-k 40]
+//	CLUS_EMBED=minilm knnprobe -data DIR -items items.jsonl -out ranks.json [-k 8]
 //
 // The -items mode writes {"id":…,"rank":…} (0 = gold not in top-K) per item.
 package main
@@ -16,10 +16,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/minilm"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/minilm"
 )
 
 type item struct {
@@ -36,7 +36,7 @@ type rankOut struct {
 
 func main() {
 	lite := flag.String("lite", "", "cumulite store directory")
-	coll := flag.String("coll", "ask_sources", "sources collection")
+	coll := flag.String("coll", "clus_sources", "sources collection")
 	query := flag.String("q", "", "query")
 	itemsFile := flag.String("items", "", "items jsonl: rank gold per item instead of printing one ranking")
 	outFile := flag.String("out", "", "output jsonl for -items mode")
@@ -48,7 +48,7 @@ func main() {
 		os.Exit(2)
 	}
 	var embedFn func(ctx context.Context, texts []string) ([][]float64, error)
-	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
+	if os.Getenv("CLUS_EMBED") == "minilm" && minilm.Available() {
 		emb := minilm.New(minilm.DefaultDir())
 		embedFn = emb.Embed
 		fmt.Fprintln(os.Stderr, "embedder: minilm-384")

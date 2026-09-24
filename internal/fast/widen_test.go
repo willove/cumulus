@@ -3,10 +3,10 @@ package fast
 import (
 	"context"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 	"testing"
 
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/source"
 )
 
 func TestWidenSourcesOffline(t *testing.T) {

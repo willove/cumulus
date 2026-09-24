@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/prior"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/prior"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // Answer modes (D5 tiers + intent exits).
@@ -88,7 +88,7 @@ type Engine struct {
 	// (internal/prior, opt-in; plain IDF cascade by default).
 	UsePrior bool
 	// PriorHist feeds the prior's history arm from successful evidence
-	// (ask_evidence). nil = history arm silent.
+	// (clus_evidence). nil = history arm silent.
 	PriorHist *prior.History
 }
 

@@ -3,8 +3,8 @@ package prior
 import (
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // 历史成功证据: a source whose evidence hits were marked live must

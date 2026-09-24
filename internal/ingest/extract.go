@@ -14,8 +14,9 @@ import (
 
 // ExtractHTML turns an HTML document into plain text for body ingestion
 // (Path A). v1 scope, stdlib-only: script/style/comment stripping, tag
-// removal, block-tag paragraph breaks, basic entity decoding. PDF/DOCX stay
-// out of the engine (binary不进引擎) — external-worker shape, not implemented.
+// removal, block-tag paragraph breaks, basic entity decoding. DOCX is tree-in
+// (ExtractDOCX below); PDF is best-effort (ExtractPDF — encryption, CID/CJK
+// fonts and xref-stream PDFs stay on the external-worker shape).
 var (
 	scriptRe  = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)[^>]*>`)
 	commentRe = regexp.MustCompile(`(?s)<!--.*?-->`)

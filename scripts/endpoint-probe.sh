@@ -5,7 +5,7 @@
 #
 # Measures: FAST/DEEP/REUSE behavior on the real model (latency, confidence,
 # resolved citations, reuse hit), plus a token-magnitude estimate sampled from
-# ask's real prompt templates (MiniMax usage field). Recorded, not gated.
+# cumulus-cluster's real prompt templates (MiniMax usage field). Recorded, not gated.
 #
 # Usage: bash scripts/endpoint-probe.sh [api_base]
 #   key: AIGATE_API_KEY, or falls back to ~/.sirchmunk/.env (local dev only).
@@ -23,8 +23,8 @@ WORK="$(mktemp -d)"
 STORE="$WORK/data"
 trap 'rm -rf "$WORK"' EXIT
 
-go build -o "$WORK/ask" ./cmd/ask || exit 1
-"$WORK/ask" -data "$STORE" ensure >/dev/null
+go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || exit 1
+"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null
 
 python3 - "$WORK" <<'PY'
 import sys, os
@@ -34,10 +34,10 @@ body = "# 部署手册\n\n## 连接池\n" + pad * 12 + "关键配置：连接池
        "## 扩容\n单机连接数超过 3000 触发扩容评审，新上限由 capacity 模块计算。\n" + pad * 6
 open(os.path.join(w, "manual.md"), "w").write(body)
 PY
-"$WORK/ask" -data "$STORE" put -title "部署手册" -key manual -body-file "$WORK/manual.md" >/dev/null
+"$WORK/cumulus-cluster" -data "$STORE" put -title "部署手册" -key manual -body-file "$WORK/manual.md" >/dev/null
 
 export AIGATE_BASE_URL="$BASE" AIGATE_CHAT_MODEL="$MODEL" AIGATE_API_KEY
-A=("$WORK/ask" -data "$STORE")
+A=("$WORK/cumulus-cluster" -data "$STORE")
 echo "direct endpoint: $BASE model=$MODEL"
 
 run() { # label query
@@ -67,7 +67,7 @@ run FAST "连接池最大连接数是多少"
 run REUSE "连接池最大连接数是多大"
 run DEEP "北极狐栖息地的气候特征"
 
-# Token magnitude: ask's real scorer prompt against the upstream usage field.
+# Token magnitude: cumulus-cluster's real scorer prompt against the upstream usage field.
 python3 - "$MODEL" <<'PY'
 import json, os, urllib.request
 
@@ -85,7 +85,7 @@ def usage_for(messages, tag):
     print("%-18s prompt=%s completion=%s total=%s" % (tag, u.get("prompt_tokens"),
           u.get("completion_tokens"), u.get("total_tokens")))
 
-# The two shapes ask actually sends: evaluate_sample (per window) and
+# The two shapes cumulus-cluster actually sends: evaluate_sample (per window) and
 # synthesize_roi (once per answer), with 11 windows' worth of evidence.
 win = "关键配置：连接池最大 128，超时 30 秒。" + "填充内容。" * 200
 ev = "\n".join("[%d] (body [%d,%d)) %s" % (i + 1, i * 480, i * 480 + 480, win) for i in range(11))

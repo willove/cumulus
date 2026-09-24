@@ -1,4 +1,4 @@
-module github.com/cumubase/ask
+module github.com/willove/cumulus
 
 go 1.27.0
 
@@ -21,5 +21,5 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 
-// The engine lives across, under db-works/ (this repository is cumubase-project/cumulus).
+// The engine lives across, under db-works/ (this repository is github.com/willove/cumulus).
 replace github.com/willove/cumulite => ../db-works/cumulite

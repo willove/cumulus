@@ -1,4 +1,4 @@
-// Package ingest is the dual-path write side of the ask suite: content-addressed
+// Package ingest is the dual-path write side of the cumulus-cluster suite: content-addressed
 // upsert of source documents, explicit staleness on update, tombstone delete,
 // and a resumable batch job. Index materialization (embeddings) is out of band
 // — put never blocks on a model.
@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cumubase/ask/internal/ns"
-	"github.com/cumubase/ask/internal/source"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/ns"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // Result reports what a single put did.
@@ -31,7 +31,7 @@ type Result struct {
 	StaleID string `json:"stale_id,omitempty"`
 }
 
-// Store writes ask_sources and ask_evidence against the storage Port. Every identity it
+// Store writes clus_sources and clus_evidence against the storage Port. Every identity it
 // touches is passed in already scoped (composite "ns:coll" identity for a
 // tenant, bare name for the default library); namespace only scopes the flat
 // KV keys the Store owns (job cursors, reconcile cursor) via ns.KV.
@@ -46,17 +46,17 @@ type Store struct {
 
 func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store {
 	if sources == "" {
-		sources = "ask_sources"
+		sources = "clus_sources"
 	}
 	if evidence == "" {
-		evidence = "ask_evidence"
+		evidence = "clus_evidence"
 	}
 	if clusters == "" {
-		clusters = "ask_clusters"
+		clusters = "clus_clusters"
 	}
 	return &Store{
 		c: c, sources: sources, evidence: evidence, clusters: clusters,
-		namespace: namespace, jobs: ns.KV(namespace, "ask:job:"),
+		namespace: namespace, jobs: ns.KV(namespace, "clus:job:"),
 	}
 }
 
@@ -266,7 +266,7 @@ func (s *Store) ActiveSources(ctx context.Context) ([]source.Source, error) {
 	return out, nil
 }
 
-// EvidenceHit is one live evidence window (ask_evidence) — the "history
+// EvidenceHit is one live evidence window (clus_evidence) — the "history
 // success" input to the prior's history arm.
 type EvidenceHit struct {
 	SourceID string  `json:"source_id"`
@@ -400,7 +400,7 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 }
 
 // Ensure declares the suite's collections (idempotent) — D7: collection shape
-// is declared once (ensure/scenario), never per ingest. ask_sources records a
+// is declared once (ensure/scenario), never per ingest. clus_sources records a
 // changelog: downstream reconciliation (Reconcile) consumes it.
 func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
 	colls := []string{s.sources, s.evidence, s.clusters}
@@ -423,7 +423,7 @@ func (s *Store) Ensure(ctx context.Context, extra ...string) ([]string, error) {
 	return out, nil
 }
 
-// ReconcileReport summarizes one downstream pass over the ask_sources
+// ReconcileReport summarizes one downstream pass over the clus_sources
 // changelog (下游轮询消费，游标持久化，at-least-once + _id 幂等).
 type ReconcileReport struct {
 	Scanned        int    `json:"scanned"`
@@ -432,7 +432,7 @@ type ReconcileReport struct {
 	Cursor         uint64 `json:"cursor"`
 }
 
-// Reconcile consumes ask_sources changes since the persisted cursor: sources
+// Reconcile consumes clus_sources changes since the persisted cursor: sources
 // retired out-of-band (stale/deleted written without going through Put) get
 // their live evidence invalidated and clusters anchored on them marked 待复核.
 // Every action is idempotent, so reprocessing a page is safe — and it is also
@@ -441,7 +441,7 @@ type ReconcileReport struct {
 // skipped forever.
 func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	rep := ReconcileReport{}
-	cursorKey := ns.KV(s.namespace, "ask:reconcile:"+s.sources)
+	cursorKey := ns.KV(s.namespace, "clus:reconcile:"+s.sources)
 	cur := uint64(0)
 	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
 		cur, _ = strconv.ParseUint(string(raw), 10, 64)
@@ -579,7 +579,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 		return 0, nil
 	}
 	if err := s.c.CreateIndexRequest(ctx, s.sources, contract.IndexRequest{
-		Name: "ask_body_embed", Field: "body_embed", Type: "vector",
+		Name: "clus_body_embed", Field: "body_embed", Type: "vector",
 		Dims: dims, Metric: "cosine", Model: model,
 	}); err != nil && !strings.Contains(err.Error(), "INDEX_EXISTS") {
 		// Ensure semantics: an existing index (created by a prior run or the
@@ -682,7 +682,7 @@ func trimRunes(s string, n int) string {
 // integer, silently falling back to zero.
 const jobCursorSuffix = ":cursor"
 
-// JobDoc is the async-ingest state-machine state under KV ask:job:<name>.
+// JobDoc is the async-ingest state-machine state under KV clus:job:<name>.
 type JobDoc struct {
 	Job     string `json:"job"`
 	State   string `json:"state"` // queued | running | done | failed
@@ -724,7 +724,9 @@ func (s *Store) GetJobDoc(ctx context.Context, job string) (JobDoc, error) {
 // IngestFiles walks a directory and upserts .md/.txt/.html files as sources
 // (Path A minus extraction workers). Resumable under the job key — same cursor
 // semantics as IngestJSONL — with a live job doc per file.
-func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, jobKey string) (int, error) {
+// walkIngestable collects the pipeline's extractable files under dir (same
+// extension set the scan face reports), sorted for a stable cursor.
+func walkIngestable(dir string, recursive bool) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -743,9 +745,50 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	sort.Strings(files)
+	return files, nil
+}
+
+func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, jobKey string) (int, error) {
+	files, err := walkIngestable(dir, recursive)
+	if err != nil {
+		return 0, err
+	}
+	return s.ingestFileList(ctx, dir, files, jobKey)
+}
+
+// IngestCandidates ingests an explicit file list (a trimmed scan report or a
+// hand-written one) through the SAME state machine as IngestFiles: resumable
+// cursor, phase reporting, digest-idempotent upserts. P9's discovery step
+// hands its survivors here — the walk is replaced, the pipeline is not.
+func (s *Store) IngestCandidates(ctx context.Context, paths []string, jobKey string) (int, error) {
+	if len(paths) == 0 {
+		return 0, fmt.Errorf("ingest: candidate list is empty")
+	}
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+	return s.ingestFileList(ctx, "", sorted, jobKey)
+}
+
+// relKey is the source's business key: walk-relative when dir is the walk
+// root, base name otherwise (candidate lists have no common root).
+func relKey(dir, p string) string {
+	if dir == "" {
+		return filepath.Base(p)
+	}
+	rel, err := filepath.Rel(dir, p)
+	if err != nil {
+		return filepath.Base(p)
+	}
+	return rel
+}
+
+// ingestFileList runs the job state machine over an explicit file list. dir
+// is the walk root ("" for candidate lists): it only shapes the source key,
+// which falls back to the base name.
+func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string) (int, error) {
 	if jobKey == "" {
 		jobKey = "files"
 	}
@@ -794,10 +837,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 			typ = "pdf"
 			text = ExtractPDF(raw)
 		}
-		rel, rerr := filepath.Rel(dir, p)
-		if rerr != nil {
-			rel = filepath.Base(p)
-		}
+		rel := relKey(dir, p)
 		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 			State: "running", Phase: "normalizing", Total: len(files), Done: start + done,
 		})

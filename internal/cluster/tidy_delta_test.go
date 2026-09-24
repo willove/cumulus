@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 func mustVec(t *testing.T, e Embedder, s string) []float64 {

@@ -3,7 +3,7 @@ package ingest
 import (
 	"testing"
 
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/source"
 )
 
 func TestToFromDocRoundtrip(t *testing.T) {

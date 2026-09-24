@@ -19,7 +19,7 @@ test:
 
 ## build: CLI 进 bin/
 build:
-	go build -o bin/ask ./cmd/ask
+	go build -o bin/cumulus-cluster ./cmd/cumulus-cluster
 
 ## e2e: 门 A–T——真 cumulite 嵌入式库（无服务端进程）
 e2e:

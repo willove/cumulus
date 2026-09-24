@@ -3,7 +3,7 @@ package cluster
 import (
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // A2: Specificity — a proposed key that would not retrieve the winner must

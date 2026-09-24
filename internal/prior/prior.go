@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // Signal names (K0 in LENS Prop.1).

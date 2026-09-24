@@ -1,28 +1,56 @@
 package minilm
 
-// Embedder adapts the pure-Go MiniLM encoder to the ask suite's
+// Embedder adapts the pure-Go MiniLM encoder to the cumulus-cluster suite's
 // cluster.Embedder interface (float64 vectors — the store's vector JSON shape).
 // Load is lazy: New is cheap, the 449MB mmap happens on first Embed.
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
-// DefaultDir resolves the model directory: $ASK_MINILM_DIR, else Sirchmunk's
-// on-disk cache (the operator already has it; no duplicate 449MB download).
+// Required reports whether the operator demanded a hard failure instead of
+// the silent hash fallback (CLUS_MINILM_REQUIRE=1). CI precision gates set
+// it: a reference test that silently skips — or a search that silently
+// degrades to hash-64 — must not read as "semantic path green".
+func Required() bool {
+	v := strings.TrimSpace(os.Getenv("CLUS_MINILM_REQUIRE"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// Resolve returns the real embedder when the weights are present, an error
+// when Required demands them and they are absent, and (nil, nil) otherwise
+// — the caller then keeps its offline fallback, exactly as before.
+func Resolve() (*Embedder, error) {
+	if Available() {
+		return New(DefaultDir()), nil
+	}
+	if Required() {
+		return nil, fmt.Errorf("minilm: CLUS_MINILM_REQUIRE=1 but weights absent at %s", DefaultDir())
+	}
+	return nil, nil
+}
+
+// DefaultDir resolves the suite's OWN model directory: $CLUS_MODEL_DIR (or
+// the legacy $CLUS_MINILM_DIR override), else $HOME/.cumulus/models/<ModelID>.
+// The suite never looks inside another project's cache — an independent
+// project installs its own weights (see install.go / `model install`).
 func DefaultDir() string {
-	if v := os.Getenv("ASK_MINILM_DIR"); v != "" {
+	if v := os.Getenv("CLUS_MODEL_DIR"); v != "" {
+		return v
+	}
+	if v := os.Getenv("CLUS_MINILM_DIR"); v != "" {
 		return v
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".sirchmunk", ".cache", "models", "models",
-		"sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2", "snapshots", "master")
+	return filepath.Join(home, modelBaseDir, "models", ModelID)
 }
 
 // Available reports whether the model files are present at DefaultDir.

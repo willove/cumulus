@@ -23,6 +23,7 @@ const (
 	KeywordsRefine     = "keywords_refine"
 	QueryAbstract      = "query_abstract"
 	QueryFromAbstract  = "query_from_abstract"
+	ScanRank           = "scan_rank"
 )
 
 // Load returns the raw markdown body of a prompt asset.

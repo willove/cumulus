@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/graph"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/graph"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // DefaultReuseTheta is the cosine line for reuse; DefaultMergeTheta is looser
@@ -22,7 +22,7 @@ const (
 	DefaultMergeTheta = 0.55
 )
 
-// CiteStore records cluster → source evidence windows (ask_cites).
+// CiteStore records cluster → source evidence windows (clus_cites).
 type CiteStore interface {
 	SaveCite(ctx context.Context, clusterID, sourceID string, start, end int, score float64) error
 }
@@ -58,6 +58,20 @@ type Engine struct {
 	// fields (D4 结构化剪枝; 0 = off).
 	MinHotness    float64
 	MinConfidence float64
+	// Cursor persists the ask sequence's "previous cluster" (KV,
+	// namespace-scoped). Without it the engine derives prev from the most
+	// recently UPDATED cluster — which the warm reuse path masks (a reuse
+	// bumps its own cluster before the link decision), so a repeated walk
+	// never accumulates and query_seq edges stay one-offs. nil = fallback.
+	Cursor LastClusterCursor
+}
+
+// LastClusterCursor is the persisted ask-sequence cursor: the cluster the
+// previous ask resolved to. Implementations are KV-backed and scoped per
+// namespace (one tenant's walk never links another's).
+type LastClusterCursor interface {
+	LoadLastCluster(ctx context.Context) (string, error)
+	SaveLastCluster(ctx context.Context, id string) error
 }
 
 // SourceReader fetches sources by id (implemented by ingest.Store).
@@ -100,13 +114,14 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		return Result{}, err
 	}
 	key := cluster.TopicKey(query)
-	prevID := e.lastClusterID(ctx)
+	prevID := e.prevClusterID(ctx)
 
 	finish := func(res Result) Result {
 		if res.ClusterID != "" {
 			if prevID != "" && prevID != res.ClusterID {
 				_ = graph.LinkQuerySeq(ctx, e.edgeStore(), prevID, res.ClusterID)
 			}
+			e.rememberCluster(ctx, res.ClusterID)
 			res.PrevCluster = prevID
 			res.Neighbors = e.expand(ctx, res.ClusterID, qe, sources)
 		}
@@ -169,11 +184,12 @@ func (e *Engine) TryReuseNarrow(ctx context.Context, query string) (Result, []so
 		return Result{}, nil, false, nil
 	}
 	// finish() equivalent: graph links + neighbours over the narrow set.
-	prevID := e.lastClusterID(ctx)
+	prevID := e.prevClusterID(ctx)
 	if res.ClusterID != "" {
 		if prevID != "" && prevID != res.ClusterID {
 			_ = graph.LinkQuerySeq(ctx, e.edgeStore(), prevID, res.ClusterID)
 		}
+		e.rememberCluster(ctx, res.ClusterID)
 		res.PrevCluster = prevID
 		res.Neighbors = e.expand(ctx, res.ClusterID, qe, narrow)
 	}
@@ -451,7 +467,7 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 	return got
 }
 
-// writeCites records cluster → source evidence windows (ask_cites). Best
+// writeCites records cluster → source evidence windows (clus_cites). Best
 // effort: a cite failure never fails the search. Also records co_occur edges
 // to sibling clusters anchored on the same source (ir-rag A4 profile).
 func (e *Engine) writeCites(ctx context.Context, clusterID, sourceID string, samples []mcs.Sample) {
@@ -496,6 +512,27 @@ func (e *Engine) lastClusterID(ctx context.Context) string {
 		}
 	}
 	return best.ID
+}
+
+// prevClusterID is the ask sequence's previous cluster: the persisted cursor
+// when wired, the latest-updated cluster otherwise (fallback for stores
+// without a cursor — tests, embeds).
+func (e *Engine) prevClusterID(ctx context.Context) string {
+	if e.Cursor != nil {
+		if id, err := e.Cursor.LoadLastCluster(ctx); err == nil {
+			return id
+		}
+	}
+	return e.lastClusterID(ctx)
+}
+
+// rememberCluster advances the sequence cursor. A cursor error is ignored:
+// the worst case is one missing walk link, never a failed search.
+func (e *Engine) rememberCluster(ctx context.Context, id string) {
+	if e.Cursor == nil || id == "" {
+		return
+	}
+	_ = e.Cursor.SaveLastCluster(ctx, id)
 }
 
 // priorStale validates a warm prior against the CURRENT corpus: the

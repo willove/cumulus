@@ -3,7 +3,7 @@
 # cn-law-rag（Apache-2.0）：锚点口语问 + 正例法条 + 难负法条。正/负法条全部
 # 入语料（难负例是评测点），锚点过真实管线（FAST→DEEP），Closed-Book 直答
 # 对照，端点判官（judge_correct 资产）判 Correct；聚合 EM/Ev.Rec/Ground +
-# 失败四分类 + McNemar（ask vs closed-book）。断点续跑：结果逐项落盘。
+# 失败四分类 + McNemar（cumulus-cluster vs closed-book）。断点续跑：结果逐项落盘。
 # 端点配置走套件 ./.env（LLM_* → AIGATE_*）；本脚本不隔离 .env。
 # 用法：
 #   scripts/realeval.sh prep [N]   # 取样+建库+摄取（默认 30 锚点，确定性取样）
@@ -19,7 +19,7 @@ mkdir -p "$STATE"
 
 # One embedded store directory — no server process, no port. Badger locks the
 # directory, so nothing else may hold it while a phase runs.
-build_ask() { go build -o "$STATE/ask" ./cmd/ask || exit 1; }
+build_ask() { go build -o "$STATE/cumulus-cluster" ./cmd/cumulus-cluster || exit 1; }
 
 case "${1:-report}" in
 prep)
@@ -57,18 +57,18 @@ with open(state + "/corpus.jsonl", "w", encoding="utf-8") as f:
         f.write(json.dumps({"key": key, "title": key, "text": text}, ensure_ascii=False) + "\n")
 print("items=%d docs=%d" % (len(items), len(docs)))
 PY
-	"$STATE/ask" -data "$STORE" ensure
-	"$STATE/ask" -data "$STORE" ingest-jsonl -file "$STATE/corpus.jsonl" -job realeval
+	"$STATE/cumulus-cluster" -data "$STORE" ensure
+	"$STATE/cumulus-cluster" -data "$STORE" ingest-jsonl -file "$STATE/corpus.jsonl" -job realeval
 	;;
 step)
 	build_ask
 	OUT="$STATE/results.jsonl"
 	EXTRA=""
 	if [ "${L1PRE:-0}" = "1" ]; then
-		OUT="$STATE/results_l1.jsonl"   # 对照组：body_embed KNN 收窄候选（ASK_EMBED=minilm）
+		OUT="$STATE/results_l1.jsonl"   # 对照组：body_embed KNN 收窄候选（CLUS_EMBED=minilm）
 		EXTRA="-l1pre"
 	fi
-	"$STATE/ask" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
+	"$STATE/cumulus-cluster" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
 		-out "$OUT" -judge -prior $EXTRA -limit "${LIMIT:-4}"
 	;;
 report)
@@ -76,7 +76,7 @@ report)
 	# All items already recorded → resume-only pass; the aggregate is printed.
 	OUT="$STATE/results.jsonl"
 	if [ "${L1PRE:-0}" = "1" ]; then OUT="$STATE/results_l1.jsonl"; fi
-	"$STATE/ask" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
+	"$STATE/cumulus-cluster" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
 		-out "$OUT" -limit 0
 	;;
 esac

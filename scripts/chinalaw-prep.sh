@@ -27,8 +27,8 @@ if [ "${1:-}" != "ingest" ]; then
 fi
 
 # One embedded store directory — no server process. Badger locks it, so no
-# other ask/cumulite process may hold it while this runs.
-go build -o "$STATE/ask" ./cmd/ask || exit 1
-"$STATE/ask" -data "$STORE" ensure
-"$STATE/ask" -data "$STORE" ingest-jsonl -file "$OUT" -job "$JOB"
+# other cumulus-cluster/cumulite process may hold it while this runs.
+go build -o "$STATE/cumulus-cluster" ./cmd/cumulus-cluster || exit 1
+"$STATE/cumulus-cluster" -data "$STORE" ensure
+"$STATE/cumulus-cluster" -data "$STORE" ingest-jsonl -file "$OUT" -job "$JOB"
 echo "chinalaw-prep: ingested $OUT → $STORE job=$JOB"

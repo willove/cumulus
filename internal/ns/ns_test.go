@@ -3,22 +3,22 @@ package ns
 import "testing"
 
 func TestCollDefaultLibraryStaysBare(t *testing.T) {
-	if got := Coll("", "ask_sources"); got != "ask_sources" {
+	if got := Coll("", "clus_sources"); got != "clus_sources" {
 		t.Fatalf("default library: got %q", got)
 	}
 }
 
 func TestCollComposesCompositeIdentity(t *testing.T) {
-	if got := Coll("tenant_a", "ask_clusters"); got != "tenant_a:ask_clusters" {
+	if got := Coll("tenant_a", "clus_clusters"); got != "tenant_a:clus_clusters" {
 		t.Fatalf("composite: got %q", got)
 	}
 }
 
 func TestKVScopedAndBare(t *testing.T) {
-	if got := KV("", "ask:job:x"); got != "ask:job:x" {
+	if got := KV("", "clus:job:x"); got != "clus:job:x" {
 		t.Fatalf("bare kv: got %q", got)
 	}
-	if got := KV("t1", "ask:job:x"); got != "ns:t1:ask:job:x" {
+	if got := KV("t1", "clus:job:x"); got != "ns:t1:clus:job:x" {
 		t.Fatalf("scoped kv: got %q", got)
 	}
 }

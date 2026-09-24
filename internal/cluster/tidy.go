@@ -14,7 +14,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // DefaultTidyTheta is the fold line for the sweep — the same cosine bar the

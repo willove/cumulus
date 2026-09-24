@@ -1,4 +1,4 @@
-// Package ns scopes the ask suite to one store namespace. The engine's
+// Package ns scopes the cumulus-cluster suite to one store namespace. The engine's
 // composite collection identity ("ns:coll", NS 线) is the isolation unit:
 // a bare name is the default library and a composite identity is a separate
 // collection, never an alias. Every collection, KV job cursor and session key

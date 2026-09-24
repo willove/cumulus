@@ -1,5 +1,5 @@
 // Package llm adapts chat-completions endpoints (aigate / OpenAI-compatible)
-// to ask's Scorer and Embedder interfaces. Offline KeywordScorer/Local stay
+// to cumulus-cluster's Scorer and Embedder interfaces. Offline KeywordScorer/Local stay
 // the gate carrier; this package is the production path (S5 plan D6).
 package llm
 
@@ -18,11 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/facts"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/prompts"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/prompts"
 )
 
 // ChatClient posts OpenAI-style chat completions. Endpoint config is
@@ -442,7 +442,7 @@ func (e *AigateKeywordExpander) Expand(ctx context.Context, query string, levels
 
 // AigateKeywordRefiner regenerates keywords AFTER a failed match (ReAct
 // 精炼轮 — the widen loop's second attempt when the whole cascade came up
-// empty). Domain specialization is OPERATOR-declared via ASK_DOMAIN_HINT and
+// empty). Domain specialization is OPERATOR-declared via CLUS_DOMAIN_HINT and
 // injected as a hint only; the prompt asset itself stays corpus-agnostic
 // (评估纪律：管线资产不得携带评测语料的领域知识).
 type AigateKeywordRefiner struct {
@@ -452,7 +452,7 @@ type AigateKeywordRefiner struct {
 // Refine returns replacement keywords in the target corpus's register,
 // excluding the failed ones.
 func (r *AigateKeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
-	domain := strings.TrimSpace(os.Getenv("ASK_DOMAIN_HINT"))
+	domain := strings.TrimSpace(os.Getenv("CLUS_DOMAIN_HINT"))
 	if domain == "" {
 		domain = "未指定——按通用书面文档处理"
 	}
@@ -521,7 +521,7 @@ func (s *AigateQuerySimulator) Complement(ctx context.Context, origin string, tr
 	if err != nil || strings.TrimSpace(need) == "" {
 		return nil, err
 	}
-	domain := strings.TrimSpace(os.Getenv("ASK_DOMAIN_HINT"))
+	domain := strings.TrimSpace(os.Getenv("CLUS_DOMAIN_HINT"))
 	if domain == "" {
 		domain = "未指定——按通用书面文档处理"
 	}

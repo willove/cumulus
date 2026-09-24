@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 type memCites struct {
@@ -25,7 +25,7 @@ func (m *memCites) SaveCite(_ context.Context, clusterID, sourceID string, start
 	return nil
 }
 
-// Fresh answers write cluster → source evidence edges (ask_cites).
+// Fresh answers write cluster → source evidence edges (clus_cites).
 func TestFreshClusterWritesCites(t *testing.T) {
 	ctx := context.Background()
 	body := strings.Repeat("填充 padding padding。\n", 30) + "关键配置：连接池最大 128。\n"

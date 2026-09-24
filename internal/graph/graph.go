@@ -1,15 +1,18 @@
 // Package graph is the L2 knowledge-graph layer: weak edges between clusters
 // (co_occur / query_seq / embed_sim), bounded BFS expansion (1..2 hops), and
 // hopKNN pruning. Empty graph must fall back to L0 — edges are an accelerator,
-// never a correctness source (S5 plan D1/D4).
+// never a correctness source (S5 plan D1/D4). P4 adds two rich kinds on the
+// same edge documents: barrier (contested — expansion refuses) and pathway
+// (walked repeatedly — expansion prefers).
 package graph
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"time"
 
-	"github.com/cumubase/ask/internal/cluster"
+	"github.com/willove/cumulus/internal/cluster"
 )
 
 // Edge sources (WeakSemanticEdge in the S5 plan).
@@ -19,6 +22,25 @@ const (
 	SourceEmbedSim = "embed_sim"
 )
 
+// Rich edge kinds (P4). Kind is empty for plain weak edges — the zero value
+// keeps every pre-P4 edge behaving exactly as before.
+const (
+	// KindPathway marks a walked-cognitive-path edge: the query_seq link was
+	// traversed repeatedly (>= PathwayMinHits), so traversal prefers it.
+	KindPathway = "pathway"
+	// KindBarrier marks a contested link (conflict pair): traversal must NOT
+	// serve the barred neighbor as evidence for this side.
+	KindBarrier = "barrier"
+)
+
+// PathwayMinHits is how many query_seq traversals upgrade a weak edge to a
+// pathway (and PathwayBonus below is how much traversal prefers it).
+const (
+	PathwayMinHits  = 2
+	PathwayBonus    = 1.5
+	defaultQuerySeq = 0.6
+)
+
 // Edge is a directed weak semantic link between two clusters.
 type Edge struct {
 	ID     string  `json:"_id"`
@@ -26,9 +48,12 @@ type Edge struct {
 	To     string  `json:"_to"`
 	Weight float64 `json:"weight"` // [0,1]
 	Source string  `json:"source"` // co_occur | query_seq | embed_sim
+	Kind   string  `json:"kind,omitempty"`
+	Reason string  `json:"reason,omitempty"` // human-readable derivation (UI/API)
+	Hits   int     `json:"hits,omitempty"`   // query_seq traversals so far
 }
 
-// Store persists edges (ask_weak_edges in production).
+// Store persists edges (clus_weak_edges in production).
 type Store interface {
 	Save(ctx context.Context, e Edge) error
 	From(ctx context.Context, id string) ([]Edge, error)
@@ -129,6 +154,9 @@ type ExpandResult struct {
 type Expander struct {
 	Edges    Store
 	Clusters cluster.Store
+	// PathwayBonus multiplies a pathway edge's weight during expansion
+	// (P4: walked paths rank above one-off links). 0 = off.
+	PathwayBonus float64
 	// HopTS, when > 0 together with Freshness, prunes neighbors whose linked
 	// source is staler than this (D4 optional freshness pass 时序剪枝).
 	// Clusters without a resolvable source are never pruned (阙疑不剪).
@@ -137,11 +165,43 @@ type Expander struct {
 }
 
 func NewExpander(es Store, cs cluster.Store) *Expander {
-	return &Expander{Edges: es, Clusters: cs}
+	return &Expander{Edges: es, Clusters: cs, PathwayBonus: PathwayBonus}
 }
 
 // Expand runs bounded BFS. Empty neighborhood returns nil, nil — callers fall
 // back to L0 on an empty graph.
+// startBarriers collects the clusters the start is contested with (both
+// directions — LinkBarrier writes them pairwise). A store error degrades to
+// an empty set: barriers are a guard, never a correctness source.
+func (e *Expander) startBarriers(ctx context.Context, start, dir string) map[string]bool {
+	barred := map[string]bool{}
+	if start == "" || e.Edges == nil {
+		return barred
+	}
+	collect := func(es []Edge) {
+		for _, ed := range es {
+			if ed.Kind != KindBarrier {
+				continue
+			}
+			if ed.To != start {
+				barred[ed.To] = true
+			}
+			if ed.From != start {
+				barred[ed.From] = true
+			}
+		}
+	}
+	if out, err := e.Edges.From(ctx, start); err == nil {
+		collect(out)
+	}
+	if dir == "any" || dir == "in" {
+		if in, err := e.Edges.To(ctx, start); err == nil {
+			collect(in)
+		}
+	}
+	return barred
+}
+
 func (e *Expander) Expand(ctx context.Context, req ExpandRequest) ([]ExpandResult, error) {
 	if req.StartID == "" {
 		return nil, nil
@@ -166,6 +226,13 @@ func (e *Expander) Expand(ctx context.Context, req ExpandRequest) ([]ExpandResul
 	frontier := []node{{id: req.StartID, depth: 0}}
 	var out []ExpandResult
 
+	// P4 barrier set of the START: a contested link between the start and X
+	// keeps X out of this expansion at EVERY depth — "问 A 时别把冲突簇 B
+	// 当邻域". Bidirectional edges make start→X and X→start the same bar.
+	// Barriers between other nodes only stop being traversal links (handled
+	// per-edge below); they do not bar anyone from the start's neighborhood.
+	barred := e.startBarriers(ctx, req.StartID, req.Direction)
+
 	for depth := 1; depth <= req.MaxDepth && len(frontier) > 0; depth++ {
 		var next []node
 		for _, n := range frontier {
@@ -173,23 +240,43 @@ func (e *Expander) Expand(ctx context.Context, req ExpandRequest) ([]ExpandResul
 			if err != nil {
 				return nil, err
 			}
-			// Collect candidates then hopKNN-prune this expansion step.
+			// Best link per target wins: parallel edges (co_occur + query_seq,
+			// say) must not let a one-off outrank a walked pathway, and an
+			// inbound view carries its rich fields (a barrier seen inbound is
+			// the same bar).
 			type cand struct {
 				to    string
 				edge  Edge
 				score float64
 				via   []string
 			}
-			var cands []cand
+			best := map[string]cand{}
 			for _, ed := range edges {
-				if ed.Weight < req.MinWeight {
+				if ed.Weight < req.MinWeight || seen[ed.To] {
 					continue
 				}
-				if seen[ed.To] {
+				// P4 barrier: a contested link never serves its target as
+				// evidence for this side (direct hop only — the prune does
+				// not propagate down the path).
+				if ed.Kind == KindBarrier || barred[ed.To] {
 					continue
 				}
-				cands = append(cands, cand{to: ed.To, edge: ed, score: n.score + ed.Weight, via: append(append([]string{}, n.via...), ed.ID)})
+				// P4 pathway: a walked link outranks a one-off of the same
+				// weight.
+				score := n.score + ed.Weight
+				if ed.Kind == KindPathway && e.PathwayBonus > 0 {
+					score = n.score + ed.Weight*e.PathwayBonus
+				}
+				c := cand{to: ed.To, edge: ed, score: score, via: append(append([]string{}, n.via...), ed.ID)}
+				if prev, ok := best[ed.To]; !ok || c.score > prev.score {
+					best[ed.To] = c
+				}
 			}
+			cands := make([]cand, 0, len(best))
+			for _, c := range best {
+				cands = append(cands, c)
+			}
+			sort.Slice(cands, func(i, j int) bool { return cands[i].edge.ID < cands[j].edge.ID })
 			// hopKNN prune.
 			if req.HopKNN > 0 && req.Probe != nil && len(cands) > req.HopKNN {
 				type scored struct {
@@ -270,9 +357,14 @@ func (e *Expander) edgesFrom(ctx context.Context, id, dir string) ([]Edge, error
 		if err != nil {
 			return nil, err
 		}
-		// Reverse: neighbor is the From side.
+		// Reverse: neighbor is the From side. The rich fields travel with
+		// the edge — an inbound barrier/pathway keeps its kind.
 		for _, ed := range es {
-			out = append(out, Edge{ID: ed.ID, From: ed.To, To: ed.From, Weight: ed.Weight, Source: ed.Source})
+			out = append(out, Edge{
+				ID: ed.ID, From: ed.To, To: ed.From,
+				Weight: ed.Weight, Source: ed.Source,
+				Kind: ed.Kind, Reason: ed.Reason, Hits: ed.Hits,
+			})
 		}
 	}
 	return out, nil
@@ -322,11 +414,59 @@ func (e *Expander) stale(_ context.Context, cl cluster.Cluster, req ExpandReques
 }
 
 // LinkQuerySeq records that users moved from cluster a to b (session order).
+// Repeat traversals of the same link upgrade it to a pathway: the edge has
+// been WALKED (>= PathwayMinHits times), so expansion prefers it over a
+// one-off query_seq — accumulation is empirical, never an LLM guess.
 func LinkQuerySeq(ctx context.Context, st Store, from, to string) error {
 	if from == "" || to == "" || from == to {
 		return nil
 	}
-	return st.Save(ctx, Edge{From: from, To: to, Weight: 0.6, Source: SourceQuerySeq})
+	ed := Edge{From: from, To: to, Weight: defaultQuerySeq, Source: SourceQuerySeq, Hits: 1}
+	for _, prev := range mustFrom(ctx, st, from) {
+		if prev.To == to && prev.Source == SourceQuerySeq {
+			ed.Hits = prev.Hits + 1
+			if ed.Hits >= PathwayMinHits {
+				ed.Kind = KindPathway
+				ed.Reason = fmt.Sprintf("query_seq×%d", ed.Hits)
+			}
+			break
+		}
+	}
+	return st.Save(ctx, ed)
+}
+
+// LinkBarrier records a contested link between two clusters (a conflict
+// pair): bidirectionally, idempotently. Expansion then refuses to serve the
+// barred neighbor from either side — "别把 A 的结论套到 B".
+func LinkBarrier(ctx context.Context, st Store, a, b, reason string) error {
+	if st == nil || a == "" || b == "" || a == b {
+		return nil
+	}
+	if reason == "" {
+		reason = "contested"
+	}
+	for _, dir := range [][2]string{{a, b}, {b, a}} {
+		if err := st.Save(ctx, Edge{
+			From: dir[0], To: dir[1], Weight: 1, Source: SourceCoOcur,
+			Kind: KindBarrier, Reason: reason,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mustFrom reads a node's outbound edges; a store error degrades to no
+// history (the link still saves as a first traversal).
+func mustFrom(ctx context.Context, st Store, id string) []Edge {
+	if st == nil {
+		return nil
+	}
+	es, err := st.From(ctx, id)
+	if err != nil {
+		return nil
+	}
+	return es
 }
 
 // LinkCoOcur records that two clusters shared evidence/source (co-mention).

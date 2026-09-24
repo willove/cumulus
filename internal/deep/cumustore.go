@@ -9,7 +9,7 @@ import (
 	"github.com/willove/cumulite/contract"
 )
 
-// CumuCiteStore persists cluster → source evidence edges (ask_cites).
+// CumuCiteStore persists cluster → source evidence edges (clus_cites).
 type CumuCiteStore struct {
 	c    cumulite.Port
 	coll string
@@ -17,7 +17,7 @@ type CumuCiteStore struct {
 
 func NewCumuCiteStore(c cumulite.Port, coll string) *CumuCiteStore {
 	if coll == "" {
-		coll = "ask_cites"
+		coll = "clus_cites"
 	}
 	return &CumuCiteStore{c: c, coll: coll}
 }
@@ -52,7 +52,7 @@ func (s *CumuCiteStore) List(ctx context.Context) ([]map[string]any, error) {
 	return res.Documents, nil
 }
 
-// CumuStore persists conflict edges in a store collection (ask_conflicts).
+// CumuStore persists conflict edges in a store collection (clus_conflicts).
 type CumuStore struct {
 	c    cumulite.Port
 	coll string
@@ -60,7 +60,7 @@ type CumuStore struct {
 
 func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
-		coll = "ask_conflicts"
+		coll = "clus_conflicts"
 	}
 	return &CumuStore{c: c, coll: coll}
 }

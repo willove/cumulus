@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // fixture builds a cluster whose embed is the query's own vector (one query),

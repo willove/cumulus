@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# e2e: gates A–T — ingest (A) + cluster reuse (B) + graph expansion (C) +
+# e2e: gates A–BB — ingest (A) + cluster reuse (B) + graph expansion (C) +
 # DEEP citations (D) + multi-hop coverage (F) + ingest face/tiering (G) +
 # html/embed/job/serve/cites (H) + docx/L1-prefilter/B4-prior (I) +
 # conflict detect (J) + B5/B6/B9 surfaces (K) + dynamic corpus γ(I) (L) +
 # changelog reconcile/sync cap (M) + six-modality synergy (N) +
 # eval-run offline face + resume (O) + search HTTP/SSE face (P) +
 # chat sessions (Q) + web UI (R) + namespace scoping (S) +
-# cluster tidy (T),
+# cluster tidy (T) + MCP face (V) + candidate discovery (W) +
+# rich cognition edges (X) + strict embedder gate (Y) +
+# model weight face (Z) + scan REST face (AA),
 # against a REAL cumulite store — one embedded Badger directory, no server
 # process. Scorer/embedder are the offline stubs by design
-# (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
+# (put never blocks on a model). Summary line: clus-e2e: N ok, M fail
 set -u
 cd "$(dirname "$0")/.."
 # The gates are offline-stub territory: never let a developer's .env route
 # them at a live model (each search would cost real tokens and flake).
-export ASK_ENV=/dev/null
+export CLUS_ENV=/dev/null
 WORK="$(mktemp -d)"
 DATA="$WORK/data"
 SERVE_PID=""
@@ -27,12 +29,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-(cd ../db-works/cumulite && go build -o "$WORK/cumulite" ./cmd/cumulite) || { echo "ask-e2e: FAIL building cumulite"; exit 1; }
-go build -o "$WORK/ask" ./cmd/ask || { echo "ask-e2e: FAIL building ask"; exit 1; }
+(cd ../db-works/cumulite && go build -o "$WORK/cumulite" ./cmd/cumulite) || { echo "clus-e2e: FAIL building cumulite"; exit 1; }
+go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || { echo "clus-e2e: FAIL building cumulus-cluster"; exit 1; }
 
 # One store directory. Badger locks it exclusively, so every phase below either
 # drives the CLI or the serve process — never both at once.
-A="$WORK/ask -data $DATA"
+A="$WORK/cumulus-cluster -data $DATA"
 CUM="$WORK/cumulite"
 # One page of documents matching a filter. Flag order matters: the CLI's
 # FlagSet stops at the first positional, so -data/-filter come before the
@@ -40,7 +42,7 @@ CUM="$WORK/cumulite"
 Q() { "$CUM" doc query -data "$DATA" -limit 500 -filter "$2" "$1"; }
 # How many documents match.
 QQ() { Q "$1" "$2" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["documents"]))'; }
-$A ensure >/dev/null || { echo "ask-e2e: FAIL ensure"; exit 1; }
+$A ensure >/dev/null || { echo "clus-e2e: FAIL ensure"; exit 1; }
 
 cat >"$WORK/handbook.md" <<'MD'
 # 部署手册
@@ -81,7 +83,7 @@ print("ok")
 
 S1="$($A search -q "连接池最大连接数" -raw)"
 echo "$S1" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["samples"], "no samples"' ; check "search finds a sample window" $?
-EV1="$(Q ask_evidence '{}')"
+EV1="$(Q clus_evidence '{}')"
 echo "$EV1" | grep -q "ev:" ; check "evidence window recorded after search" $?
 
 cat >"$WORK/handbook2.md" <<'MD'
@@ -92,7 +94,7 @@ P3="$($A put -title "部署手册" -key handbook -body-file "$WORK/handbook2.md"
 ST3="$(echo "$P3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 STALE="$(echo "$P3" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("stale_id",""))')"
 [ "$ST3" = "updated" ] && [ -n "$STALE" ] ; check "changed body updates version and marks stale_id" $?
-EVST="$(Q ask_evidence '{"status":"stale"}')"
+EVST="$(Q clus_evidence '{"status":"stale"}')"
 echo "$EVST" | grep -q "stale" ; check "evidence pointing at old content is invalidated" $?
 
 $A delete "$ID1" >/dev/null
@@ -113,7 +115,7 @@ cat >"$WORK/batch.jsonl" <<'JSONL'
 JSONL
 $A ingest-jsonl -file "$WORK/batch.jsonl" -job batch1 >/dev/null
 $A ingest-jsonl -file "$WORK/batch.jsonl" -job batch1 >/dev/null
-CNT="$(QQ ask_sources '{"business_key":{"$in":["j1","j2","j3"]}}')"
+CNT="$(QQ clus_sources '{"business_key":{"$in":["j1","j2","j3"]}}')"
 [ "$CNT" -le 3 ] ; check "re-running the same job is idempotent (no duplicate keys)" $?
 
 cat >"$WORK/pool.md" <<'MD'
@@ -154,15 +156,15 @@ echo "$R2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("
 echo "$R2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("cluster_id")=="'"$CID"'", r' ; check "reuse hits the same cluster id" $?
 R3="$($A search -q "最大连接数 连接池" -raw)"
 echo "$R3" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("reused") or r.get("merged") or r.get("cluster_id")=="'"$CID"'", r' ; check "reordered paraphrase does not fracture (G-id)" $?
-NST="$(QQ ask_clusters '{}')"
+NST="$(QQ clus_clusters '{}')"
 [ "$NST" -le 3 ] ; check "paraphrase family stays within split budget (clusters=$NST)" $?
-Q ask_clusters '{}' >/dev/null
+Q clus_clusters '{}' >/dev/null
 R4="$($A search -q "连接池最大连接数是多少" -raw)"
 echo "$R4" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("cluster_id")=="'"$CID"'", r' ; check "cluster id is stable across rebuilds (G-drop)" $?
 
 # --- Gate C: graph expansion / hopKNN / empty-graph fallback ------------------
 # After Gate B, at least one query_seq edge may exist from A→B session order.
-EDGE_N="$(QQ ask_weak_edges '{}')"
+EDGE_N="$(QQ clus_weak_edges '{}')"
 [ "${EDGE_N:-0}" -ge 0 ] ; check "weak_edges collection is readable (edges=${EDGE_N:-0})" $?
 # Fresh topic on empty neighborhood: neighbors must be empty (fallback L0 ok)
 R5="$($A search -q "防火墙策略配置顺序是什么" -raw)"
@@ -171,7 +173,7 @@ echo "$R5" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("
 # Two related asks should produce query_seq link (A then B)
 $A search -q "路由器基本配置步骤" -raw >/dev/null
 $A search -q "交换机基本配置步骤" -raw >/dev/null
-EDGE_N2="$(QQ ask_weak_edges '{"source":"query_seq"}')"
+EDGE_N2="$(QQ clus_weak_edges '{"source":"query_seq"}')"
 [ "${EDGE_N2:-0}" -ge 1 ] ; check "query_seq weak edge recorded across asks (n=${EDGE_N2:-0})" $?
 R6="$($A search -q "路由器基本配置步骤" -raw)"
 echo "$R6" | python3 -c 'import json,sys; r=json.load(sys.stdin); nb=r.get("neighbors") or []
@@ -234,7 +236,7 @@ print("ok")
 
 # --- Gate G: ingest face / tiering / conflicts persistence --------------------
 ENS="$($A ensure)"
-echo "$ENS" | python3 -c 'import json,sys; r=json.load(sys.stdin); c=r.get("collections") or []; assert "ask_sources" in c and "ask_clusters" in c and "ask_conflicts" in c, r' ; check "ensure declares the suite collections (idempotent)" $?
+echo "$ENS" | python3 -c 'import json,sys; r=json.load(sys.stdin); c=r.get("collections") or []; assert "clus_sources" in c and "clus_clusters" in c and "clus_conflicts" in c, r' ; check "ensure declares the suite collections (idempotent)" $?
 CHAT="$($A search -q "你好" -raw)"
 echo "$CHAT" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["mode"]=="CHAT" and a.get("skipped") and not r.get("escalated"), r' ; check "chat intent exits without retrieval or escalation" $?
 FNAME="$($A search -q "连接池专册" -raw)"
@@ -244,7 +246,7 @@ printf '# notes\n文件匹配测试内容。\n' >"$WORK/docs/notes.md"
 printf '纯文本补充说明。\n' >"$WORK/docs/extra.txt"
 $A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
 $A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
-FCNT="$(QQ ask_sources '{"business_key":{"$in":["notes.md","extra.txt"]}}')"
+FCNT="$(QQ clus_sources '{"business_key":{"$in":["notes.md","extra.txt"]}}')"
 [ "$FCNT" -le 2 ] ; check "ingest-files is resumable/idempotent (n=$FCNT)" $?
 FNAME2="$($A search -q "notes.md" -raw)"
 echo "$FNAME2" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["mode"]=="FILENAME_ONLY" and a.get("source_id"), r' ; check "extension lookup is FILENAME_ONLY" $?
@@ -255,7 +257,7 @@ cat >"$WORK/mapped.jsonl" <<'JSONL'
 {"name":"路由器条目","desc":"型号 AX3000","vendor":"TP"}
 JSONL
 $A ingest-jsonl -file "$WORK/mapped.jsonl" -map "$WORK/map.json" -job map1 >/dev/null
-MAPB="$(Q ask_sources '{"business_key":"路由器条目"}')"
+MAPB="$(Q clus_sources '{"business_key":"路由器条目"}')"
 echo "$MAPB" | python3 -c '
 import sys
 raw = sys.stdin.read()
@@ -263,12 +265,12 @@ assert "型号 AX3000" in raw, raw[:200]
 assert "\"desc\"" not in raw, raw[:200]
 print("ok")' ; check "ingest-jsonl --map renders the body template (Path B)" $?
 CLL="$($A cluster list)"
-echo "$CLL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "cluster list reads ask_clusters" $?
+echo "$CLL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "cluster list reads clus_clusters" $?
 CFL="$($A conflicts list)"
-echo "$CFL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "conflicts list reads ask_conflicts" $?
+echo "$CFL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "conflicts list reads clus_conflicts" $?
 RC="$($A reclaim -stale)"
 echo "$RC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("reclaimed",0)>=1, r' ; check "reclaim -stale physically removes retired sources" $?
-RES="$(QQ ask_sources '{"status":{"$in":["stale","deleted"]}}')"
+RES="$(QQ clus_sources '{"status":{"$in":["stale","deleted"]}}')"
 [ "$RES" -eq 0 ] ; check "no stale/tombstone residue after reclaim" $?
 
 # --- Gate H: html ingest / embed backfill / job state / serve / cites --------
@@ -311,14 +313,14 @@ assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant
 print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
 
 SPORT="${E2E_SERVE_PORT:-8599}"
-"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
 SERVE_PID=$!
 SRV=0
 for _ in $(seq 1 50); do
 	curl -fsS "http://127.0.0.1:$SPORT/health" >/dev/null 2>&1 && { SRV=1; break; }
 	sleep 0.2
 done
-[ "$SRV" = "1" ] ; check "ask serve serves /health" $?
+[ "$SRV" = "1" ] ; check "cumulus-cluster serve serves /health" $?
 HTTP_SRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/sources" -d '{"title":"HTTP 条目","key":"http1","body":"通过 HTTP 摄取的内容：连接池最大 32。"}')"
 echo "$HTTP_SRC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] in ("created","updated","unchanged"), r' ; check "POST /v1/ingest/sources upserts a source" $?
 HTTP_JOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/jobs" -d "{\"dir\":\"$WORK/docs\",\"job\":\"servjob\",\"recursive\":false}")"
@@ -356,8 +358,9 @@ echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(
 # --- Gate R: web UI (P7 v0 + UI v1 簇浏览) -----------------------------------
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
 echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
-UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/ask/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
+UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/cumulus-cluster/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
 echo "$UIA" | grep -q "知识簇浏览" ; check "web UI carries the cluster browse panel (UI v1)" $?
+echo "$UIA" | grep -q "命名空间" ; check "web UI carries the namespace selector (B1)" $?
 SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
 echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?
 SLIST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions")"
@@ -377,7 +380,7 @@ r=json.load(sys.stdin)
 assert isinstance(r, list) and r, r
 doc=r[0]
 assert doc.get("_from") and doc.get("_to") and doc.get("start",0) < doc.get("end",0), doc
-print("ok")' ; check "ask_cites records cluster→source evidence edges" $?
+print("ok")' ; check "clus_cites records cluster→source evidence edges" $?
 
 # --- Gate I: docx/pdf extract / L1 prefilter / B4 prior ----------------------
 # Minimal docx (zip container with word/document.xml) via python.
@@ -443,7 +446,47 @@ import json,sys
 r=json.load(sys.stdin)
 assert isinstance(r, list) and r, r
 assert any(c.get("a") and c.get("b") for c in r), r
-print("ok")' ; check "conflicts list shows recorded edges (ask_conflicts)" $?
+print("ok")' ; check "conflicts list shows recorded edges (clus_conflicts)" $?
+
+# --- Gate X: P4 rich cognition edges (pathway + barrier) ---------------------
+# One namespace, one walked pair: repeated session traversal upgrades the
+# query_seq edge to a pathway (preference), and a detected conflict bars the
+# two clusters (refusal). Before/after the conflict, the neighbor presence
+# is the behavioral assertion — the barrier is a guard, not decoration.
+$A -ns t4 ensure >/dev/null
+$A -ns t4 put -title "旧版连接池说明" -key pool-x1 -body "旧版连接池最大 88，超时 30 秒。仅旧版硬件适用。" >/dev/null
+$A -ns t4 put -title "新版连接池说明" -key pool-x2 -body "新版连接池最大 99，超时 30 秒。新版硬件默认值。" >/dev/null
+XA="$($A -ns t4 search -q "旧版连接池最大是多少" -raw | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cluster_id",""))')"
+XB="$($A -ns t4 search -q "新版连接池上限是多少" -raw | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cluster_id",""))')"
+[ -n "$XA" ] && [ -n "$XB" ] ; check "P4: two clusters exist for the walked pair ($XA/$XB)" $?
+# Walk A → B twice (session order repeats): the second traversal upgrades.
+$A -ns t4 search -q "旧版连接池最大是多少" -raw >/dev/null
+$A -ns t4 search -q "新版连接池上限是多少" -raw >/dev/null
+PATHN="$(QQ "t4:clus_weak_edges" '{"kind":"pathway"}')"
+[ "${PATHN:-0}" -ge 1 ] ; check "P4: a repeated walk upgrades the query_seq edge to pathway (n=$PATHN)" $?
+Q "t4:clus_weak_edges" '{"kind":"pathway"}' | grep -q 'query_seq×2' ; check "P4: the pathway edge records its walk count" $?
+# Before the conflict the link is live: B shows up in A's neighborhood.
+PRE="$($A -ns t4 search -q "旧版连接池最大是多少" -raw)"
+echo "$PRE" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); nb=r.get("neighbors") or []
+texts=[(n.get("cluster") or {}).get("content","") for n in nb]
+assert any("99" in t for t in texts), ("the walked neighbor must be visible before the conflict", texts)
+print("ok")' ; check "P4: the pathway neighbor is visible before the conflict" $?
+# Conflict → barrier (both directions, carrying the reason).
+CFX="$($A -ns t4 conflicts detect "$XA" "$XB")"
+echo "$CFX" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "88" in r["group"] and "99" in r["group"], r' ; check "P4: conflicts detect records the divergent pair (t4)" $?
+BARN="$(QQ "t4:clus_weak_edges" '{"kind":"barrier"}')"
+[ "${BARN:-0}" -eq 2 ] ; check "P4: the conflict bars traversal bidirectionally (n=$BARN)" $?
+Q "t4:clus_weak_edges" '{"kind":"barrier"}' | grep -q 'divergent claims' ; check "P4: the barrier edge carries the conflict reason" $?
+# After the conflict the barred cluster leaves the neighborhood — at any depth.
+POST="$($A -ns t4 search -q "旧版连接池最大是多少" -raw)"
+echo "$POST" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); nb=r.get("neighbors") or []
+texts=[(n.get("cluster") or {}).get("content","") for n in nb]
+assert not any("99" in t for t in texts), ("the barred cluster must leave the neighborhood", texts)
+print("ok")' ; check "P4: the barred cluster leaves the neighborhood after the conflict" $?
 
 # --- Gate K: B5 arms / B6 oracle surface / B9 accounting ----------------------
 echo "$S3" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; s=a.get("samples") or []; assert s and all(("arm" in w) for w in s), s[:1]' ; check "sample windows carry arm labels (B5)" $?
@@ -531,7 +574,7 @@ assert len(nb)>=2, ("want both hops of neighbors", len(nb), texts)
 assert any("保险丝" in t for t in texts) and any("监控" in t for t in texts), texts
 print("ok")' ; check "sixmod: graph chain reaches depth-2 neighbors (doc+vector+graph)" $?
 LCID="$($A put -title "照明监控旧版" -key lit-c -body-file "$WORK/litC.md" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
-"$CUM" doc patch -data "$DATA" -set '{"updated_at":"2026-08-20T00:00:00Z"}' ask_sources "$LCID" >/dev/null
+"$CUM" doc patch -data "$DATA" -set '{"updated_at":"2026-08-20T00:00:00Z"}' clus_sources "$LCID" >/dev/null
 N2="$($A search -q "照明系统主灯功率是多大" -raw -hopts 168h)"
 echo "$N2" | python3 -c '
 import json,sys
@@ -587,7 +630,7 @@ print("ok")' ; check "evalrun: -l1pre narrows via body_embed (offline index mate
 
 # --- Gate S: namespace scoping (P3) — reuse/corpus/session isolation ----------
 # One tenant's namespace is a separate library: composite ns:coll identities
-# for collections, ns:<name>:ask:* for KV keys. Cross-ns visibility must be
+# for collections, ns:<name>:clus:* for KV keys. Cross-ns visibility must be
 # zero — reuse included.
 NSFAIL1=0
 $A -ns 'bad:ns' put -title 坏命名空间 -key bad-ns -body "x" >/dev/null 2>&1 || NSFAIL1=1
@@ -652,7 +695,7 @@ $A session show "$NSSID" >/dev/null 2>&1 && NSCROSS=1
 
 # HTTP face: per-request "ns" overrides the serve-level namespace (P3)。
 SPORT2="${E2E_SERVE_PORT2:-8600}"
-"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
 SERVE2_PID=$!
 SRV2=0
 for _ in $(seq 1 50); do
@@ -753,7 +796,7 @@ DAFTER="$($A cluster list | python3 -c 'import json,sys; print(len(json.load(sys
 # The web workbench's cluster page reads these; list is ns-scoped like every
 # other face, detail carries the cluster's cite edges in one response.
 SPORT3="${E2E_SERVE_PORT3:-8601}"
-"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
 SERVE3_PID=$!
 SRV3=0
 for _ in $(seq 1 50); do
@@ -789,7 +832,206 @@ assert r["namespace"]=="t1", r
 ids=[c["_id"] for c in r["clusters"]]
 assert all("机柜压强" in q for c in r["clusters"] for q in (c.get("queries") or [])) or not ids, ("t1 only", ids)
 print("ok")' ; check "cluapi: ?ns= scopes the list to one tenant namespace (P3)" $?
+# --- Gate V: MCP face (P8) -------------------------------------------------
+# Agent-ecosystem protocol on the same stack: JSON-RPC 2.0 over POST /mcp,
+# three tools, ns scoping — plus the stdio proxy as a real subprocess.
+MINIT="$(curl -fsS -X POST "http://127.0.0.1:$SPORT3/mcp" -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}')"
+echo "$MINIT" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)["result"]
+assert r.get("protocolVersion"), r
+assert r["serverInfo"]["name"]=="cumulus-cluster", r
+print("ok")' ; check "mcp: initialize returns the protocol version and server info" $?
+MTOOLS="$(curl -fsS -X POST "http://127.0.0.1:$SPORT3/mcp" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')"
+echo "$MTOOLS" | python3 -c '
+import json,sys
+names=[t["name"] for t in json.load(sys.stdin)["result"]["tools"]]
+assert names==["search","list_clusters","get_cluster"], names
+print("ok")' ; check "mcp: tools/list advertises the three tools" $?
+MSEARCH="$(curl -fsS -X POST "http://127.0.0.1:$SPORT3/mcp" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":"连接池最大是多少"}}}')"
+echo "$MSEARCH" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)["result"]
+assert r.get("isError") is False, r
+ans=json.loads(r["content"][0]["text"])
+assert ans.get("mode") and (ans.get("answer") or {}).get("summary"), ans
+print("ok")' ; check "mcp: search answers with mode and summary" $?
+MLIST="$(curl -fsS -X POST "http://127.0.0.1:$SPORT3/mcp" -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_clusters","arguments":{}}}')"
+MCID="$(echo "$MLIST" | python3 -c 'import json,sys; cl=json.loads(json.load(sys.stdin)["result"]["content"][0]["text"])["clusters"]; print(cl[0]["_id"] if cl else "")')"
+[ -n "$MCID" ] ; check "mcp: list_clusters returns the persisted clusters" $?
+MGET="$(curl -fsS -X POST "http://127.0.0.1:$SPORT3/mcp" -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_cluster","arguments":{"id":"'"$MCID"'"}}}')"
+echo "$MGET" | python3 -c '
+import json,sys
+d=json.loads(json.load(sys.stdin)["result"]["content"][0]["text"])
+assert d["cluster"]["_id"] and isinstance(d["cites"], list), d
+print("ok")' ; check "mcp: get_cluster returns the cluster with its cite edges" $?
+# The stdio proxy: same endpoint, real subprocess; notifications stay silent.
+MPROXY="$(printf '%s\n%s\n' '{"jsonrpc":"2.0","id":7,"method":"ping"}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' | CLUS_MCP_URL="http://127.0.0.1:$SPORT3/mcp" "$WORK/cumulus-cluster" mcp)"
+echo "$MPROXY" | python3 -c '
+import json,sys
+lines=[l for l in sys.stdin.read().splitlines() if l.strip()]
+assert len(lines)==1, ("a notification must not produce a response line", lines)
+r=json.loads(lines[0])
+assert r["id"]==7 and r["result"]=={}, r
+print("ok")' ; check "mcp: the stdio proxy forwards requests and drops notifications" $?
 kill "$SERVE3_PID" 2>/dev/null
 
-echo "ask-e2e: $PASS ok, $FAIL fail"
+# --- Gate W: P9 candidate discovery → candidate ingest ----------------------
+# scan (no store) lists what WOULD be ingested; ingest-files -candidates runs
+# the SAME job state machine over the trimmed list; the skipped files never
+# enter the corpus, so a search for them stays honest.
+SCANSRC="$WORK/scansrc"
+mkdir -p "$SCANSRC/sub"
+printf '# 连接池手册\n\n连接池最大连接数为 200。\n' > "$SCANSRC/pool.md"
+printf '值班 runbook：网关重启步骤。\n' > "$SCANSRC/sub/runbook.txt"
+printf 'a,b\n1,2\n' > "$SCANSRC/data.csv"
+touch -tm 202001010000 "$SCANSRC/pool.md" 2>/dev/null || true   # keep mtime realistic
+SCAN="$($A scan -dir "$SCANSRC" -recursive)"
+echo "$SCAN" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+paths=[c["path"] for c in r["candidates"]]
+assert any(p.endswith("pool.md") for p in paths), paths
+assert any(p.endswith("runbook.txt") for p in paths), paths
+assert not any(p.endswith("data.csv") for p in paths), paths
+assert r["skipped"].get("ext",0)>=1, r["skipped"]
+print("ok")' ; check "scan: rules list candidates and account for skips" $?
+$A scan -dir "$SCANSRC" -recursive -out "$WORK/cands.json" >/dev/null
+[ -s "$WORK/cands.json" ] ; check "scan: -out writes the candidate report" $?
+CJOB="$($A ingest-files -candidates "$WORK/cands.json" -job scando)"
+echo "$CJOB" | python3 -c 'import json,sys; assert json.load(sys.stdin)["processed"]>=2, sys.stdin.read()' ; check "ingest-files -candidates runs the same job state machine" $?
+SDOG="$($A search -q "连接池最大是多少" -raw)"
+echo "$SDOG" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert (r.get("answer") or {}).get("summary"), r
+print("ok")' ; check "scan→ingest: a candidate answers with citations" $?
+SCSV="$($A search -q "数据表 a b 列内容" -raw)"
+echo "$SCSV" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+samples=(r.get("answer") or {}).get("samples") or []
+assert not samples, ("a skipped file must not be in the corpus", samples)
+print("ok")' ; check "scan→ingest: skipped files never enter the corpus" $?
+
+# --- Gate Y: strict embedder gate (A3) ---------------------------------------
+# CLUS_MINILM_REQUIRE=1 turns "weights absent" into a hard failure: the L1
+# precision paths must never read green on a silently degraded embedder.
+STRICT=0
+CLUS_EMBED=minilm CLUS_MINILM_REQUIRE=1 CLUS_MINILM_DIR="$WORK/no-such-model" $A ensure -embed >/dev/null 2>&1 || STRICT=1
+[ "$STRICT" = "1" ] ; check "strict: CLUS_MINILM_REQUIRE=1 fails when the weights are absent" $?
+# Without the flag the same absence still degrades (documented, echoed).
+SOFT="$(CLUS_EMBED=minilm CLUS_MINILM_DIR="$WORK/no-such-model" $A ensure -embed)"
+echo "$SOFT" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r' ; check "strict: without the flag the absence still degrades to hash-64" $?
+
+# --- Gate Z: model weight face (first-run install surface) --------------------
+# The weights are the suite's OWN asset (ModelScope → ~/.cumulus/models/...).
+# Status/verify/config must answer on ANY machine, so the gate points
+# CLUS_MODEL_DIR at an empty dir; the 485MB download itself is unit-gated
+# against a fake source (install_test.go) and never run from e2e.
+SPORT4="${E2E_SERVE_PORT4:-8602}"
+CLUS_MODEL_DIR="$WORK/no-model" "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT4" >"$WORK/serve4.log" 2>&1 &
+SERVE4_PID=$!
+SRV4=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT4/health" >/dev/null 2>&1 && { SRV4=1; break; }
+	sleep 0.2
+done
+[ "$SRV4" = "1" ] ; check "model: serve comes up for the weight face" $?
+MST="$(curl -fsS "http://127.0.0.1:$SPORT4/v1/model")"
+echo "$MST" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["installed"] is False, r
+assert r["dir"].endswith("no-model"), r["dir"]
+assert r["dims"]==384 and r["model_id"].startswith("sentence-transformers/"), r
+assert r["installing"] is False and r["size_hint_mb"]>400, r
+print("ok")' ; check "model: GET /v1/model reports the absent weights with dir and dims" $?
+MVF="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT4/v1/model/verify")"
+[ "$MVF" = "502" ] ; check "model: verify answers 502 when the weights are absent" $?
+CFG="$(curl -fsS "http://127.0.0.1:$SPORT4/v1/config")"
+echo "$CFG" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert isinstance(r["base_url"], str) and isinstance(r["api_key_set"], bool), r
+assert isinstance(r["minilm_required"], bool) and "reasoning_split" in r, r
+print("ok")' ; check "model: GET /v1/config returns the masked endpoint config" $?
+# --- Gate AA: P9/B2 scan REST face → candidate ingest -------------------------
+# The workbench 摄取 panel's discovery step: POST /v1/scan lists what WOULD
+# be ingested (rules only, no store), and the trimmed list feeds the SAME
+# job state machine through {candidates:[...]}.
+SA="$WORK/scanapi"
+mkdir -p "$SA/sub"
+printf '# 扫描手册\n\n连接池最大 200。\n' > "$SA/pool.md"
+printf 'runbook：网关重启步骤。\n' > "$SA/sub/rb.txt"
+printf 'x,y\n1,2\n' > "$SA/data.csv"
+SCANR="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/scan" -d "{\"dir\":\"$SA\",\"recursive\":true}")"
+echo "$SCANR" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+paths=[c["path"] for c in r["candidates"]]
+assert any(p.endswith("pool.md") for p in paths) and any(p.endswith("rb.txt") for p in paths), paths
+assert not any(p.endswith("data.csv") for p in paths), paths
+assert r["skipped"].get("ext",0)>=1, r["skipped"]
+assert all(c.get("size",0)>0 and "age_days" in c for c in r["candidates"]), r["candidates"][:1]
+print("ok")' ; check "scan: POST /v1/scan lists candidates with rule metadata" $?
+SCANPATHS="$(echo "$SCANR" | python3 -c 'import json,sys; print(json.dumps([c["path"] for c in json.load(sys.stdin)["candidates"]]))')"
+SCANJOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/ingest/jobs" -d "{\"candidates\":$SCANPATHS,\"job\":\"scanjob\"}")"
+echo "$SCANJOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "scan→ingest: the candidate list feeds the same job state machine" $?
+SDONE=0
+for _ in $(seq 1 50); do
+	SST="$(curl -fsS "http://127.0.0.1:$SPORT4/v1/ingest/jobs/scanjob" 2>/dev/null || true)"
+	echo "$SST" | grep -q '"state":"done"' && { SDONE=1; break; }
+	sleep 0.2
+done
+[ "$SDONE" = "1" ] ; check "scan→ingest: the candidate job tracks to done" $?
+SANS="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/search" -d '{"query":"扫描手册里连接池最大是多少"}')"
+echo "$SANS" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+blob="".join(s.get("content","") for s in (r.get("answer") or {}).get("samples") or [])
+assert "200" in blob, blob[:120]
+print("ok")' ; check "scan→ingest: a scanned candidate answers from the corpus" $?
+kill "$SERVE4_PID" 2>/dev/null
+
+# --- Gate BB: eval scoreboard face (B3) ---------------------------------------
+# eval-run (Gate O, CLI) persists its aggregate into clus_evals; the
+# workbench 评测 pane reads it back here. Read-only face — triggering a run
+# stays on the CLI (items file + LLM budget).
+SPORT5="${E2E_SERVE_PORT5:-8603}"
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT5" >"$WORK/serve5.log" 2>&1 &
+SERVE5_PID=$!
+SRV5=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT5/health" >/dev/null 2>&1 && { SRV5=1; break; }
+	sleep 0.2
+done
+[ "$SRV5" = "1" ] ; check "scoreboard: serve comes up for the eval face" $?
+EBLIST="$(curl -fsS "http://127.0.0.1:$SPORT5/v1/evals?limit=10")"
+EBID="$(echo "$EBLIST" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["namespace"]=="" and isinstance(r["runs"], list) and r["runs"], r
+run=[x for x in r["runs"] if x.get("tag")=="eval-items.jsonl"]
+assert run, ("the Gate O run must be on the scoreboard", [x.get("tag") for x in r["runs"]])
+x=run[0]
+assert x["n"]==2 and x["judged"] is False, x
+assert x["system"]["n"]==2 and "closed_book" in x and "mcnemar" in x, x
+print(x["_id"])
+')"
+[ -n "$EBID" ] ; check "scoreboard: the CLI eval run is listed with its aggregate" $?
+EBD="$(curl -fsS "http://127.0.0.1:$SPORT5/v1/evals/$EBID")"
+echo "$EBD" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r["_id"] and r["system"]["n"]==2, r
+assert isinstance(r["modes"], dict) and "search_tokens" in r, r
+tx=r["system"].get("taxonomy") or {}
+assert tx.get("correct",0)+tx.get("answered_but_wrong",0)+tx.get("retrieved_but_unanswered",0)+tx.get("not_retrieved",0)==2, tx
+print("ok")' ; check "scoreboard: the detail carries taxonomy/modes/cost lines" $?
+EB404="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SPORT5/v1/evals/run:missing")"
+[ "$EB404" = "404" ] ; check "scoreboard: an unknown run id answers 404" $?
+kill "$SERVE5_PID" 2>/dev/null
+
+echo "clus-e2e: $PASS ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

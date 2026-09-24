@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cumubase/ask/internal/abstain"
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/kb"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/abstain"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/kb"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // 3.1 早弃权：FAST 完全没有可用证据（0 样本 + skipped）且 p_fail 达线时，

@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/cumubase/ask/internal/source"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // newTestStore opens a hermetic in-memory engine with the suite's collections
-// declared (ask_sources carries the changelog Reconcile consumes).
+// declared (clus_sources carries the changelog Reconcile consumes).
 func newTestStore(t *testing.T) (*Store, cumulite.Port) {
 	t.Helper()
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
@@ -21,8 +21,8 @@ func newTestStore(t *testing.T) (*Store, cumulite.Port) {
 		t.Fatalf("open engine: %v", err)
 	}
 	t.Cleanup(func() { _ = engine.Close() })
-	st := New(engine, "ask_sources", "ask_evidence", "ask_clusters", "")
-	if _, err := st.Ensure(context.Background(), "ask_weak_edges", "ask_cites", "ask_conflicts"); err != nil {
+	st := New(engine, "clus_sources", "clus_evidence", "clus_clusters", "")
+	if _, err := st.Ensure(context.Background(), "clus_weak_edges", "clus_cites", "clus_conflicts"); err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
 	return st, engine
@@ -43,7 +43,7 @@ func putKey(t *testing.T, st *Store, key, body string) Result {
 // test asserts the same invariant on it: exactly one.
 func liveOf(t *testing.T, engine cumulite.Port, key string) []map[string]any {
 	t.Helper()
-	res, err := engine.Query(context.Background(), "ask_sources", contract.Query{
+	res, err := engine.Query(context.Background(), "clus_sources", contract.Query{
 		Filter: map[string]any{"business_key": key, "status": source.StatusActive},
 		Limit:  1000,
 	})
@@ -123,7 +123,7 @@ func TestPutHealsStrandedLiveRevision(t *testing.T) {
 	r1 := putKey(t, st, "handbook", "连接池最大 128。")
 	r2 := putKey(t, st, "handbook", "连接池最大 256。")
 	// Simulate the interrupted update: the previous revision is live again.
-	if _, err := engine.PatchDocument(ctx, "ask_sources", r1.ID, map[string]any{
+	if _, err := engine.PatchDocument(ctx, "clus_sources", r1.ID, map[string]any{
 		"$set": map[string]any{"status": source.StatusActive},
 	}); err != nil {
 		t.Fatal(err)
@@ -225,12 +225,12 @@ func TestReconcileDoesNotConsumeFailedChange(t *testing.T) {
 	t.Cleanup(func() { _ = engine.Close() })
 	// Fail the cluster patch once, then let it through.
 	p := &patchedOncePort{Port: engine, failID: "c:handbook"}
-	st := New(p, "ask_sources", "ask_evidence", "ask_clusters", "")
-	if _, err := st.Ensure(ctx, "ask_weak_edges", "ask_cites", "ask_conflicts"); err != nil {
+	st := New(p, "clus_sources", "clus_evidence", "clus_clusters", "")
+	if _, err := st.Ensure(ctx, "clus_weak_edges", "clus_cites", "clus_conflicts"); err != nil {
 		t.Fatal(err)
 	}
 	r := putKey(t, st, "handbook", "连接池最大 128。")
-	if _, err := engine.Insert(ctx, "ask_clusters", []map[string]any{
+	if _, err := engine.Insert(ctx, "clus_clusters", []map[string]any{
 		{"_id": "c:handbook", "source_id": r.ID, "lifecycle": "established"},
 	}); err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestReconcileDoesNotConsumeFailedChange(t *testing.T) {
 	if _, err := st.Reconcile(ctx); err == nil {
 		t.Fatal("an injected patch failure must surface, not be swallowed")
 	}
-	if raw, _ := engine.KVGet(ctx, "ask:reconcile:ask_sources"); len(raw) != 0 {
+	if raw, _ := engine.KVGet(ctx, "clus:reconcile:clus_sources"); len(raw) != 0 {
 		t.Fatalf("cursor = %q after a failed change; the page must not be consumed", raw)
 	}
 	rep, err := st.Reconcile(ctx) // fault cleared
@@ -276,17 +276,17 @@ func TestReconcileCleansUpAfterPhysicalRemoval(t *testing.T) {
 	st, engine := newTestStore(t)
 	ctx := context.Background()
 	r := putKey(t, st, "handbook", "连接池最大 128。")
-	if _, err := engine.Insert(ctx, "ask_evidence", []map[string]any{
+	if _, err := engine.Insert(ctx, "clus_evidence", []map[string]any{
 		{"_id": "ev:handbook", "doc_id": r.ID, "status": "live"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Insert(ctx, "ask_clusters", []map[string]any{
+	if _, err := engine.Insert(ctx, "clus_clusters", []map[string]any{
 		{"_id": "c:handbook", "source_id": r.ID, "lifecycle": "established"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.DeleteDocument(ctx, "ask_sources", r.ID); err != nil {
+	if _, err := engine.DeleteDocument(ctx, "clus_sources", r.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -297,11 +297,11 @@ func TestReconcileCleansUpAfterPhysicalRemoval(t *testing.T) {
 	if rep.EvInvalidated != 1 || rep.ClustersMarked != 1 {
 		t.Fatalf("report = %+v, want 1 evidence invalidated and 1 cluster marked", rep)
 	}
-	ev, err := engine.GetDocument(ctx, "ask_evidence", "ev:handbook")
+	ev, err := engine.GetDocument(ctx, "clus_evidence", "ev:handbook")
 	if err != nil || ev["status"] != "stale" {
 		t.Fatalf("evidence = %+v, err = %v; want status stale", ev, err)
 	}
-	cl, err := engine.GetDocument(ctx, "ask_clusters", "c:handbook")
+	cl, err := engine.GetDocument(ctx, "clus_clusters", "c:handbook")
 	if err != nil || cl["lifecycle"] != "emerging" {
 		t.Fatalf("cluster = %+v, err = %v; want lifecycle emerging", cl, err)
 	}

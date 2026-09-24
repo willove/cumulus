@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // refusingSynth models the synthesize_roi refusal. The summary text is what

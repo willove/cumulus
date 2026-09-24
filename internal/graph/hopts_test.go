@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cumubase/ask/internal/cluster"
+	"github.com/willove/cumulus/internal/cluster"
 )
 
 // D4 optional freshness pass: stale-source neighbors are pruned, fresh ones

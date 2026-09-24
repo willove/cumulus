@@ -27,7 +27,7 @@ type Span struct {
 	End   int    `json:"end"`
 }
 
-// Source is one L0 contract document in ask_sources.
+// Source is one L0 contract document in clus_sources.
 type Source struct {
 	ID          string         `json:"_id"`
 	Body        string         `json:"body"`

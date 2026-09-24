@@ -3,7 +3,7 @@ package facts
 import (
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 func TestBuildSingleFact(t *testing.T) {

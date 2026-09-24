@@ -21,6 +21,6 @@ esac
 [ -d "$STORE" ] || { echo "goldeval: store $STORE not found — build it first (chinalaw-prep.sh ingest / realeval.sh prep)"; exit 1; }
 OUT="${OUT:-var/goldeval-$SET-results.jsonl}"
 mkdir -p "$(dirname "$OUT")"
-go build -o var/goldeval-ask ./cmd/ask || exit 1
-"$PWD/var/goldeval-ask" -data "$STORE" eval-run -file "$ITEMS" -out "$OUT" \
+go build -o var/goldeval-clus ./cmd/cumulus-cluster || exit 1
+"$PWD/var/goldeval-clus" -data "$STORE" eval-run -file "$ITEMS" -out "$OUT" \
 	${EXTRA:--judge -prior} -limit "${LIMIT:-0}"

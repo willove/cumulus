@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // path/title/struct signals must lift the right file.

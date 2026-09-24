@@ -1,9 +1,9 @@
 package kb
 
 import (
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // Offline engine parts shared by the reuse tests: deterministic FAST tier,

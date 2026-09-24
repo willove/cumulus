@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // Concurrent writes to one topic must not lose an update. Choosing a fold
@@ -25,10 +25,10 @@ func TestConcurrentWritesKeepEveryUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	if err := engine.EnsureCollection(ctx, "ask_clusters"); err != nil {
+	if err := engine.EnsureCollection(ctx, "clus_clusters"); err != nil {
 		t.Fatal(err)
 	}
-	store := cluster.NewCumuStore(engine, "ask_clusters")
+	store := cluster.NewCumuStore(engine, "clus_clusters")
 	e := New(fastStub(), store, embedStub())
 	srcs := []source.Source{source.New("手册", "md", "", "cfg", "zh", "连接池最大 128，超时 30 秒。", nil)}
 	// One query yields one topic key and therefore one cluster id, so every

@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	ASK_EMBED=minilm thetaprobe -data DIR -seeds seeds.jsonl [-ns default]
+//	CLUS_EMBED=minilm thetaprobe -data DIR -seeds seeds.jsonl [-ns default]
 package main
 
 import (
@@ -25,10 +25,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/minilm"
-	"github.com/cumubase/ask/internal/ns"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/minilm"
+	"github.com/willove/cumulus/internal/ns"
 )
 
 type seed struct {
@@ -62,7 +62,7 @@ func main() {
 	// Same embedder table as the search face.
 	var embedFn func(context.Context, []string) ([][]float64, error)
 	embedder := "local-hash-64"
-	if os.Getenv("ASK_EMBED") == "minilm" && minilm.Available() {
+	if os.Getenv("CLUS_EMBED") == "minilm" && minilm.Available() {
 		emb := minilm.New(minilm.DefaultDir())
 		embedFn = emb.Embed
 		embedder = "minilm-l12-384"
@@ -77,7 +77,7 @@ func main() {
 	}
 	defer c.Close()
 	ctx := context.Background()
-	st := cluster.NewCumuStore(c, ns.Coll(*namespace, "ask_clusters"))
+	st := cluster.NewCumuStore(c, ns.Coll(*namespace, "clus_clusters"))
 	clusters, err := st.All(ctx)
 	if err != nil {
 		fatal(err)
@@ -86,7 +86,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "thetaprobe: need ≥2 clusters, got %d\n", len(clusters))
 		os.Exit(1)
 	}
-	sourcesColl := ns.Coll(*namespace, "ask_sources")
+	sourcesColl := ns.Coll(*namespace, "clus_sources")
 
 	// Skip queries any cluster already retains verbatim (tautological match).
 	retained := map[string]bool{}

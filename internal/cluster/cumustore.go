@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cumubase/ask/internal/mcs"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
-// CumuStore persists clusters in a store collection (default ask_clusters).
+// CumuStore persists clusters in a store collection (default clus_clusters).
 type CumuStore struct {
 	c    cumulite.Port
 	coll string
@@ -25,7 +25,7 @@ type CumuStore struct {
 
 func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
-		coll = "ask_clusters"
+		coll = "clus_clusters"
 	}
 	return &CumuStore{c: c, coll: coll}
 }

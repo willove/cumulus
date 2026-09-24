@@ -1,7 +1,7 @@
 // Package minilm runs the sentence-transformers model
 // paraphrase-multilingual-MiniLM-L12-v2 (384-dim multilingual embeddings) in
 // pure Go — safetensors weights + HF tokenizer spec + a hand-rolled BERT
-// forward pass, stdlib only. It exists so the ask suite's vector L1 can speak
+// forward pass, stdlib only. It exists so the cumulus-cluster suite's vector L1 can speak
 // the SAME vector space as Sirchmunk's semantic cache index without cgo,
 // ONNX runtime, or a Python sidecar.
 //
@@ -115,18 +115,5 @@ func layerNorm(x, w, b []float32, eps float32) {
 	std := float32(math.Sqrt(varr + float64(eps)))
 	for i := range x {
 		x[i] = (x[i]-float32(mean))/std*w[i] + b[i]
-	}
-}
-
-// matvecRowMajor computes y[o] = Σ_i x[i]·W[o·in+i] + b[o] (nn.Linear with
-// weight [out,in] applied as x·Wᵀ), blocked over i for cache locality.
-func matvecRowMajor(x []float32, w []float32, b []float32, out int, in int, y []float32) {
-	for o := 0; o < out; o++ {
-		var acc float32
-		row := w[o*in : o*in+in]
-		for i := 0; i < in; i++ {
-			acc += x[i] * row[i]
-		}
-		y[o] = acc + b[o]
 	}
 }

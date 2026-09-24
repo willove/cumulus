@@ -8,7 +8,7 @@ import (
 func TestAllAssetsLoad(t *testing.T) {
 	for _, name := range []string{
 		EvaluateSample, FastAnalyze, KeywordsMultilevel, HistoryRewrite, SynthesizeROI,
-		JudgeCorrect, KeywordsRefine, QueryAbstract, QueryFromAbstract,
+		JudgeCorrect, KeywordsRefine, QueryAbstract, QueryFromAbstract, ScanRank,
 	} {
 		body, err := Load(name)
 		if err != nil {
@@ -40,6 +40,18 @@ func TestEvaluateSampleRubricFrozen(t *testing.T) {
 	for _, s := range []string{"0-3", "4-7", "8-10", "{{query}}", "JSON"} {
 		if !strings.Contains(body, s) {
 			t.Fatalf("rubric missing %q", s)
+		}
+	}
+}
+
+func TestScanRankContract(t *testing.T) {
+	body, err := Load(ScanRank)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"{{query}}", "{{candidates}}", "ranking", "JSON", "不要给分数"} {
+		if !strings.Contains(body, s) {
+			t.Fatalf("scan_rank missing %q", s)
 		}
 	}
 }

@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 func embedOf(t *testing.T, e Embedder, s string) []float64 {
@@ -240,7 +240,7 @@ func TestCumuStoreTopicAliases(t *testing.T) {
 				t.Fatalf("open engine: %v", err)
 			}
 			defer engine.Close()
-			if err := engine.EnsureCollection(ctx, "ask_clusters"); err != nil {
+			if err := engine.EnsureCollection(ctx, "clus_clusters"); err != nil {
 				t.Fatalf("ensure: %v", err)
 			}
 			st := NewCumuStore(engine, "")

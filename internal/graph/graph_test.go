@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cluster"
+	"github.com/willove/cumulus/internal/cluster"
 )
 
 func mk(t *testing.T, id, topic string, embed []float64, hot float64) cluster.Cluster {

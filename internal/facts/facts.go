@@ -9,7 +9,7 @@ package facts
 import (
 	"strings"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // Fact is one atomic evidence requirement (LENS Definition 2).

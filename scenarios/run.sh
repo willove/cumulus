@@ -6,7 +6,7 @@
 set -u
 cd "$(dirname "$0")/.."
 # Scenario runs are stub-mode too: isolate from the developer's .env.
-export ASK_ENV=/dev/null
+export CLUS_ENV=/dev/null
 WORK="$(mktemp -d)"
 STORE="$WORK/data"
 PASS=0
@@ -14,8 +14,8 @@ FAIL=0
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
-go build -o "$WORK/ask" ./cmd/ask || { echo "scenario: FAIL building ask"; exit 1; }
-"$WORK/ask" -data "$STORE" ensure >/dev/null
+go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || { echo "scenario: FAIL building cumulus-cluster"; exit 1; }
+"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null
 
 run_scenario() {
 	dir="$1"
@@ -28,10 +28,10 @@ run_scenario() {
 	python3 - "$dir" <<'PY'
 import json, os, subprocess, sys
 scn = json.load(open(sys.argv[1] + "/scenario.json"))
-ask = os.environ["ASK"]; store = os.environ["STORE"]
+ccl = os.environ["CLUS"]; store = os.environ["STORE"]
 npass = nfail = 0
 for doc in scn.get("corpus", []):
-    args = [ask, "-data", store, "put", "-title", doc.get("title", doc["key"]),
+    args = [ccl, "-data", store, "put", "-title", doc.get("title", doc["key"]),
             "-key", doc["key"], "-type", "md", "-body-file", sys.argv[1] + "/" + doc["file"]]
     r = subprocess.run(args, capture_output=True, text=True)
     ok_create = '"status"' in r.stdout
@@ -42,7 +42,7 @@ for doc in scn.get("corpus", []):
     if ok_create: npass += 1
     else: nfail += 1
 for q in scn.get("queries", []):
-    r = subprocess.run([ask, "-data", store, "search", "-q", q["q"], "-raw"],
+    r = subprocess.run([ccl, "-data", store, "search", "-q", q["q"], "-raw"],
                        capture_output=True, text=True)
     blob = r.stdout
     reasons = []
@@ -73,7 +73,7 @@ PY
 	PASS=$((PASS + 1))
 }
 
-export ASK="$WORK/ask"
+export CLUS="$WORK/cumulus-cluster"
 export STORE
 if [ "$#" -gt 0 ]; then
 	for s in "$@"; do run_scenario "scenarios/$s"; done

@@ -3,7 +3,7 @@ package deep
 import (
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // A1: overlapping windows on one source merge into one continuous block.

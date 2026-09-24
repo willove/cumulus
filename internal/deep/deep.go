@@ -13,14 +13,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cumubase/ask/internal/abstain"
-	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/facts"
-	"github.com/cumubase/ask/internal/fast"
-	"github.com/cumubase/ask/internal/graph"
-	"github.com/cumubase/ask/internal/kb"
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/abstain"
+	"github.com/willove/cumulus/internal/cluster"
+	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/fast"
+	"github.com/willove/cumulus/internal/graph"
+	"github.com/willove/cumulus/internal/kb"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // EscalateBelow is the confidence line under which FAST upgrades to DEEP
@@ -67,7 +67,7 @@ type CitationSet struct {
 	Legend string `json:"legend"`
 }
 
-// Conflict is a contested link between two clusters (ask_conflicts).
+// Conflict is a contested link between two clusters (clus_conflicts).
 type Conflict struct {
 	ID     string `json:"_id"`
 	A      string `json:"a"`
@@ -179,7 +179,7 @@ type Engine struct {
 	Sources         []source.Source
 	EscalateBelow   float64
 	// Verbose, when set, receives per-step diagnostic lines (serve -verbose /
-	// ASK_VERBOSE). nil → silent.
+	// CLUS_VERBOSE). nil → silent.
 	Verbose func(format string, a ...any)
 	// OnFile fires after each file's windows are sampled (admission order) —
 	// the SSE face forwards it so the UI shows live progress.
@@ -949,7 +949,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// Documents widening admitted from outside the corpus: citations must
 	// resolve against them too, so the run reports what it actually sampled.
 	var widenedDocs []source.Source
-	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
+	if os.Getenv("CLUS_DEBUG_WIDEN") == "1" {
 		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v tried=%d\n", len(kept), rep.Complete, bestScore, e.Widen != nil, len(tried))
 	}
 	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {

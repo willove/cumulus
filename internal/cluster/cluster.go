@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cumubase/ask/internal/mcs"
-	"github.com/cumubase/ask/internal/source"
+	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/source"
 )
 
 const (
@@ -222,7 +222,7 @@ type LevelKey struct {
 	Text  string `json:"text"`
 }
 
-// Cluster is one knowledge unit in ask_clusters.
+// Cluster is one knowledge unit in clus_clusters.
 type Cluster struct {
 	ID        string   `json:"_id"`
 	TopicKey  string   `json:"topic_key"`

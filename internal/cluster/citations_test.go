@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cumubase/ask/internal/mcs"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 func TestRenumberCitations(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cumubase/ask/internal/llm"
+	"github.com/willove/cumulus/internal/llm"
 )
 
 type row struct {

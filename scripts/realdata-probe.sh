@@ -23,8 +23,8 @@ WORK="$(mktemp -d)"
 STORE="$WORK/data"
 trap 'rm -rf "$WORK"' EXIT
 
-go build -o "$WORK/ask" ./cmd/ask || exit 1
-"$WORK/ask" -data "$STORE" ensure >/dev/null
+go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || exit 1
+"$WORK/cumulus-cluster" -data "$STORE" ensure >/dev/null
 
 # Sample N triples; positives AND negatives both enter the corpus (hard
 # negatives are the point). Keys: law<k> / neg<k>.
@@ -57,17 +57,17 @@ with open(work + "/corpus.jsonl", "w", encoding="utf-8") as f:
 print("corpus docs=%d queries=%d" % (len(docs), len(qs)))
 PY
 
-export ASK="$WORK/ask"
+export CLUS="$WORK/cumulus-cluster"
 export STORE
-"$WORK/ask" -data "$STORE" ingest-jsonl -file "$WORK/corpus.jsonl" -job cnlaw >/dev/null
+"$WORK/cumulus-cluster" -data "$STORE" ingest-jsonl -file "$WORK/corpus.jsonl" -job cnlaw >/dev/null
 
 python3 - "$WORK/queries.json" <<'PY'
 import json, os, subprocess, sys
-ask = os.environ["ASK"]; store = os.environ["STORE"]
+ccl = os.environ["CLUS"]; store = os.environ["STORE"]
 qs = json.load(open(sys.argv[1], encoding="utf-8"))
 hit = cite = n = 0
 for item in qs:
-    r = subprocess.run([ask, "-data", store, "search", "-q", item["q"], "-raw"],
+    r = subprocess.run([ccl, "-data", store, "search", "-q", item["q"], "-raw"],
                        capture_output=True, text=True)
     try:
         res = json.loads(r.stdout)
