@@ -304,9 +304,11 @@ echo "$JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["sta
 # It runs here, before serve: the serve process started just below holds the
 # store directory exclusively, so a CLI turn can no longer run alongside it.
 SESS="e2e-$(date +%s)"
-$A search -q "连接池最大连接数是多少" -session "$SESS" -raw >/dev/null
-$A search -q "它的来源文档标题是什么" -session "$SESS" -raw >/dev/null
-SESSJSON="$($A session show "$SESS")"
+# Same bucket the HTTP half below will search in: session KV keys are
+# namespace-scoped, so a mismatch would make the HTTP turn look like a new session.
+$A -ns httpface search -q "连接池最大连接数是多少" -session "$SESS" -raw >/dev/null
+$A -ns httpface search -q "它的来源文档标题是什么" -session "$SESS" -raw >/dev/null
+SESSJSON="$($A -ns httpface session show "$SESS")"
 echo "$SESSJSON" | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -324,13 +326,16 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$SRV" = "1" ] ; check "cumulus-cluster serve serves /health" $?
-HTTP_SRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/sources" -d '{"title":"HTTP 条目","key":"http1","body":"通过 HTTP 摄取的内容：连接池最大 32。"}')"
+HTTP_SRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/sources" -d '{"title":"HTTP 条目","key":"http1","body":"通过 HTTP 摄取的内容：连接池最大 32。","ns":"httpface"}')"
 echo "$HTTP_SRC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] in ("created","updated","unchanged"), r' ; check "POST /v1/ingest/sources upserts a source" $?
-HTTP_JOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/jobs" -d "{\"dir\":\"$WORK/docs\",\"job\":\"servjob\",\"recursive\":false}")"
+HTTP_JOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/jobs" -d "{\"dir\":\"$WORK/docs\",\"job\":\"servjob\",\"recursive\":false,\"ns\":\"httpface\"}")"
 echo "$HTTP_JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "POST /v1/ingest/jobs accepts an async job" $?
 
 # --- Gate P: search HTTP face (P1) -------------------------------------------
-PQ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d '{"query":"HTTP 摄取的内容里连接池最大是多少"}')"
+# The search face now REQUIRES a named bucket (no silent fallback to the
+# default library). Register one for the default-library gates below.
+curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/buckets" -d '{"name":"httpface","note":"P1/P2 HTTP face gate"}' >/dev/null
+PQ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d '{"query":"HTTP 摄取的内容里连接池最大是多少","ns":"httpface"}')"
 echo "$PQ" | python3 -c '
 import json,sys
 r=json.load(sys.stdin)
@@ -338,7 +343,7 @@ a=r.get("answer") or {}
 assert a.get("summary"), ("empty summary", r)
 assert r.get("mode") in ("FAST","DEEP","FILENAME_ONLY"), r
 print("ok")' ; check "POST /v1/search returns a cited answer (P1 JSON face)" $?
-PSSE="$(curl -fsS -N -X POST "http://127.0.0.1:$SPORT/v1/search/stream" -d '{"query":"HTTP 摄取的内容里连接池最大是多少"}')"
+PSSE="$(curl -fsS -N -X POST "http://127.0.0.1:$SPORT/v1/search/stream" -d '{"query":"HTTP 摄取的内容里连接池最大是多少","ns":"httpface"}')"
 echo "$PSSE" | python3 -c '
 import json,sys
 raw=sys.stdin.read()
@@ -353,9 +358,9 @@ print("ok")' ; check "POST /v1/search/stream emits SSE status/content/citations/
 # --- Gate Q: chat sessions (P2, KV) ------------------------------------------
 # The CLI half ran before serve came up; the same session is driven over HTTP
 # here, against the store serve now holds.
-PSJ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d "{\"query\":\"连接池最大是多少\",\"session\":\"$SESS\"}")"
+PSJ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d "{\"query\":\"连接池最大是多少\",\"session\":\"$SESS\",\"ns\":\"httpface\"}")"
 echo "$PSJ" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("session"), r' ; check "HTTP /v1/search echoes session id (P2)" $?
-SESSN="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions/$SESS")"
+SESSN="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions/$SESS?ns=httpface")"
 echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "the HTTP turn lands on the CLI-created session (P2)" $?
 
 # --- Gate R: web UI (P7 v0 + UI v1 簇浏览) -----------------------------------
@@ -370,7 +375,7 @@ SLIST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions")"
 echo "$SLIST" | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)' ; check "GET /v1/sessions lists sessions (P7 REST)" $?
 JDONE=0
 for _ in $(seq 1 50); do
-	JST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/ingest/jobs/servjob" 2>/dev/null || true)"
+	JST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/ingest/jobs/servjob?ns=httpface" 2>/dev/null || true)"
 	echo "$JST" | grep -q '"state":"done"' && { JDONE=1; break; }
 	sleep 0.2
 done
@@ -706,6 +711,7 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$SRV2" = "1" ] ; check "ns: serve (default library) comes up for the HTTP face" $?
+curl -fsS -X POST "http://127.0.0.1:$SPORT2/v1/buckets" -d '{"name":"t1","note":"ns gate"}' >/dev/null
 NSHTTP="$(curl -fsS -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少","ns":"t1"}')"
 echo "$NSHTTP" | python3 -c '
 import json,sys
@@ -713,13 +719,10 @@ r=json.load(sys.stdin); a=r["answer"]
 blob="".join(s.get("content","") for s in a.get("samples") or [])
 assert "42" in blob or "千帕" in blob, ("per-request ns must see t1 corpus", blob[:120])
 print("ok")' ; check "ns: HTTP /v1/search honors a per-request ns override" $?
-NSHTTPDEF="$(curl -fsS -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少"}')"
-echo "$NSHTTPDEF" | python3 -c '
-import json,sys
-r=json.load(sys.stdin); a=r["answer"]
-blob="".join(s.get("content","") for s in a.get("samples") or [])
-assert "42" not in blob and "千帕" not in blob, ("default must not see t1 corpus", blob[:120])
-print("ok")' ; check "ns: HTTP /v1/search without ns stays in the default library" $?
+NSHTTPDEF="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少"}')"
+[ "$NSHTTPDEF" = "400" ] ; check "ns: a search with NO bucket is refused (400, not silently defaulted)" $?
+NSBAD2="$(curl -s -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机柜压强上限是多少","ns":"never-registered"}')"
+echo "$NSBAD2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "bucket" in r.get("error",""), r' ; check "ns: an unregistered bucket is refused with a pointer to the registry" $?
 NSBADCODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"x","ns":"bad:ns"}')"
 [ "$NSBADCODE" = "400" ] ; check "ns: HTTP /v1/search refuses an illegal namespace with 400" $?
 kill "$SERVE2_PID" 2>/dev/null
@@ -979,16 +982,17 @@ assert r["skipped"].get("ext",0)>=1, r["skipped"]
 assert all(c.get("size",0)>0 and "age_days" in c for c in r["candidates"]), r["candidates"][:1]
 print("ok")' ; check "scan: POST /v1/scan lists candidates with rule metadata" $?
 SCANPATHS="$(echo "$SCANR" | python3 -c 'import json,sys; print(json.dumps([c["path"] for c in json.load(sys.stdin)["candidates"]]))')"
-SCANJOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/ingest/jobs" -d "{\"candidates\":$SCANPATHS,\"job\":\"scanjob\"}")"
+SCANJOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/ingest/jobs" -d "{\"candidates\":$SCANPATHS,\"job\":\"scanjob\",\"ns\":\"scanface\"}")"
 echo "$SCANJOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "scan→ingest: the candidate list feeds the same job state machine" $?
 SDONE=0
 for _ in $(seq 1 50); do
-	SST="$(curl -fsS "http://127.0.0.1:$SPORT4/v1/ingest/jobs/scanjob" 2>/dev/null || true)"
+	SST="$(curl -fsS "http://127.0.0.1:$SPORT4/v1/ingest/jobs/scanjob?ns=scanface" 2>/dev/null || true)"
 	echo "$SST" | grep -q '"state":"done"' && { SDONE=1; break; }
 	sleep 0.2
 done
 [ "$SDONE" = "1" ] ; check "scan→ingest: the candidate job tracks to done" $?
-SANS="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/search" -d '{"query":"扫描手册里连接池最大是多少"}')"
+curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/buckets" -d '{"name":"scanface","note":"scan->ingest gate"}' >/dev/null
+SANS="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/search" -d '{"query":"扫描手册里连接池最大是多少","ns":"scanface"}')"
 echo "$SANS" | python3 -c '
 import json,sys
 r=json.load(sys.stdin)

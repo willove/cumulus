@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
@@ -122,8 +123,9 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	// persist, the MCP tools) must pass through here — not just ingest. The
 	// serve-level namespace is already declared by the boot Ensure above.
 	ensure := newNSEnsurer(c, st, serveNS, sourcesColl)
+	buckets := bucket.New(c)
 
-	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
+	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure, buckets)
 	registerSessionFace(mux, c, serveNS)
 	registerClusterFace(mux, c, serveNS)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
@@ -294,6 +296,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST/GET only"})
 		}
 	})
+	registerBucketFace(mux, buckets, serveNS)
 	mux.HandleFunc("/v1/ingest/jobs", jobsHandler)
 	mux.HandleFunc("/v1/ingest/jobs/", jobsHandler) // GET /v1/ingest/jobs/{id}
 

@@ -47,6 +47,7 @@ Usage:
   cumulus-cluster job    [-job NAME]          # 摄取任务状态（queued/running/done/failed）
   cumulus-cluster serve  [-listen ADDR]       # HTTP 面：摄取 /v1/ingest/* + POST /v1/search(JSON) +
                                               #   /v1/search/stream(SSE) + 会话 REST + 工作台 /ui/
+  cumulus-cluster bucket list | new <name> [label] [note] | rm <name> | show <name>
   cumulus-cluster cluster list | get <id> | tidy [-dry-run] [-theta 0.55] [-max N]
   cumulus-cluster conflicts list | detect <clusterA> <clusterB>
   cumulus-cluster cites  list                 # 簇→源证据边（clus_cites）
@@ -60,7 +61,7 @@ Flags:
                  有一个进程打开，serve 与 CLI 不能指向同一目录并跑
   -sources NAME  sources collection (default clus_sources; full identity wins over -ns)
   -evidence NAME evidence collection (default clus_evidence; full identity wins over -ns)
-  -ns NAME       namespace scope: suite collections become ns:clus_* composite
+  -ns NAME       bucket selector (same thing): suite collections become ns:clus_* composite
                  identities and job/session KV keys become ns:<name>:clus:* —
                  one tenant's reuse path never sees another's (default library = bare names)
 
@@ -508,6 +509,8 @@ func main() {
 		if err := runMCPProxy(ctx, *url, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fatal(err)
 		}
+	case "bucket":
+		runBucketCLI(ctx, c, rest)
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")

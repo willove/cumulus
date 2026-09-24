@@ -20,6 +20,7 @@ import (
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/abstain"
+	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/fast"
@@ -350,10 +351,12 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
-// Per-request "ns" overrides serveNS for this query only. ensure declares the
-// target namespace's collections: the search path persists clusters, so a
-// namespace that was only ever searched in must not die on the first write.
-func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer) {
+// Per-request "ns" IS the bucket and is REQUIRED: a retrieval that names no
+// bucket is refused rather than defaulted, because the default library is where
+// unrelated corpora accumulate. ensure declares the target namespace's
+// collections: the search path persists clusters, so a namespace that was only
+// ever searched in must not die on the first write.
+func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer, buckets *bucket.Store) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -371,6 +374,17 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			}
 			if err := ns.Validate(in.NS); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			// A retrieval must NAME a bucket. Falling back to the serve-level
+			// namespace is exactly the contamination the bucket mechanism
+			// exists to prevent: the query would read whatever happened to be
+			// ingested into the default library, across topics, silently.
+			if err := buckets.Require(r.Context(), in.NS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error": err.Error(),
+					"hint":  `POST {"ns":"<bucket>"} — see GET /v1/buckets`,
+				})
 				return
 			}
 			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
@@ -420,14 +434,34 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 						res.Session = in.Session
 					}
 				}
+				// Before writing the response: the early return below must not
+				// skip the registry bookkeeping.
+				bumpBucket(r.Context(), buckets, in.NS, ss)
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
 			sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1")
+			bumpBucket(r.Context(), buckets, in.NS, ss)
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
 	mux.HandleFunc("/v1/search/stream", handle(true))
+}
+
+// bumpBucket records a query against the bucket that served it. Best effort:
+// the registry is telemetry, never a correctness source, so a failure here must
+// not fail a search that already succeeded.
+func bumpBucket(ctx context.Context, buckets *bucket.Store, name string, ss *searchStack) {
+	srcCount, clusterCount := -1, -1
+	if ss != nil && ss.st != nil {
+		if list, err := ss.st.ActiveSources(ctx); err == nil {
+			srcCount = len(list)
+		}
+		if all, err := cluster.NewCumuStore(ss.c, ns.Coll(name, "clus_clusters")).All(ctx); err == nil {
+			clusterCount = len(all)
+		}
+	}
+	_ = buckets.Touch(ctx, name, srcCount, clusterCount)
 }
 
 // sseSearch streams one search as SSE events mapped onto the evoke-chat

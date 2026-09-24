@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
@@ -60,11 +60,11 @@ func TestServeEnsuresNamespacesBeforeFirstWrite(t *testing.T) {
 	}
 }
 
-// M10: a namespace that was only ever SEARCHED in must not die on the cluster
-// persist. The REST search face used to skip the lazy per-namespace declaration
-// the ingest/MCP faces do, so the first cluster write hit the engine's
-// fail-closed "collection not found" and surfaced as a 500.
-func TestSearchFacePersistsInUndeclaredNamespace(t *testing.T) {
+// M10 + bucket gate: a search must NAME a registered bucket. The gate refuses
+// an empty one (no silent fallback to the default library) and an unregistered
+// one, and a registered bucket in a namespace whose collections were never
+// declared must still persist its cluster.
+func TestSearchRequiresRegisteredBucket(t *testing.T) {
 	ctx := context.Background()
 	t.Setenv("AIGATE_BASE_URL", "") // offline stubs: no network in tests
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
@@ -73,9 +73,6 @@ func TestSearchFacePersistsInUndeclaredNamespace(t *testing.T) {
 	}
 	defer engine.Close()
 	const nsName = "searchonly"
-	// Corpus written CLI-side: ONLY clus_sources is declared for this tenant.
-	// clus_clusters / clus_weak_edges / clus_cites are not — the exact state a
-	// serve meets on a namespace it has only ever searched in.
 	srcColl := ns.Coll(nsName, "clus_sources")
 	if err := engine.EnsureCollection(ctx, srcColl); err != nil {
 		t.Fatal(err)
@@ -87,49 +84,62 @@ func TestSearchFacePersistsInUndeclaredNamespace(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	// The serve-level library IS declared (boot path).
 	base := ingest.New(engine, "clus_sources", "clus_evidence", "clus_clusters", "")
 	if _, err := base.Ensure(ctx, suiteExtra("")...); err != nil {
 		t.Fatal(err)
 	}
-
-	// Precondition: without declaration the cluster write really does fail.
-	if _, err := engine.Insert(ctx, ns.Coll(nsName, "clus_clusters"),
-		[]map[string]any{{"_id": "Cprobe", "topic_key": "t"}}); err == nil {
-		t.Fatal("precondition: an undeclared collection must fail-closed")
-	}
-
+	buckets := bucket.New(engine)
 	mux := http.NewServeMux()
 	ens := newNSEnsurer(engine, base, "", "clus_sources")
-	registerSearchFace(mux, engine, base, "clus_sources", "", false, ens)
+	registerSearchFace(mux, engine, base, "clus_sources", "", false, ens, buckets)
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	body := `{"query":"连接池最大是多少","ns":"` + nsName + `"}`
-	resp, err := http.Post(srv.URL+"/v1/search", "application/json", strings.NewReader(body))
-	if err != nil {
+	post := func(body string) (*http.Response, map[string]any) {
+		resp, err := http.Post(srv.URL+"/v1/search", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp, out
+	}
+
+	// 1) No bucket named at all → refused, not defaulted.
+	resp, out := post(`{"query":"连接池最大是多少"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an unnamed bucket must be refused: %d %v", resp.StatusCode, out)
+	}
+	if _, ok := out["hint"]; !ok {
+		t.Fatalf("the refusal must point at the bucket registry: %v", out)
+	}
+	// 2) Named but unregistered → refused.
+	resp, _ = post(`{"query":"连接池最大是多少","ns":"` + nsName + `"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an unregistered bucket must be refused: %d", resp.StatusCode)
+	}
+	// 3) Registered → serves, and persists the cluster into that namespace.
+	if _, err := buckets.Create(ctx, nsName, "测试桶", ""); err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	resp, out = post(`{"query":"连接池最大是多少","ns":"` + nsName + `"}`)
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("search in an undeclared namespace must not fail: %d %s", resp.StatusCode, b)
-	}
-	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
+		t.Fatalf("a registered bucket must serve: %d %v", resp.StatusCode, out)
 	}
 	if out["cluster_id"] == "" || out["cluster_id"] == nil {
-		t.Fatalf("the answer must persist a cluster in the foreign ns: %+v", out)
+		t.Fatalf("the answer must persist a cluster in the bucket: %+v", out)
 	}
-	// The ensurer is idempotent: a second search in the same ns re-declares
-	// nothing and still succeeds.
-	resp2, err := http.Post(srv.URL+"/v1/search", "application/json", strings.NewReader(body))
+	// 4) The query is recorded against the bucket (registry telemetry).
+	b, err := buckets.Get(ctx, nsName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("second search must stay green: %d", resp2.StatusCode)
+	if b == nil || b.Queries == 0 {
+		t.Fatalf("the bucket must record the query: %+v", b)
+	}
+	// 5) Re-listing the bucket shows the corpus/cluster counters.
+	if b.Sources <= 0 || b.Clusters <= 0 {
+		t.Fatalf("bucket counters must be refreshed: %+v", b)
 	}
 }
