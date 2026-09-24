@@ -44,7 +44,13 @@ func runMCPProxy(ctx context.Context, url string, in io.Reader, out io.Writer, e
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		resp, err := client.Post(url, "application/json", strings.NewReader(line))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(line))
+		if err != nil {
+			fmt.Fprintf(errw, "mcp: build request: %v\n", err)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Fprintf(errw, "mcp: POST %s: %v\n", url, err)
 			continue

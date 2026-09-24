@@ -21,7 +21,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/cluster"
@@ -31,13 +30,6 @@ import (
 )
 
 func envVerbose() bool { return os.Getenv("CLUS_VERBOSE") == "1" }
-
-// mcpEnsured memoizes the per-namespace suite declaration for the search
-// tool: a search on a fresh namespace would otherwise die on the engine's
-// fail-closed "collection not found" when the cluster write lands — the same
-// gap the ingest face closed with lazy declaration. serveNS is declared at
-// boot by runServe, so only foreign namespaces pass through here.
-var mcpEnsured sync.Map
 
 // mcpProtocolVersion is the MCP revision this face implements.
 const mcpProtocolVersion = "2025-03-26"
@@ -83,7 +75,7 @@ func mcpToolList() []mcpToolDef {
 					"query":   map[string]any{"type": "string", "description": "自然语言问题"},
 					"ns":      map[string]any{"type": "string", "description": "命名空间（多租户分域）；缺省用 serve 级 -ns"},
 					"session": map[string]any{"type": "string", "description": "会话 ID（多轮上下文折叠，可选）"},
-					"prior":   map[string]any{"type": "boolean", "description": "五信号先验融合排序（默认开）"},
+					"prior":   map[string]any{"type": "boolean", "description": "五信号先验融合排序（默认关，与 CLI/REST 一致）"},
 					"l1pre":   map[string]any{"type": "boolean", "description": "内容向量 KNN 收窄候选（索引缺席时自动跳过）"},
 				},
 				"required": []string{"query"},
@@ -118,7 +110,7 @@ func mcpToolList() []mcpToolDef {
 
 // registerMCPFace mounts POST /mcp. Same ctx/store wiring as the REST faces:
 // serve-level namespace, per-request "ns" override, no store of its own.
-func registerMCPFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
+func registerMCPFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer) {
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
@@ -143,7 +135,7 @@ func registerMCPFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sour
 			w.WriteHeader(http.StatusAccepted) // notifications get no response
 			return
 		}
-		resp := mcpDispatch(r.Context(), c, st, sourcesColl, serveNS, verbose, req)
+		resp := mcpDispatch(r.Context(), c, st, sourcesColl, serveNS, verbose, req, ensure)
 		writeRPC(w, resp)
 	})
 }
@@ -160,7 +152,7 @@ func rpcErr(id json.RawMessage, code int, format string, a ...any) rpcResponse {
 // mcpDispatch routes one JSON-RPC request. Tool execution failures come back
 // as a tool result with isError=true (MCP convention); protocol failures as
 // JSON-RPC errors.
-func mcpDispatch(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, req rpcRequest) rpcResponse {
+func mcpDispatch(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, req rpcRequest, ensure *nsEnsurer) rpcResponse {
 	switch req.Method {
 	case "initialize":
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
@@ -180,7 +172,7 @@ func mcpDispatch(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return rpcErr(req.ID, -32602, "invalid params: %v", err)
 		}
-		text, isErr := mcpCallTool(ctx, c, st, sourcesColl, serveNS, verbose, p.Name, p.Arguments)
+		text, isErr := mcpCallTool(ctx, c, st, sourcesColl, serveNS, verbose, p.Name, p.Arguments, ensure)
 		return rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"content": []map[string]any{{"type": "text", "text": text}},
 			"isError": isErr,
@@ -192,7 +184,7 @@ func mcpDispatch(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 
 // mcpCallTool runs one tool and returns its text payload (JSON) plus the
 // isError flag. Every tool honors the per-request "ns" like its REST twin.
-func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, name string, args map[string]any) (string, bool) {
+func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, name string, args map[string]any, ensure *nsEnsurer) (string, bool) {
 	argStr := func(k string) string {
 		if v, ok := args[k].(string); ok {
 			return strings.TrimSpace(v)
@@ -215,16 +207,11 @@ func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 		if err != nil {
 			return mcpErrJSON(err.Error()), true
 		}
-		if nsForReq != serveNS {
-			if _, done := mcpEnsured.Load(nsForReq); !done {
-				if _, eerr := stForReq.Ensure(ctx, suiteExtra(nsForReq)...); eerr != nil {
-					return mcpErrJSON(fmt.Sprintf("ensure ns %q: %v", nsForReq, eerr)), true
-				}
-				mcpEnsured.Store(nsForReq, true)
-			}
+		if eerr := ensure.declare(ctx, nsForReq); eerr != nil {
+			return mcpErrJSON(fmt.Sprintf("ensure ns %q: %v", nsForReq, eerr)), true
 		}
 		opt := SearchOptions{
-			Prior:     argBool(args, "prior", true),
+			Prior:     argBool(args, "prior", false),
 			L1Pre:     argBool(args, "l1pre", false),
 			Namespace: nsForReq,
 		}

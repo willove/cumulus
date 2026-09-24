@@ -39,7 +39,8 @@ func TestMCPFaceToolsRoundTrip(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	registerMCPFace(mux, engine, st, "clus_sources", "", false)
+	registerMCPFace(mux, engine, st, "clus_sources", "", false,
+		newNSEnsurer(engine, st, "", "clus_sources"))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -176,7 +177,8 @@ func TestMCPFaceErrorsAndNamespaces(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	registerMCPFace(mux, engine, st, "clus_sources", "", false)
+	registerMCPFace(mux, engine, st, "clus_sources", "", false,
+		newNSEnsurer(engine, st, "", "clus_sources"))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 

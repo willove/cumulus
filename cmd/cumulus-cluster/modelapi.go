@@ -54,6 +54,17 @@ func (a *modelAPI) finish(err error) {
 	}
 }
 
+// modelDownloadBudget bounds the async weight download (default 2h, ample for
+// ~485MB; overridable for slow links).
+func modelDownloadBudget() time.Duration {
+	if v := os.Getenv("CLUS_MODEL_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 2 * time.Hour
+}
+
 // registerModelFace mounts GET /v1/model, POST /v1/model/install,
 // POST /v1/model/verify and GET /v1/config.
 func registerModelFace(mux *http.ServeMux) {
@@ -81,8 +92,14 @@ func registerModelFace(mux *http.ServeMux) {
 				writeJSON(w, http.StatusConflict, map[string]any{"error": "install already running"})
 				return
 			}
+			// A cancellable, bounded context: the download must not outlive the
+			// process forever, and a stuck transfer must not hang a goroutine
+			// that no request is waiting on. 485MB over a slow link is the
+			// budget; CLUS_MODEL_TIMEOUT overrides it.
+			bg, cancel := context.WithTimeout(context.Background(), modelDownloadBudget())
 			go func() {
-				_, err := installModel(context.Background(), minilm.DefaultDir(), func(p minilm.Progress) {
+				defer cancel()
+				_, err := installModel(bg, minilm.DefaultDir(), func(p minilm.Progress) {
 					api.mu.Lock()
 					api.progress = p
 					api.mu.Unlock()
@@ -90,6 +107,8 @@ func registerModelFace(mux *http.ServeMux) {
 				api.finish(err)
 				if err == nil {
 					log.Printf("[model] weights installed at %s", minilm.DefaultDir())
+				} else {
+					log.Printf("[model] install failed: %v", err)
 				}
 			}()
 			writeJSON(w, http.StatusAccepted, map[string]any{"started": true, "dir": minilm.DefaultDir()})

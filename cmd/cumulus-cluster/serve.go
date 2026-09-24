@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +29,55 @@ func suiteExtra(namespace string) []string {
 		ns.Coll(namespace, "clus_conflicts"),
 		ns.Coll(namespace, "clus_evals"),
 	}
+}
+
+// nsEnsurer memoizes the per-namespace suite declaration and hands out the
+// right store for a request. It exists because the engine fail-closes writes
+// to collections it has never seen: any face that may write (ingest upserts,
+// the search path's cluster persist, the MCP tools) must declare the target
+// namespace's collections before writing, or the first write dies on a raw
+// "collection not found" — including on a namespace the operator only ever
+// searched in.
+type nsEnsurer struct {
+	c           cumulite.Port
+	st          *ingest.Store
+	serveNS     string
+	sourcesColl string
+	mu          sync.Mutex
+	ensured     map[string]bool
+}
+
+func newNSEnsurer(c cumulite.Port, st *ingest.Store, serveNS, sourcesColl string) *nsEnsurer {
+	return &nsEnsurer{c: c, st: st, serveNS: serveNS, sourcesColl: sourcesColl, ensured: map[string]bool{}}
+}
+
+// declare ensures the suite collections for one namespace, once per process.
+func (n *nsEnsurer) declare(ctx context.Context, nsForReq string) error {
+	n.mu.Lock()
+	first := !n.ensured[nsForReq]
+	n.ensured[nsForReq] = true
+	n.mu.Unlock()
+	if !first {
+		return nil
+	}
+	stForReq, _, err := storeForNS(n.c, n.st, n.serveNS, nsForReq, n.sourcesColl)
+	if err != nil {
+		return err
+	}
+	if _, err := stForReq.Ensure(ctx, suiteExtra(nsForReq)...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// store returns the store for a request namespace with its collections
+// declared. reqNS "" falls back to the serve-level namespace.
+func (n *nsEnsurer) store(ctx context.Context, reqNS string) (*ingest.Store, error) {
+	if err := n.declare(ctx, firstNonEmpty(reqNS, n.serveNS)); err != nil {
+		return nil, err
+	}
+	stForReq, _, err := storeForNS(n.c, n.st, n.serveNS, reqNS, n.sourcesColl)
+	return stForReq, err
 }
 
 // sourceIn / jobIn are the HTTP ingest face payloads.
@@ -66,10 +116,17 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		fatal(err)
 	}
 
-	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose)
+	// nsEnsurer declares a namespace's suite collections the first time a
+	// request reaches it. The engine fail-closes writes to collections it has
+	// never seen, so EVERY face that may write (ingest, search's cluster
+	// persist) must pass through here — not just ingest. serveNS is declared
+	// at boot below.
+	ensure := newNSEnsurer(c, st, serveNS, sourcesColl)
+
+	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
 	registerSessionFace(mux, c, serveNS)
 	registerClusterFace(mux, c, serveNS)
-	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose)
+	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
 	registerScanFace(mux, serveNS)
 	registerEvalFace(mux, c, serveNS)
 	registerModelFace(mux)
@@ -77,28 +134,9 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	registerWebFace(mux)
 
 	// scopedStore returns the default store, or a per-request store when the
-	// body asks for a different namespace than the server's own. The first
-	// sighting of a namespace declares its collections (idempotent) — the
-	// engine fail-closes writes to collections it has never seen.
-	var ensureMu sync.Mutex
-	ensured := map[string]bool{}
-	scopedStore := func(ctx context.Context, reqNS string) (*ingest.Store, error) {
-		nsForReq := firstNonEmpty(reqNS, serveNS)
-		stForReq, _, err := storeForNS(c, st, serveNS, reqNS, sourcesColl)
-		if err != nil {
-			return nil, err
-		}
-		ensureMu.Lock()
-		first := !ensured[nsForReq]
-		ensured[nsForReq] = true
-		ensureMu.Unlock()
-		if first {
-			if _, err := stForReq.Ensure(ctx, suiteExtra(nsForReq)...); err != nil {
-				return nil, err
-			}
-		}
-		return stForReq, nil
-	}
+	// body asks for a different namespace than the server's own, with that
+	// namespace's collections declared on first sighting (idempotent).
+	scopedStore := ensure.store
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())
@@ -121,7 +159,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		}
 		rst, err := scopedStore(r.Context(), in.NS)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeStoreErr(w, err)
 			return
 		}
 		typ := in.Type
@@ -148,7 +186,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		}
 		res, err := rst.Put(r.Context(), source.New(in.Title, typ, in.URI, in.Key, lang, body, in.Meta))
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			writeStoreErr(w, err)
 			return
 		}
 		code := http.StatusOK
@@ -166,13 +204,13 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
-			rst, err := scopedStore(r.Context(), in.NS)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
 			if in.Job == "" {
 				in.Job = "http-" + fmt.Sprint(time.Now().UnixMilli())
+			}
+			rst, err := scopedStore(r.Context(), in.NS)
+			if err != nil {
+				writeStoreErr(w, err)
+				return
 			}
 			// P9: an explicit candidate list replaces the walk — the
 			// pipeline (state machine, cursor, upserts) is the same.
@@ -201,10 +239,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir or candidates required"})
 				return
 			}
-			if in.Job == "" {
-				in.Job = "http-" + fmt.Sprint(time.Now().UnixMilli())
-			}
-			if in.Dir == "" || !dirExists(in.Dir) {
+			if !dirExists(in.Dir) {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir not found"})
 				return
 			}
@@ -242,7 +277,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 			}
 			rst, err := scopedStore(r.Context(), r.URL.Query().Get("ns"))
 			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				writeStoreErr(w, err)
 				return
 			}
 			d, err := rst.GetJobDoc(r.Context(), id)
@@ -262,12 +297,28 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	mux.HandleFunc("/v1/ingest/jobs", jobsHandler)
 	mux.HandleFunc("/v1/ingest/jobs/", jobsHandler) // GET /v1/ingest/jobs/{id}
 
+	// Timeouts: ReadHeaderTimeout guards slowloris headers. ReadTimeout and
+	// WriteTimeout are deliberately NOT set — a DEEP search legitimately runs
+	// for minutes and an SSE stream is open-ended, so a blanket write deadline
+	// would kill the very requests this face exists to serve. IdleTimeout
+	// still reaps dead keep-alive connections.
 	srv := &http.Server{
 		Addr:              listen,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("cumulus-cluster serve on %s", listen)
+	// Graceful shutdown on ctx cancellation: in-flight SSE searches finish,
+	// the port is released instead of being killed mid-write.
+	go func() {
+		<-ctx.Done()
+		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shut); err != nil && err != context.DeadlineExceeded {
+			log.Printf("serve shutdown: %v", err)
+		}
+	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
@@ -290,11 +341,26 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 
+// writeStoreErr maps a store/namespace failure to the right status: an invalid
+// namespace segment is the caller's fault (400); everything else is the engine
+// refusing the operation (500). Both used to be 400, so an operator debugging a
+// store problem saw "bad request".
+func writeStoreErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, ns.ErrInvalidNamespace) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+}
+
 func dirExists(dir string) bool {
 	st, err := os.Stat(dir)
 	return err == nil && st.IsDir()
 }
 
+// countIngestable mirrors the walk in ingest.walkIngestable so the queued job
+// reports the real Total. It drifted once before (four extensions here, six in
+// the walk) and the UI progress lied.
 func countIngestable(dir string, recursive bool) (int, error) {
 	n := 0
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
@@ -308,7 +374,7 @@ func countIngestable(dir string, recursive bool) (int, error) {
 			return nil
 		}
 		switch strings.ToLower(filepath.Ext(p)) {
-		case ".md", ".txt", ".html", ".htm":
+		case ".md", ".txt", ".html", ".htm", ".docx", ".pdf":
 			n++
 		}
 		return nil

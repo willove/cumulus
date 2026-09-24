@@ -288,7 +288,9 @@ function schedulePoll() {
 async function openSession(s) {
   current.value = s.id;
   sources.value = []; meta.value = "";
-  const d = await (await fetch("/v1/sessions/" + s.id)).json();
+  // ns-scoped like the list above: the session KV keys are namespaced, so a
+  // request without ?ns= reads the serve-level library instead of the tenant's.
+  const d = await (await fetch(withNS("/v1/sessions/" + encodeURIComponent(s.id)))).json();
   messages.value = (d.messages || []).map((m, i) => ({
     id: s.id + "-" + i, role: m.role, content: m.content, status: "done",
   }));
@@ -296,7 +298,8 @@ async function openSession(s) {
 
 async function newSession() {
   const d = await (await fetch("/v1/sessions", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ns: nsSel.value || undefined }),
   })).json();
   current.value = d.id;
   messages.value = [];
@@ -306,7 +309,10 @@ async function newSession() {
 
 async function delSession(id, e) {
   e.stopPropagation();
-  await fetch("/v1/sessions/" + id, { method: "DELETE" });
+  await fetch("/v1/sessions/" + encodeURIComponent(id), {
+    method: "DELETE", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ns: nsSel.value || undefined }),
+  });
   if (current.value === id) { current.value = ""; messages.value = []; }
   loadSessions();
 }
@@ -344,7 +350,7 @@ async function onSend(text) {
         if (ev === "content") { stopThinking(am.id); appendContent(am.id, m.text); scroll(); }
         else if (ev === "citations") { sources.value = (m.refs || []).map((r, i) => ({ index: r.index, title: (r.title || r.source_id) + (r.span ? " · " + r.span : ""), snippet: r.quote, source: r.source_id })); }
         else if (ev === "status" && m.stage === "file") { meta.value = "已采样 " + (m.file || "") + "（" + (m.score ?? 0) + " 分）"; }
-        else if (ev === "status" && m.stage !== "started") { meta.value = m.text || m.stage; }
+        else if (ev === "status" && m.stage !== "started") { meta.value = m.stage; }
         else if (ev === "done") {
           meta.value = "mode=" + m.mode + " · conf=" + (m.conf ?? 0).toFixed(2)
             + " · loops=" + (m.loops || 0) + (m.widened ? " · 扩征" + m.widened : "")

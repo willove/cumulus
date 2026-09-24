@@ -234,7 +234,6 @@ type searchIn struct {
 	Session string   `json:"session"` // KV 会话：折叠近几轮进改写，回答回写会话
 	Prior   bool     `json:"prior"`
 	L1Pre   bool     `json:"l1pre"`
-	Stream  bool     `json:"stream"`
 	NS      string   `json:"ns"` // per-request namespace override (empty = serve's -ns)
 }
 
@@ -351,8 +350,10 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 }
 
 // registerSearchFace mounts POST /v1/search and POST /v1/search/stream.
-// Per-request "ns" overrides serveNS for this query only.
-func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool) {
+// Per-request "ns" overrides serveNS for this query only. ensure declares the
+// target namespace's collections: the search path persists clusters, so a
+// namespace that was only ever searched in must not die on the first write.
+func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer) {
 	handle := func(stream bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
@@ -374,6 +375,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			}
 			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
 			// collections and KV keys all move to the request's namespace.
+			// Declaring it here (not only on the ingest faces) keeps the
+			// cluster persist from failing on a search-only namespace.
+			if err := ensure.declare(r.Context(), firstNonEmpty(in.NS, serveNS)); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
 			stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
 			if serr != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": serr.Error()})
@@ -390,20 +397,19 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				}
 				opt.History = hist
 			}
-			if stream {
-				in.Stream = true
-			}
 			ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
 			if err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
 			if verbose || os.Getenv("CLUS_VERBOSE") == "1" {
-				ss.dE.Verbose = func(f string, a ...any) {
+				vlog := func(f string, a ...any) {
 					log.Printf("[search %s] %s", in.Query, fmt.Sprintf(f, a...))
 				}
+				ss.dE.Verbose = vlog
+				ss.fe.Verbose = vlog
 			}
-			if !in.Stream {
+			if !stream {
 				res, err := runSearch(r.Context(), ss, in.Query)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -430,9 +436,11 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 // browsers from timing out during long DEEP searches.
 func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) {
 	if verbose {
-		ss.dE.Verbose = func(f string, a ...any) {
+		vlog := func(f string, a ...any) {
 			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
 		}
+		ss.dE.Verbose = vlog
+		ss.fe.Verbose = vlog
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -498,7 +506,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		"mode": res.Mode, "loops": res.Loops, "conf": ans.Confidence,
 		"coverage": ans.Coverage, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
-		"latency_ms": res.LatencyMS,
+		"latency_ms": res.LatencyMS, "widened": res.Widened,
 	}
 	if sess != nil {
 		if _, aerr := sess.appendTurn(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
