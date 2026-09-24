@@ -104,7 +104,7 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **离线 KeywordScorer 不是语义评分**——定位与门可断言，质量声明要换 aigate 端点后再测；
 - **摘要模板是确定性拼接**，不是生成式合成；生成段质量门按 R 轨收口，不设确定性线；
 - **引用 `[?]`** = 未能精确回溯原文窗口（源已更新或定位越界）；多源样本逐源定位回原文；
-- **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、写入侧 LLM 自评质量门（端点档，只记录不设线）；Web UI 暂无 ns 选择器与评测记分牌页（沿用 serve 级 `-ns`；tidy 维护动作仍走 CLI）；UI v2 已提供目录摄取面板——路径是 serve 所在机器的本地目录（可信本机工具口径，见部署边界）；
+- **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、写入侧 LLM 自评质量门（端点档，只记录不设线）；tidy 维护动作仍走 CLI；UI v2 已提供目录摄取面板——路径是 serve 所在机器的本地目录（可信本机工具口径，见部署边界）；
 - **Prompt 五类资产已全部进生产路径**（打分/意图/合成/级联降级/多轮改写）；离线桩与冻结回归是门的载体；
 - **端点配置在各套件内**（D6 决策更新 2026-09-22，aigate 暂锁、统一网关后期规划）：套件读 `./.env`（或 `$CLUS_ENV`），沿用操作者 `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL_NAME` 约定（见 `.env.example`；已设环境变量优先，`cumulus-cluster env` 脱敏查看）。MiniMax 直连已适配：`reasoning_split` 自动（minimaxi 域，`AIGATE_REASONING_SPLIT` 强制）+ `<think>` 内联思维链剥离。实测：FAST 67.4s / 复用 0.0s / DEEP 53.7s，≈904 tokens/窗、≈7186/合成（`scripts/endpoint-probe.sh`）；embedder 仅在 `AIGATE_EMBED_MODEL` 显式指定时切换；
 - **`internal/prior`（LENS B4）已接线**：`search -prior` 五信号排序，默认 IDF 级联；

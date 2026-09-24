@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,9 +216,16 @@ func (in *Installer) list(ctx context.Context) ([]repoFile, error) {
 	return out.Data.Files, nil
 }
 
+// maxDownloadBytes caps one streamed weight file. The post-hoc size check could
+// only fire AFTER the whole body was written, so a misbehaving endpoint could
+// fill the disk first; the cap makes the failure happen during the copy.
+const maxDownloadBytes = 1 << 30 // 1 GiB: the largest weight file is ~449MB
+
 func (in *Installer) download(ctx context.Context, f repoFile, dst string) error {
+	// QueryEscape: a path segment with & or ? would otherwise be read as URL
+	// structure and could point the download at a different repo path.
 	url := fmt.Sprintf("%s/api/v1/models/%s/repo?Revision=%s&FilePath=%s",
-		in.base(), ModelID, ModelRevision, f.Path)
+		in.base(), ModelID, ModelRevision, url.QueryEscape(f.Path))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -236,10 +244,17 @@ func (in *Installer) download(ctx context.Context, f repoFile, dst string) error
 		return err
 	}
 	pw := &progressWriter{file: f.Path, total: f.Size, on: in.OnProgress}
-	if _, err := io.Copy(out, io.TeeReader(resp.Body, pw)); err != nil {
+	limited := io.LimitReader(resp.Body, maxDownloadBytes)
+	n, cerr := io.Copy(out, io.TeeReader(limited, pw))
+	if cerr != nil {
 		out.Close()
 		os.Remove(tmp)
-		return fmt.Errorf("install: download %s: %w", f.Path, err)
+		return fmt.Errorf("install: download %s: %w", f.Path, cerr)
+	}
+	if n >= maxDownloadBytes {
+		out.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("install: download %s: exceeded the %d-byte cap", f.Path, int64(maxDownloadBytes))
 	}
 	if err := out.Close(); err != nil {
 		os.Remove(tmp)

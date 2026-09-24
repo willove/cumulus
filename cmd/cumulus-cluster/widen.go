@@ -176,5 +176,3 @@ func widenSemantic(ctx context.Context, c cumulite.Port, sourcesColl string, all
 	}
 	return out, nil
 }
-
-var _ = fmt.Sprintf // keep fmt for future diagnostics without churn

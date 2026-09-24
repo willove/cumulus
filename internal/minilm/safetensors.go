@@ -64,6 +64,11 @@ func openSafetensors(path string) (*safetensors, error) {
 // tensor returns the raw F32 payload of one tensor. Weights in this model are
 // all F32; offsets are 8-aligned per the safetensors spec, so an unsafe view
 // avoids copying ~449MB.
+//
+// The offsets are validated BEFORE the unsafe view is built. The weights arrive
+// over the network from ModelScope, so a truncated or malformed header must
+// surface as an error - not as an index panic on DataOffsets[1], and not as a
+// SIGSEGV from an unsafe.Slice that runs past the mmap.
 func (s *safetensors) tensor(name string) ([]float32, error) {
 	t, ok := s.header[name]
 	if !ok {
@@ -72,8 +77,22 @@ func (s *safetensors) tensor(name string) ([]float32, error) {
 	if t.Dtype != "F32" {
 		return nil, fmt.Errorf("tensor %q: dtype %s, want F32", name, t.Dtype)
 	}
-	off := s.dataStart + t.DataOffsets[0]
-	n := (t.DataOffsets[1] - t.DataOffsets[0]) / 4
+	if len(t.DataOffsets) < 2 {
+		return nil, fmt.Errorf("tensor %q: data_offsets needs 2 entries, got %d", name, len(t.DataOffsets))
+	}
+	begin, end := t.DataOffsets[0], t.DataOffsets[1]
+	if begin < 0 || end < begin {
+		return nil, fmt.Errorf("tensor %q: bad data_offsets [%d,%d]", name, begin, end)
+	}
+	if s.dataStart+begin < 0 || end > len(s.data)-s.dataStart {
+		return nil, fmt.Errorf("tensor %q: offsets [%d,%d) overrun the %d-byte data section",
+			name, begin, end, len(s.data)-s.dataStart)
+	}
+	n := (end - begin) / 4
+	if n == 0 {
+		return nil, fmt.Errorf("tensor %q: empty payload", name)
+	}
+	off := s.dataStart + begin
 	return unsafe.Slice((*float32)(unsafe.Pointer(&s.data[off])), n), nil
 }
 

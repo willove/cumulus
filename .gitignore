@@ -1,3 +1,7 @@
+# Web UI dependencies: installed by `npm ci` from web/package-lock.json.
+# They were committed by mistake (682 files / 36MB); untracked 2026-09-24.
+web/node_modules/
+
 bin/
 data/
 *.local.json
