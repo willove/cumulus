@@ -16,7 +16,7 @@
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
 make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 153 断言）
-bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
+bash scenarios/run.sh      # 案例语料（manual-qa / project-kb，离线门，隔离见 scripts/offline-gate.sh）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
 CLUS="./bin/cumulus-cluster"                 # 默认存储 ./var/cumulus-cluster；-data DIR 覆盖；cumulus-cluster env / cumulus-cluster -h 不开库

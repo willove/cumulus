@@ -5,8 +5,12 @@
 # Usage: bash scenarios/run.sh [name ...]   (default: all)
 set -u
 cd "$(dirname "$0")/.."
-# Scenario runs are stub-mode too: isolate from the developer's .env.
-export CLUS_ENV=/dev/null
+# Scenario runs are stub-mode too: isolate from the developer's environment.
+# Shared with e2e.sh so the two gates cannot drift apart again — before this,
+# scenarios went 13 ok -> 4 ok / 9 fail under an exported LLM_BASE_URL while
+# e2e.sh was already fixed, because each had its own half of the isolation.
+# shellcheck source=scripts/offline-gate.sh
+. "$(cd "$(dirname "$0")/.." && pwd)/scripts/offline-gate.sh"
 WORK="$(mktemp -d)"
 STORE="$WORK/data"
 PASS=0
