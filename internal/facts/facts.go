@@ -15,10 +15,17 @@ import (
 
 // Fact is one atomic evidence requirement (LENS Definition 2).
 type Fact struct {
-	ID       string      `json:"id"`
-	Query    string      `json:"query"`
-	Covered  bool        `json:"covered"`
-	Score    float64     `json:"score"`
+	ID      string  `json:"id"`
+	Query   string  `json:"query"`
+	Covered bool    `json:"covered"`
+	Score   float64 `json:"score"`
+	// NearMiss is the best support an UNCOVERED fact came close to: the highest
+	// keyword-hit ratio seen on any scoreable window even though it stayed
+	// below CoverHit (lexical path), or the best sub-threshold sample score
+	// (oracle path). It is the weakness signal the weakest-requirement stop
+	// actually needs — without it every uncovered fact scores 0 and "weakest
+	// first" degenerates into declaration order.
+	NearMiss float64     `json:"near_miss,omitempty"`
 	SourceID string      `json:"source_id,omitempty"`
 	Window   *mcs.Sample `json:"window,omitempty"`
 }
@@ -75,12 +82,16 @@ func Evaluate(facts []Fact, samples []mcs.Sample) Report {
 		kws := mcs.Fields(f.Query)
 		var best *mcs.Sample
 		bestHit := 0.0
+		nearMiss := 0.0
 		for j := range samples {
 			sm := samples[j]
 			if sm.Score < CoverScore {
 				continue
 			}
 			hit := hitRatio(kws, sm.Content)
+			if hit > nearMiss {
+				nearMiss = hit
+			}
 			if hit < CoverHit {
 				continue
 			}
@@ -98,6 +109,7 @@ func Evaluate(facts []Fact, samples []mcs.Sample) Report {
 		} else {
 			f.Covered = false
 			f.Score = 0
+			f.NearMiss = nearMiss
 			f.SourceID = ""
 			f.Window = nil
 		}
@@ -139,8 +151,12 @@ func EvaluateOracle(facts []Fact, samples []mcs.Sample) Report {
 	for i := range facts {
 		f := &facts[i]
 		var best *mcs.Sample
+		nearMiss := 0.0
 		for j := range samples {
 			sm := samples[j]
+			if sm.Score > nearMiss {
+				nearMiss = sm.Score
+			}
 			if sm.Score < CoverScore {
 				continue
 			}
@@ -167,6 +183,7 @@ func EvaluateOracle(facts []Fact, samples []mcs.Sample) Report {
 		} else {
 			f.Covered = false
 			f.Score = 0
+			f.NearMiss = nearMiss
 			f.SourceID = ""
 			f.Window = nil
 			rep.Missing = append(rep.Missing, f.ID)
@@ -210,29 +227,33 @@ func NeedContinue(rep Report, loops, maxLoops int) bool {
 
 // MissingQueries returns the fact queries still open (self-correction input),
 // WEAKEST FIRST. SSOT §3.5: "NeedContinue/MissingQueries 驱动有界自纠错（最弱
-// 需求优先扩窗）". Declaration order made every uncovered fact tie at score 0,
-// so "weakest" was never computed and the re-sampling order was arbitrary.
-// Uncovered facts score 0 and come first; ties keep declaration order so the
-// result stays deterministic.
+// 需求优先扩窗）".
+//
+// "Weakest" is the NearMiss signal Evaluate/EvaluateOracle record for an
+// uncovered fact (how close the best window came, without clearing CoverHit).
+// Sorting on Fact.Score would be a no-op: every UNCOVERED fact has Score 0 by
+// construction, so the order would silently fall back to declaration order —
+// which is what this function did before the signal existed. Facts with equal
+// NearMiss keep declaration order, so the result stays deterministic.
 func MissingQueries(facts []Fact, rep Report) []string {
 	miss := map[string]bool{}
 	for _, id := range rep.Missing {
 		miss[id] = true
 	}
 	type open struct {
-		query string
-		score float64
-		order int
+		query    string
+		nearMiss float64
+		order    int
 	}
 	var opens []open
 	for i, f := range facts {
 		if miss[f.ID] {
-			opens = append(opens, open{query: f.Query, score: f.Score, order: i})
+			opens = append(opens, open{query: f.Query, nearMiss: f.NearMiss, order: i})
 		}
 	}
 	sort.SliceStable(opens, func(i, j int) bool {
-		if opens[i].score != opens[j].score {
-			return opens[i].score < opens[j].score // weakest requirement first
+		if opens[i].nearMiss != opens[j].nearMiss {
+			return opens[i].nearMiss < opens[j].nearMiss // least support first
 		}
 		return opens[i].order < opens[j].order
 	})

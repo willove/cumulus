@@ -307,14 +307,7 @@ func (e *Expander) Expand(ctx context.Context, req ExpandRequest) ([]ExpandResul
 					ss = append(ss, scored{c: c, sim: cluster.Cosine(cl.Embed, req.Probe)})
 				}
 				sort.Slice(ss, func(i, j int) bool { return ss[i].sim > ss[j].sim })
-				for i, s := range ss {
-					if i < req.HopKNN {
-						cands = []cand{} // rebuild
-						break
-					}
-					_ = s
-				}
-				// Rebuild kept list.
+				// Keep the top-K by probe similarity.
 				kept := make([]cand, 0, req.HopKNN)
 				for i, s := range ss {
 					if i >= req.HopKNN {

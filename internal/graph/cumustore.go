@@ -156,15 +156,26 @@ func (s *CumuStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// queryBy returns every edge with field == id, paginated. A single page of 500
+// used to truncate a hub cluster's adjacency silently — and since startBarriers
+// and every Expand hop read this view, a barrier edge past the cap was missed
+// and the contested neighbour came back as evidence (the H4 hole, at scale).
 func (s *CumuStore) queryBy(ctx context.Context, field, id string) ([]Edge, error) {
-	res, err := s.c.Query(ctx, s.coll, contract.Query{
-		Filter: map[string]any{field: id},
-		Limit:  500,
-	})
-	if err != nil {
-		return nil, err
+	const page = 500
+	var out []Edge
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.coll, contract.Query{
+			Filter: map[string]any{field: id},
+			Limit:  page, Skip: skip,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, docsToEdges(res.Documents)...)
+		if len(res.Documents) < page {
+			return out, nil
+		}
 	}
-	return docsToEdges(res.Documents), nil
 }
 
 // cachedEdges copies a hit under the read lock so callers own their slice

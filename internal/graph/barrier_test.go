@@ -2,8 +2,10 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
+	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/cluster"
 )
 
@@ -120,4 +122,67 @@ func fromToKind(t *testing.T, st Store, from, to, kind string) []Edge {
 		}
 	}
 	return out
+}
+
+// A hub cluster's adjacency must page too. queryBy used to cap one page at 500,
+// so a barrier edge past the cap was invisible to startBarriers — and the
+// contested neighbour came back as evidence (the H4 hole, at scale), even
+// though the unit test above passes on a small fixture.
+func TestBarrierSurvivesPastOneAdjacencyPage(t *testing.T) {
+	ctx := context.Background()
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	const coll = "clus_weak_edges"
+	if err := engine.EnsureCollection(ctx, coll); err != nil {
+		t.Fatal(err)
+	}
+	es := NewCumuStore(engine, coll)
+	cs := cluster.NewMemory()
+	for _, id := range []string{"Ca", "Cb"} {
+		if err := cs.Save(ctx, mk(t, id, "t"+id, []float64{1, 0, 0}, 0.8)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The contested pair, plus enough other edges to push it past one page.
+	if err := LinkBarrier(ctx, es, "Ca", "Cb", "claims 128 vs 256"); err != nil {
+		t.Fatal(err)
+	}
+	const pad = 520
+	for i := 0; i < pad; i++ {
+		if err := es.Save(ctx, Edge{From: "Ca", To: fmt.Sprintf("Cpad%d", i),
+			Weight: 0.6, Source: SourceCoOcur}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cs.Save(ctx, mk(t, "Cpad0", "pad", []float64{0, 1, 0}, 0.8)); err != nil {
+		t.Fatal(err)
+	}
+	from, err := es.From(ctx, "Ca")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(from) <= 500 {
+		t.Fatalf("precondition: adjacency must exceed one page, got %d", len(from))
+	}
+	barriers := 0
+	for _, e := range from {
+		if e.Kind == KindBarrier {
+			barriers++
+		}
+	}
+	if barriers == 0 {
+		t.Fatal("barrier edge lost past the first adjacency page")
+	}
+	got, err := NewExpander(es, cs).Expand(ctx, ExpandRequest{StartID: "Ca", Direction: "out"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range got {
+		if r.Cluster.ID == "Cb" {
+			t.Fatalf("barred neighbour served as evidence: %+v", r)
+		}
+	}
 }

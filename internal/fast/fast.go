@@ -137,6 +137,9 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
 	}
 	if len(ranked) == 0 && e.Expander != nil {
+		if ctx.Err() != nil {
+			return Answer{}, ctx.Err()
+		}
 		levels, xerr := e.Expander.Expand(ctx, query, 3)
 		if xerr == nil {
 			calls++ // the expander really did call the model
@@ -178,8 +181,11 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		total += len(sm.Content)
 	}
 	if len(kept) == 0 {
+		// No synthesis happened on this path, so calls must not be incremented:
+		// billing a call that never ran is exactly what the ≤2 gate exists to
+		// make honest.
 		return Answer{
-			Query: query, Mode: ModeFAST, LLMCalls: calls + 1, SourceID: best.ID,
+			Query: query, Mode: ModeFAST, LLMCalls: calls, SourceID: best.ID,
 			Skipped: true, Summary: "证据不足，未合成",
 		}, nil
 	}
@@ -430,14 +436,30 @@ func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 	if !e.UsePrior || len(fields) == 0 || len(plain) == 0 {
 		return plain
 	}
+	// FUSE, do not replace. prior.Rank normalises its top file to 1.0 and drops
+	// everything past its own topK, so sorting purely by prior score buries a
+	// strong cascade hit the prior ranked low. Normalise the cascade's own
+	// scores and combine, so the two signals must agree to move a file.
 	priorScore := make(map[string]float64)
 	for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
 		priorScore[f.SourceID] = f.Score
 	}
-	out := append([]scored(nil), plain...)
-	sort.SliceStable(out, func(i, j int) bool {
-		return priorScore[out[i].src.ID] > priorScore[out[j].src.ID]
-	})
+	maxCascade := 0.0
+	for _, sc := range plain {
+		if sc.score > maxCascade {
+			maxCascade = sc.score
+		}
+	}
+	out := make([]scored, len(plain))
+	copy(out, plain)
+	for i := range out {
+		norm := 0.0
+		if maxCascade > 0 {
+			norm = out[i].score / maxCascade
+		}
+		out[i].score = 0.5*norm + 0.5*priorScore[out[i].src.ID]
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
 	return out
 }
 

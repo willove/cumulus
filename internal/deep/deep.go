@@ -566,7 +566,7 @@ func srcLabel(s source.Source) string {
 //
 // The +0.1 synthesis bonus and the 0.45 incomplete-cover cap are the DEEP-tier
 // calibration; they live in one place so they can be re-measured together.
-func (e *Engine) deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (coverage, confidence float64, template string) {
+func deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (coverage, confidence float64, template string) {
 	cov := mcs.Coverage(query, kept)
 	mean := 0.0
 	for _, sm := range kept {
@@ -1081,7 +1081,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
 	rep = report(kept)
-	cov, conf, template := e.deepMetrics(query, srcLabel(bestSrc), kept, rep)
+	cov, conf, template := deepMetrics(query, srcLabel(bestSrc), kept, rep)
 	buildAnswer := func(tmpl string) fast.Answer {
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops,
@@ -1141,7 +1141,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if widened > 0 {
 				kept = topKeepsWith(kept, sources)
 				rep = report(kept)
-				cov, conf, template = e.deepMetrics(query, srcLabel(bestSrc), kept, rep)
+				cov, conf, template = deepMetrics(query, srcLabel(bestSrc), kept, rep)
 				best = buildAnswer(template)
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 			}

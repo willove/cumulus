@@ -119,8 +119,8 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	// nsEnsurer declares a namespace's suite collections the first time a
 	// request reaches it. The engine fail-closes writes to collections it has
 	// never seen, so EVERY face that may write (ingest, search's cluster
-	// persist) must pass through here — not just ingest. serveNS is declared
-	// at boot below.
+	// persist, the MCP tools) must pass through here — not just ingest. The
+	// serve-level namespace is already declared by the boot Ensure above.
 	ensure := newNSEnsurer(c, st, serveNS, sourcesColl)
 
 	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)

@@ -274,11 +274,6 @@ func scanScore(s source.Source) float64 {
 
 func posScore(fields []string, s source.Source) PosScore {
 	best := PosScore{SourceID: s.ID, Start: 0, End: minInt(240, len([]rune(s.Body)))}
-	// An empty body yields [0,0) — not a span. Drop the entry rather than
-	// hand the sampler a zero-length window it would score as a miss.
-	if best.End <= best.Start {
-		return PosScore{SourceID: s.ID}
-	}
 	if len(s.Structure) == 0 {
 		return best
 	}

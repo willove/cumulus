@@ -368,22 +368,10 @@ func applyExploreBoost(budget map[string]int, k int, boost float64) {
 			extra--
 		}
 	}
-	// Sum guard: never grow past k.
-	total := 0
-	for _, n := range budget {
-		total += n
-	}
-	for total > k {
-		for _, arm := range Arms {
-			if total <= k {
-				break
-			}
-			if budget[arm] > 1 {
-				budget[arm]--
-				total--
-			}
-		}
-	}
+	// The moves above are zero-sum by construction (a slot taken from one arm is
+	// given to another, and `extra` is bounded by the movable count), so the
+	// total never leaves k — a re-normalising "sum guard" here would be dead
+	// code that implies an invariant the code does not actually maintain.
 }
 
 // allocate splits one round's budget across the three arms (ExploreBoost

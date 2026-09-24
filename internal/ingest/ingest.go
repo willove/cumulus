@@ -1105,26 +1105,34 @@ func renderTemplate(tmpl string, rec map[string]any) (string, error) {
 
 // invalidateEvidence retires every live evidence window of a source and
 // returns how many were patched.
+// invalidateEvidence marks every live window of one document stale. Paginated:
+// a document with >1000 live windows used to keep its tail marked live, and
+// stale windows are exactly what the reuse path must refuse.
 func (s *Store) invalidateEvidence(ctx context.Context, docID string) (int, error) {
-	res, err := s.c.Query(ctx, s.evidence, contract.Query{
-		Filter: map[string]any{"doc_id": docID, "status": "live"},
-		Limit:  1000,
-	})
-	if err != nil {
-		return 0, err
-	}
+	const page = 1000
 	n := 0
-	for _, d := range res.Documents {
-		id, _ := d["_id"].(string)
-		if id == "" {
-			continue
-		}
-		if _, err := s.c.PatchDocument(ctx, s.evidence, id, map[string]any{"$set": map[string]any{"status": "stale"}}); err != nil {
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.evidence, contract.Query{
+			Filter: map[string]any{"doc_id": docID, "status": "live"},
+			Limit:  page, Skip: skip,
+		})
+		if err != nil {
 			return n, err
 		}
-		n++
+		for _, d := range res.Documents {
+			id, _ := d["_id"].(string)
+			if id == "" {
+				continue
+			}
+			if _, err := s.c.PatchDocument(ctx, s.evidence, id, map[string]any{"$set": map[string]any{"status": "stale"}}); err != nil {
+				return n, err
+			}
+			n++
+		}
+		if len(res.Documents) < page {
+			return n, nil
+		}
 	}
-	return n, nil
 }
 
 func (s *Store) getSource(ctx context.Context, id string) (*source.Source, error) {
