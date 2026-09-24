@@ -172,8 +172,10 @@ func headline(p, ext string) string {
 	sc.Buffer(make([]byte, 0, 4096), DefaultHeadlineBytes*4)
 	for sc.Scan() {
 		if line := strings.TrimSpace(sc.Text()); line != "" {
-			if len(line) > DefaultHeadlineBytes {
-				return line[:DefaultHeadlineBytes]
+			// Rune-safe truncation: slicing bytes could split a multi-byte
+			// character and put invalid UTF-8 in the candidate report.
+			if r := []rune(line); len(r) > DefaultHeadlineBytes {
+				return string(r[:DefaultHeadlineBytes])
 			}
 			return line
 		}

@@ -73,11 +73,19 @@ const MaxSyncBodyBytes = 256 << 10
 // the insert (the previous revision never marked stale) leaves two live
 // revisions, and the next Put — even of identical bytes — converges them.
 func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
+	return s.put(ctx, src, MaxSyncBodyBytes)
+}
+
+// put is Put with an explicit body cap; cap <= 0 means uncapped. The async job
+// path passes 0: SSOT §3.4.2 puts bodies over the synchronous cap on the Job
+// path precisely so they can be stored, so rejecting them there would make a
+// large document permanently un-ingestable.
+func (s *Store) put(ctx context.Context, src source.Source, capBytes int) (Result, error) {
 	if src.Body == "" {
 		return Result{}, fmt.Errorf("ingest: body is required")
 	}
-	if len(src.Body) > MaxSyncBodyBytes {
-		return Result{}, fmt.Errorf("ingest: body is %d bytes, over the %d synchronous cap — use ingest-files or the serve job path", len(src.Body), MaxSyncBodyBytes)
+	if capBytes > 0 && len(src.Body) > capBytes {
+		return Result{}, fmt.Errorf("ingest: body is %d bytes, over the %d synchronous cap — use ingest-files or the serve job path", len(src.Body), capBytes)
 	}
 	now := time.Now().UTC()
 	src.Digest = source.Digest(src.Body)
@@ -492,18 +500,63 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 // (emerging) — the reconcile-side trigger for the re-validation. It reports
 // both the count and the error: swallowing a query failure here used to be
 // indistinguishable from "there were no clusters to mark".
+//
+// Anchoring has two shapes and both must count (SSOT §3.4.3: "依赖其的簇
+// lifecycle→emerging 待复核"):
+//
+//   - the cluster's own source_id (the answer it was built from);
+//   - any embedded evidence window pointing at the retired document. A
+//     cluster folded by tidy/merge keeps only the WINNER's source_id while
+//     still citing the loser's evidence, so matching source_id alone left
+//     folded clusters looking fresh forever.
 func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error) {
-	res, err := s.c.Query(ctx, s.clusters, contract.Query{
-		Filter: map[string]any{"source_id": docID},
-		Limit:  1000,
-	})
-	if err != nil {
-		return 0, err
+	anchored := map[string]bool{}
+	// Shape 1: the cluster's own answer source.
+	for skip := 0; ; skip += 1000 {
+		res, err := s.c.Query(ctx, s.clusters, contract.Query{
+			Filter: map[string]any{"source_id": docID},
+			Limit:  1000, Skip: skip,
+		})
+		if err != nil {
+			return 0, err
+		}
+		for _, d := range res.Documents {
+			if id, _ := d["_id"].(string); id != "" {
+				anchored[id] = true
+			}
+		}
+		if len(res.Documents) < 1000 {
+			break
+		}
+	}
+	// Shape 2: any evidence window that cites the retired document. The whole
+	// collection is scanned (clusters ≤10³ per the scale assumption) because
+	// the filter would have to reach into an array field.
+	for skip := 0; ; skip += 1000 {
+		res, err := s.c.Query(ctx, s.clusters, contract.Query{Limit: 1000, Skip: skip})
+		if err != nil {
+			return 0, err
+		}
+		for _, d := range res.Documents {
+			id, _ := d["_id"].(string)
+			if id == "" || anchored[id] {
+				continue
+			}
+			if evidenceCitesDoc(d, docID) {
+				anchored[id] = true
+			}
+		}
+		if len(res.Documents) < 1000 {
+			break
+		}
 	}
 	marked := 0
-	for _, d := range res.Documents {
-		id, _ := d["_id"].(string)
-		if id == "" || d["lifecycle"] == "emerging" {
+	for id := range anchored {
+		d, err := s.c.GetDocument(ctx, s.clusters, id)
+		if err != nil || d == nil {
+			continue
+		}
+		if d["lifecycle"] == "emerging" {
 			continue
 		}
 		if _, err := s.c.PatchDocument(ctx, s.clusters, id, map[string]any{
@@ -514,6 +567,25 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error
 		marked++
 	}
 	return marked, nil
+}
+
+// evidenceCitesDoc reports whether a cluster document's embedded evidence
+// array holds a window whose source is docID.
+func evidenceCitesDoc(clusterDoc map[string]any, docID string) bool {
+	raw, ok := clusterDoc["evidence"].([]any)
+	if !ok {
+		return false
+	}
+	for _, e := range raw {
+		sm, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if src, _ := sm["source"].(string); src == docID {
+			return true
+		}
+	}
+	return false
 }
 
 // Reclaim physically removes retired sources ("保留是决策不是副作用"):
@@ -684,14 +756,22 @@ const jobCursorSuffix = ":cursor"
 
 // JobDoc is the async-ingest state-machine state under KV clus:job:<name>.
 type JobDoc struct {
-	Job     string `json:"job"`
-	State   string `json:"state"` // queued | running | done | failed
-	Phase   string `json:"phase"` // extracting | normalizing | upserting
-	Total   int    `json:"total"`
-	Done    int    `json:"done"`
-	Failed  int    `json:"failed"`
-	Error   string `json:"error,omitempty"`
-	Updated string `json:"updated"`
+	Job    string `json:"job"`
+	State  string `json:"state"` // queued | running | done | failed
+	Phase  string `json:"phase"` // extracting | normalizing | upserting
+	Total  int    `json:"total"`
+	Done   int    `json:"done"`
+	Failed int    `json:"failed"`
+	// Skipped counts files the run deliberately did not store (unreadable,
+	// unextractable, empty after extraction). The job CONTINUES past them:
+	// one bad file must not strand the rest of a directory (and a resumed
+	// run must not re-fail on it forever). SkipReasons makes the accounting
+	// auditable, mirroring the scan face's `skipped` map (P9: 跳过文件不入库，
+	// skipped 账可查).
+	Skipped     int            `json:"skipped,omitempty"`
+	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Updated     string         `json:"updated"`
 }
 
 // PutJobDoc writes the job state (KV mirror of the resumable cursor).
@@ -738,6 +818,13 @@ func walkIngestable(dir string, recursive bool) ([]string, error) {
 			}
 			return nil
 		}
+		name := d.Name()
+		// Same rule as the P9 scan face (ingest/scan.go): dotfiles and editor
+		// backups are not corpus. The two walkers disagreed before, so the
+		// scan preview showed a file the directory walk would never ingest.
+		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, "~") {
+			return nil
+		}
 		switch strings.ToLower(filepath.Ext(p)) {
 		case ".md", ".txt", ".html", ".htm", ".docx", ".pdf":
 			files = append(files, p)
@@ -769,25 +856,75 @@ func (s *Store) IngestCandidates(ctx context.Context, paths []string, jobKey str
 	}
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
-	return s.ingestFileList(ctx, "", sorted, jobKey)
+	// A candidate list has no single walk root, so keying by base name would
+	// collapse a/readme.md and b/readme.md onto ONE business identity — the
+	// second silently superseding the first as a new revision. Key relative to
+	// the longest shared directory instead (which also makes scan→ingest
+	// produce the same identities as ingesting that directory directly), and
+	// fall back to the full path when the list shares no root.
+	return s.ingestFileList(ctx, commonRoot(sorted), sorted, jobKey)
+}
+
+// commonRoot is the longest directory shared by every path, or "" when they
+// share none (mixed relative/absolute, or siblings). Segment-wise, so a shared
+// name prefix that is not a directory boundary cannot produce a wrong root.
+func commonRoot(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	seg := func(p string) []string {
+		return strings.Split(filepath.ToSlash(filepath.Dir(filepath.Clean(p))), "/")
+	}
+	root := seg(paths[0])
+	for _, p := range paths[1:] {
+		d := seg(p)
+		n := len(root)
+		if len(d) < n {
+			n = len(d)
+		}
+		i := 0
+		for i < n && root[i] == d[i] {
+			i++
+		}
+		root = root[:i]
+		if len(root) == 0 {
+			return ""
+		}
+	}
+	if len(root) == 0 {
+		return ""
+	}
+	// A lone empty segment means the paths share only the leading separator
+	// (/xab/a.md vs /x/c.md): their common ancestor is the filesystem root,
+	// which is still a usable key base — better than falling back to full
+	// paths for every absolute candidate list.
+	if strings.Join(root, "/") == "" {
+		return filepath.FromSlash("/")
+	}
+	return filepath.FromSlash(strings.Join(root, "/"))
 }
 
 // relKey is the source's business key: walk-relative when dir is the walk
-// root, base name otherwise (candidate lists have no common root).
+// root, the cleaned full path otherwise (candidate lists with no shared root).
+// It is never the base name alone — that collides across directories.
 func relKey(dir, p string) string {
-	if dir == "" {
-		return filepath.Base(p)
+	clean := filepath.Clean(p)
+	if dir != "" {
+		if rel, err := filepath.Rel(dir, clean); err == nil &&
+			rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(rel)
+		}
 	}
-	rel, err := filepath.Rel(dir, p)
-	if err != nil {
-		return filepath.Base(p)
-	}
-	return rel
+	return filepath.ToSlash(clean)
 }
 
 // ingestFileList runs the job state machine over an explicit file list. dir
-// is the walk root ("" for candidate lists): it only shapes the source key,
-// which falls back to the base name.
+// is the walk root (or the candidates' common root): it only shapes the source
+// key. A file that cannot be READ or yields no text is skipped with an
+// auditable reason and the cursor advances past it — one unreadable or
+// unextractable file must not strand the rest of the directory, and a resumed
+// run must not re-fail on it forever (P9: skipped 账可查). Only a store-level
+// failure (the engine refusing the upsert) fails the job.
 func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string) (int, error) {
 	if jobKey == "" {
 		jobKey = "files"
@@ -799,19 +936,45 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			start = n
 		}
 	}
-	_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-		State: "running", Phase: "extracting", Total: len(files), Done: start,
-	})
-	done := 0
+	skip := map[string]int{}
+	ingested, skipped := 0, 0
+	bump := func(reason string) {
+		skip[reason]++
+		skipped++
+	}
+	// Done counts files PROCESSED (stored + skipped) so progress reaches
+	// Total; Skipped is the subset deliberately not stored.
+	progress := func(phase string) {
+		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
+			State: "running", Phase: phase, Total: len(files),
+			Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
+		})
+	}
+	fail := func(phase string, err error) error {
+		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
+			State: "failed", Phase: phase, Total: len(files),
+			Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
+			Error: err.Error(),
+		})
+		return err
+	}
+	// advance persists the cursor past file i so a resumed run never re-visits
+	// it — including files that were skipped.
+	advance := func(i int) error {
+		return s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0)
+	}
+	progress("extracting")
 	for i := start; i < len(files); i++ {
 		p := files[i]
 		raw, err := os.ReadFile(p)
 		if err != nil {
-			_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-				State: "failed", Phase: "extracting", Total: len(files),
-				Done: start + done, Failed: 1, Error: err.Error(),
-			})
-			return done, err
+			// Unreadable (permissions, vanished mid-run): record and move on.
+			bump("unreadable")
+			if cerr := advance(i); cerr != nil {
+				return ingested, cerr
+			}
+			progress("extracting")
+			continue
 		}
 		ext := strings.ToLower(filepath.Ext(p))
 		typ := "md"
@@ -826,43 +989,51 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			typ = "docx"
 			docxText, derr := ExtractDOCX(raw)
 			if derr != nil {
-				_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-					State: "failed", Phase: "extracting", Total: len(files),
-					Done: start + done, Failed: 1, Error: derr.Error(),
-				})
-				return done, fmt.Errorf("file %s: %w", p, derr)
+				// Unsupported/corrupt container: skip it, never poison the job.
+				bump("extract_failed")
+				if cerr := advance(i); cerr != nil {
+					return ingested, cerr
+				}
+				progress("extracting")
+				continue
 			}
 			text = docxText
 		case ".pdf":
 			typ = "pdf"
 			text = ExtractPDF(raw)
 		}
-		rel := relKey(dir, p)
-		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "running", Phase: "normalizing", Total: len(files), Done: start + done,
-		})
-		src := source.New(filepath.Base(p), typ, "file://"+p, filepath.ToSlash(rel), "zh", text, nil)
-		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "running", Phase: "upserting", Total: len(files), Done: start + done,
-		})
-		if _, err := s.Put(ctx, src); err != nil {
-			_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-				State: "failed", Phase: "upserting", Total: len(files),
-				Done: start + done, Failed: 1, Error: err.Error(),
-			})
-			return done, fmt.Errorf("file %s: %w", p, err)
+		if strings.TrimSpace(text) == "" {
+			// Encrypted/CID-font PDFs and markup with no text yield nothing.
+			// There is no L0 contract to store, so the file is skipped.
+			bump("empty")
+			if cerr := advance(i); cerr != nil {
+				return ingested, cerr
+			}
+			progress("normalizing")
+			continue
 		}
-		done++
-		if err := s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0); err != nil {
-			return done, err
+		rel := relKey(dir, p)
+		progress("normalizing")
+		src := source.New(filepath.Base(p), typ, "file://"+p, filepath.ToSlash(rel), "zh", text, nil)
+		progress("upserting")
+		// The async job path stores whatever it extracted: the 256 KiB cap
+		// exists to keep a SYNCHRONOUS request from blocking, and SSOT §3.4.2
+		// sends over-cap bodies here precisely so they can be stored.
+		if _, err := s.put(ctx, src, 0); err != nil {
+			return ingested, fail("upserting", fmt.Errorf("file %s: %w", p, err))
+		}
+		ingested++
+		if err := advance(i); err != nil {
+			return ingested, err
 		}
 	}
 	if err := s.PutJobDoc(ctx, jobKey, JobDoc{
-		State: "done", Phase: "upserting", Total: len(files), Done: start + done,
+		State: "done", Phase: "upserting", Total: len(files),
+		Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
 	}); err != nil {
-		return done, err
+		return ingested, err
 	}
-	return done, nil
+	return ingested, nil
 }
 
 // MapSpec is the declarative Path B mapping (ingest-jsonl --map): body/title/

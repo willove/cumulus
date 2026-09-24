@@ -43,13 +43,21 @@ func (s *CumuCiteStore) SaveCite(ctx context.Context, clusterID, sourceID string
 	return err
 }
 
-// List returns all cite edges (read face for CLI/assertions).
+// List returns all cite edges (read face for CLI/assertions). Paginated: a
+// single hardcoded page silently truncated the evidence-edge read face.
 func (s *CumuCiteStore) List(ctx context.Context) ([]map[string]any, error) {
-	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
-	if err != nil {
-		return nil, err
+	const page = 1000
+	var out []map[string]any
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: page, Skip: skip})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res.Documents...)
+		if len(res.Documents) < page {
+			return out, nil
+		}
 	}
-	return res.Documents, nil
 }
 
 // CumuStore persists conflict edges in a store collection (clus_conflicts).
@@ -100,22 +108,26 @@ func (s *CumuStore) Between(ctx context.Context, a, b string) ([]Conflict, error
 }
 
 func (s *CumuStore) All(ctx context.Context) ([]Conflict, error) {
-	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Conflict, 0, len(res.Documents))
-	for _, d := range res.Documents {
-		c := Conflict{
-			ID:     str(d["_id"]),
-			A:      str(d["a"]),
-			B:      str(d["b"]),
-			Group:  str(d["group"]),
-			Reason: str(d["reason"]),
+	const page = 1000
+	out := make([]Conflict, 0)
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: page, Skip: skip})
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, c)
+		for _, d := range res.Documents {
+			out = append(out, Conflict{
+				ID:     str(d["_id"]),
+				A:      str(d["a"]),
+				B:      str(d["b"]),
+				Group:  str(d["group"]),
+				Reason: str(d["reason"]),
+			})
+		}
+		if len(res.Documents) < page {
+			return out, nil
+		}
 	}
-	return out, nil
 }
 
 func str(v any) string {

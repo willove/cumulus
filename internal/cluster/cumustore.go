@@ -101,20 +101,29 @@ func (s *CumuStore) FindByTopic(ctx context.Context, topicKey string) ([]Cluster
 	return out, nil
 }
 
+// All returns every cluster in the collection, paginated. The limit used to be
+// a hardcoded 1000 — exactly the design's scale ceiling (clusters ≤10³) — so a
+// full population silently truncated and maintenance faces (tidy, embed_sim
+// backfill, the scoreboard) operated on a partial view.
 func (s *CumuStore) All(ctx context.Context) ([]Cluster, error) {
-	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Cluster, 0, len(res.Documents))
-	for _, d := range res.Documents {
-		c, err := fromDoc(d)
+	const page = 1000
+	var out []Cluster
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: page, Skip: skip})
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *c)
+		for _, d := range res.Documents {
+			c, err := fromDoc(d)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, *c)
+		}
+		if len(res.Documents) < page {
+			return out, nil
+		}
 	}
-	return out, nil
 }
 
 func (s *CumuStore) Delete(ctx context.Context, id string) error {
