@@ -16,7 +16,17 @@ set -u
 cd "$(dirname "$0")/.."
 # The gates are offline-stub territory: never let a developer's .env route
 # them at a live model (each search would cost real tokens and flake).
+# Two layers, because either alone leaks: CLUS_ENV=/dev/null stops the suite
+# .env, but the operator convention ALSO exports LLM_BASE_URL/LLM_API_KEY/
+# LLM_MODEL_NAME straight into the shell (see .env.example) — applyLLMAliases
+# would promote those to AIGATE_* and every search would hit a live endpoint
+# (observed: 153 assertions collapsed to 72 ok / 81 fail on a 401). So unset
+# the ambient vars AND pin CLUS_OFFLINE, which the binary honors regardless.
 export CLUS_ENV=/dev/null
+export CLUS_OFFLINE=1
+unset LLM_BASE_URL LLM_API_KEY LLM_MODEL_NAME
+unset AIGATE_BASE_URL AIGATE_API_KEY AIGATE_CHAT_MODEL AIGATE_EMBED_MODEL AIGATE_REASONING_SPLIT
+unset CLUS_EMBED CLUS_MINILM_REQUIRE
 WORK="$(mktemp -d)"
 DATA="$WORK/data"
 SERVE_PID=""

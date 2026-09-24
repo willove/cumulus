@@ -71,14 +71,18 @@ Env:
   AIGATE_EMBED_MODEL embedder model; unset = offline Local embedder even when AIGATE_BASE_URL is set
   AIGATE_REASONING_SPLIT 1/0 force MiniMax reasoning_split (default: auto on minimaxi.com hosts)
   CLUS_ENV            path to the suite's .env (default ./.env); LLM_* keys alias onto AIGATE_*
+  CLUS_OFFLINE        1 = pin the offline stubs (no chat client, no remote embedder) even when an
+                      endpoint is configured — gate harnesses use this so a developer's ambient
+                      LLM_BASE_URL/AIGATE_* cannot route deterministic gates at a live model
+  CLUS_MCS_WINDOW / _SAMPLES_PER_ROUND / _ROUNDS / _TOP_SEEDS / _SIGMA /
+  CLUS_MCS_SMALL_FILE / _MAX_EVIDENCE
+                      Monte-Carlo sampler overrides (SSOT 3.3 参数配置驱动)；缺省用内置默认值
   CLUS_FSYNC          1 = fsync every transaction (default off; measured +0.05 ms/txn —
                      only machine crash needs it, process death does not)
 `
 
 func main() {
 	args := os.Args[1:]
-	// Per-suite endpoint config: ./.env (or $CLUS_ENV), operator's LLM_*
-	// convention aliased onto AIGATE_*. Already-set env always wins.
 	// Per-suite endpoint config: ./.env (or $CLUS_ENV), operator's LLM_*
 	// convention aliased onto AIGATE_*. Already-set env always wins.
 	if err := loadDotEnv(); err != nil {
@@ -723,6 +727,9 @@ func main() {
 func embedderFor() (ingest.EmbedderFn, int, string, error) {
 	// 纯 Go MiniLM：CLUS_EMBED=minilm 显式开启；权重直接
 	// 复用 Sirchmunk 的模型缓存，向量空间与其语义缓存索引一致（384 维）。
+	// CLUS_OFFLINE does NOT suppress this seat: the weights are a local file,
+	// so an offline gate can still exercise (and strictly fail on) them — only
+	// the remote aigate embedder below is pinned off.
 	if os.Getenv("CLUS_EMBED") == "minilm" {
 		emb, err := minilm.Resolve()
 		if err != nil {
@@ -735,7 +742,7 @@ func embedderFor() (ingest.EmbedderFn, int, string, error) {
 			fmt.Fprintln(os.Stderr, "[embedderFor] CLUS_EMBED=minilm 但权重缺席——退回 local-hash-64（语料向量降级）")
 		}
 	}
-	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" {
+	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" && !offlineForced() {
 		fe := &llm.AigateEmbedder{
 			BaseURL: base,
 			APIKey:  os.Getenv("AIGATE_API_KEY"),

@@ -77,6 +77,17 @@ func loadDotEnv() error {
 	return nil
 }
 
+// offlineForced reports whether this process is pinned to the offline stubs
+// (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_BASE_URL / AIGATE_*
+// in the developer's shell — the documented operator convention — cannot route
+// deterministic gates at a live endpoint: each search would spend real tokens
+// and the assertions would flake (D6: mechanism gates must be reproducible).
+// It only ever removes collaborators; it never invents an endpoint.
+func offlineForced() bool {
+	v := strings.TrimSpace(os.Getenv("CLUS_OFFLINE"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 // applyLLMAliases maps the operator's LLM_* convention onto the suite's
 // AIGATE_* variables (AIGATE_* wins if both are present).
 func applyLLMAliases() {

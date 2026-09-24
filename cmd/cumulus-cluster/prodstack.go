@@ -60,7 +60,9 @@ func newProdStack() prodStack {
 		fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=%s\n", cacheEmbedder)
 	}
 	base := os.Getenv("AIGATE_BASE_URL")
-	if base == "" {
+	if base == "" || offlineForced() {
+		// CLUS_OFFLINE=1 pins the offline stubs even with an endpoint
+		// configured — gate harnesses must not reach a live model.
 		return ps
 	}
 	split := strings.Contains(strings.ToLower(base), "minimaxi.com")
