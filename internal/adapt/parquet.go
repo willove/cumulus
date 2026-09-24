@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/parquet-go/parquet-go"
 )
@@ -25,6 +26,32 @@ const parquetMagic = "PAR1"
 // looksLikeParquet reports whether a sniffed prefix is a parquet file.
 func looksLikeParquet(prefix []byte) bool {
 	return len(prefix) >= 4 && string(prefix[:4]) == parquetMagic
+}
+
+// parquetSchema returns the file's column names and its row count, reading only
+// the footer metadata — no row data is materialised.
+func parquetSchema(ctx context.Context, path string) (cols []string, rows int64, err error) {
+	_ = ctx
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer fh.Close()
+	st, err := fh.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	pf, err := parquet.OpenFile(fh, st.Size())
+	if err != nil {
+		return nil, 0, err
+	}
+	fields := pf.Schema().Fields()
+	cols = make([]string, 0, len(fields))
+	for _, c := range fields {
+		cols = append(cols, c.Name())
+	}
+	sort.Strings(cols)
+	return cols, pf.NumRows(), nil
 }
 
 // StreamParquetFile adapts one parquet file. It needs a real path (the reader

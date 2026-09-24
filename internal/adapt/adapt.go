@@ -48,6 +48,7 @@ const (
 	KindJSONObject Kind = "json-object" // a single object; one document
 	KindCSV        Kind = "csv"
 	KindText       Kind = "text"
+	KindParquet    Kind = "parquet"
 	KindUnknown    Kind = "unknown"
 )
 
@@ -250,8 +251,12 @@ func streamCSV(ctx context.Context, r io.Reader, f Fields, emit func(Doc) error)
 	idCol, titleCol, textCol := csvColumns(cols, f, sample)
 	src := r
 	if len(sample) > 0 {
+		// Re-chain header + sampled rows in front of the remainder. The header
+		// MUST go back: the replacement reader would otherwise consume the
+		// first data row as a header and silently drop that record.
 		var buf strings.Builder
 		cw := csv.NewWriter(&buf)
+		_ = cw.Write(cols)
 		for _, row := range sample {
 			_ = cw.Write(row)
 		}
@@ -261,6 +266,10 @@ func streamCSV(ctx context.Context, r io.Reader, f Fields, emit func(Doc) error)
 	cr = csv.NewReader(src)
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
+	// Consume the header we wrote back, so it is not emitted as a document.
+	if _, herr := cr.Read(); herr != nil {
+		return fmt.Errorf("adapt: csv re-read header: %w", herr)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -384,6 +393,14 @@ func docFrom(raw map[string]any, f Fields) (Doc, bool) {
 		return Doc{}, false
 	}
 	bodyKey, titleKey := f.Body, f.Title
+	if bodyKey != "" && !hasKey(raw, bodyKey) {
+		// An explicitly named field this record does not carry: fall back to
+		// autodetect rather than dropping the record. One field map is
+		// routinely applied to files of different shapes, and silently
+		// discarding a whole file's records is the worst outcome — invisible in
+		// the job summary and only discoverable from missing search hits.
+		bodyKey = ""
+	}
 	if bodyKey == "" {
 		bodyKey = autodetectBody(raw)
 		// Reranking triples carry both the relevant passage and a distractor.
@@ -398,6 +415,9 @@ func docFrom(raw map[string]any, f Fields) (Doc, bool) {
 	if strings.TrimSpace(body) == "" {
 		return Doc{}, false // nothing to index; not an error
 	}
+	if titleKey != "" && !hasKey(raw, titleKey) {
+		titleKey = ""
+	}
 	if titleKey == "" {
 		titleKey = autodetectTitle(raw, bodyKey)
 	}
@@ -405,7 +425,11 @@ func docFrom(raw map[string]any, f Fields) (Doc, bool) {
 	if title == "" {
 		title = fallbackTitle(body)
 	}
-	key := strings.TrimSpace(flatten(raw[f.ID]))
+	idKey := f.ID
+	if idKey != "" && !hasKey(raw, idKey) {
+		idKey = ""
+	}
+	key := strings.TrimSpace(flatten(raw[idKey]))
 	if key == "" {
 		// Stable identity, unique per record, so re-ingesting the same file is
 		// idempotent and two records never collapse onto one business key.
@@ -417,8 +441,8 @@ func docFrom(raw map[string]any, f Fields) (Doc, bool) {
 			meta[k] = v
 		}
 	}
-	if f.ID != "" {
-		meta[f.ID] = raw[f.ID]
+	if idKey != "" {
+		meta[idKey] = raw[idKey]
 	}
 	return Doc{Key: key, Title: title, Body: body, Meta: meta}, true
 }
@@ -468,7 +492,7 @@ func flatten(v any) string {
 	}
 }
 
-var bodyKeys = []string{"content", "body", "text", "contentText", "content_text", "paragraphs", "article", "passage"}
+var bodyKeys = []string{"content", "body", "text", "contentText", "content_text", "paragraphs", "messages", "conversation", "article", "passage"}
 var titleKeys = []string{"title", "subtitle", "subTitle", "name", "heading", "chapter", "author", "query", "question"}
 
 // hasKey reports whether a record carries a non-empty value under key.
@@ -533,7 +557,7 @@ func autodetectTitle(raw map[string]any, bodyKey string) string {
 // key. Picking "the alphabetically first short field" collided badly: every
 // People's-Daily record shares dataTime, so 34,376 articles would have collapsed
 // onto one business identity and evicted each other as revisions.
-var idKeys = []string{"id", "_id", "key", "doc_id", "uuid", "url", "link", "slug"}
+var idKeys = []string{"id", "_id", "key", "doc_id", "text_id", "corpus_id", "uuid", "url", "link", "slug"}
 
 // firstNonEmptyKey derives a stable per-record identity. An explicit id-ish
 // field wins; otherwise the title plus a digest of the body, which is unique

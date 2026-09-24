@@ -167,6 +167,73 @@ async function loadMonitor() {
   monBusy.value = false;
 }
 
+// 适配器摄取（json/jsonl/csv/parquet）：探测容器与字段 → 选映射 → 提交。
+const adPaths = ref("");
+const adBusy = ref(false);
+const adProbes = ref([]);
+const adMeta = ref("");
+const adMap = ref({ id: "", title: "", body: "", extra: "" });
+const adJob = ref("");
+
+function adFileList() {
+  return adPaths.value.split("\n").map((x) => x.trim()).filter((x) => x);
+}
+
+async function runAdaptProbe() {
+  const paths = adFileList();
+  if (!paths.length) { adMeta.value = "请先填写文件路径（每行一个）"; return; }
+  adBusy.value = true; adMeta.value = "探测中……";
+  try {
+    const r = await fetch("/v1/adapt/probe", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
+    adProbes.value = d.probes || [];
+    const bad = d.failed || [];
+    // 预填建议映射：取第一个 probe 的 bodyish/titleish/idish 首项。
+    const p = adProbes.value[0];
+    if (p) {
+      adMap.value = {
+        id: (p.idish || [])[0] || "",
+        title: (p.titleish || [])[0] || "",
+        body: (p.bodyish || [])[0] || "",
+        extra: "",
+      };
+    }
+    adMeta.value = "探测到 " + adProbes.value.length + " 个文件"
+      + (bad.length ? " · " + bad.length + " 个读取失败" : "")
+      + (p && p.note ? " · " + p.note : "");
+  } catch (e) { adMeta.value = "出错：" + e.message; adProbes.value = []; }
+  adBusy.value = false;
+}
+
+async function submitAdapt() {
+  const paths = adFileList();
+  if (!paths.length) { adMeta.value = "请先填写文件路径"; return; }
+  if (!nsSel.value) { adMeta.value = "请先选择 bucket（右上角命名空间）"; return; }
+  adBusy.value = true; adMeta.value = "提交摄取……";
+  try {
+    const r = await fetch("/v1/adapt/ingest", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        paths, ns: nsSel.value, job: adJob.value.trim() || undefined,
+        id: adMap.value.id || undefined, title: adMap.value.title || undefined,
+        body: adMap.value.body || undefined,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || "HTTP " + r.status);
+    jobs.value.unshift({ id: d.job, state: d.state || "queued", phase: "",
+      total: d.total || 0, done: 0, failed: 0, error: "", updated: "" });
+    jobCur.value = d.job;
+    adMeta.value = "已提交任务 " + d.job;
+    schedulePoll();
+  } catch (e) { adMeta.value = "出错：" + e.message; }
+  adBusy.value = false;
+}
+
 function openPane(p) {
   pane.value = p;
   if (p === "ingest") schedulePoll();
@@ -575,6 +642,42 @@ onMounted(() => { loadSessions(); loadClusters(); });
           <div v-if="scanMeta" class="meta">{{ scanMeta }}</div>
         </div>
         <div class="form">
+          <div class="ct">异构语料适配（json / jsonl / csv / parquet）</div>
+          <label>文件路径（服务器本地，每行一个）</label>
+          <textarea v-model="adPaths" rows="3" placeholder="/data/mmarco/corpus.parquet&#10;/data/news.json&#10;/data/titles.csv"></textarea>
+          <div class="srow">
+            <button class="new" :disabled="adBusy || !adPaths.trim()" @click="runAdaptProbe">
+              {{ adBusy ? "处理中……" : "① 探测字段" }}
+            </button>
+            <button class="new" :disabled="adBusy || !adProbes.length" @click="submitAdapt">
+              ② 按映射摄取
+            </button>
+          </div>
+          <div v-if="adProbes.length" class="pres">
+            <div v-for="p in adProbes" :key="p.path" class="prow">
+              <b>{{ p.path.split("/").pop() }}</b>
+              <span class="lc" :class="'st-' + p.kind">{{ p.kind }}</span>
+              <span class="sid">{{ p.records ? p.records + " 条" : "" }} · {{ fmtMB(p.bytes) }}</span>
+              <div class="flds">
+                <span v-for="f in p.fields" :key="f"
+                      :class="{ b: (p.bodyish || []).includes(f), t: (p.titleish || []).includes(f), i: (p.idish || []).includes(f) }">{{ f }}</span>
+              </div>
+              <div v-if="p.note" class="hint">{{ p.note }}</div>
+            </div>
+            <div class="maprow">
+              <label>ID 字段<input v-model="adMap.id" placeholder="自动识别" /></label>
+              <label>标题字段<input v-model="adMap.title" placeholder="自动识别" /></label>
+              <label>正文字段<input v-model="adMap.body" placeholder="自动识别（取最宽列）" /></label>
+            </div>
+            <div class="hint">蓝=正文候选 · 绿=标题候选 · 紫=身份候选。留空即用自动识别。</div>
+          </div>
+          <div class="srow">
+            <input v-model="adJob" class="num" placeholder="任务名（可选）" />
+          </div>
+          <div v-if="adMeta" class="meta">{{ adMeta }}</div>
+          <div class="hint">容器与字段自动判别（parquet 读 schema，不假设列名）；摄取走同一 Job 状态机，可断点续跑；必须指定 bucket。</div>
+        </div>
+        <div class="form">
           <label>目录（服务器本地路径）</label>
           <input v-model="ingDir" placeholder="/Users/you/documents" />
           <label class="chk"><input type="checkbox" v-model="ingRec" /> 包含子目录</label>
@@ -776,4 +879,15 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   .mtab th, .mtab td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border, #2a2f3a); }
   .mtab th { opacity: .6; font-weight: 600; }
   .body.mon { overflow: auto; }
+  .body.ing textarea { width: 100%; background: transparent; border: 1px solid var(--border, #2a2f3a); border-radius: 8px; color: inherit; font-family: ui-monospace, monospace; font-size: 12px; padding: 6px 8px; }
+  .pres { margin: 8px 0; }
+  .prow { border: 1px solid var(--border, #2a2f3a); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; }
+  .flds { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .flds span { border: 1px solid var(--border, #2a2f3a); border-radius: 999px; padding: 1px 8px; font-size: 11px; opacity: .75; }
+  .flds span.b { border-color: #3a86ff; color: #4895ef; opacity: 1; }
+  .flds span.t { border-color: #2ea043; color: #3fb950; opacity: 1; }
+  .flds span.i { border-color: #8957e2; color: #a371f7; opacity: 1; }
+  .maprow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .maprow label { font-size: 11px; display: flex; flex-direction: column; gap: 2px; }
+  .maprow input { width: 130px; background: transparent; border: 1px solid var(--border, #2a2f3a); border-radius: 6px; color: inherit; font-size: 12px; padding: 3px 6px; }
 </style>

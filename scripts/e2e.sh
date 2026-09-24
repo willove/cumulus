@@ -1001,6 +1001,74 @@ assert "200" in blob, blob[:120]
 print("ok")' ; check "scan→ingest: a scanned candidate answers from the corpus" $?
 kill "$SERVE4_PID" 2>/dev/null
 
+# --- Gate AC: adapt face (heterogeneous corpora) ------------------------------
+# 探测容器+字段 → 带映射摄取 → 同一 Job 状态机。夹具就地构造：一个 jsonl、一个
+# csv、一个 pretty JSON 数组，覆盖三种容器判别与字段自动识别。
+AD="$WORK/adapt"; mkdir -p "$AD"
+printf '{"title":"适配器手册","content":"连接池最大 256，超时 45 秒。","id":"ad1"}\n' > "$AD/a.jsonl"
+printf 'text_id,text\n1,红棉优级小粒老黄冰糖1.2kg大罐\n2,异形魔方顺滑风火轮移棱\n' > "$AD/titles.csv"
+printf '[{"chapter":"章一","paragraphs":["第一段文字。","第二段文字。"]}]\n' > "$AD/book.json"
+SPORT6="${E2E_SERVE_PORT6:-8604}"
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT6" >"$WORK/serve6.log" 2>&1 &
+SERVE6_PID=$!
+SRV6=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT6/health" >/dev/null 2>&1 && { SRV6=1; break; }
+	sleep 0.2
+done
+[ "$SRV6" = "1" ] ; check "adapt: serve comes up for the adapt face" $?
+curl -fsS -X POST "http://127.0.0.1:$SPORT6/v1/buckets" -d '{"name":"adaptgate","note":"adapt e2e"}' >/dev/null
+ADPROBE="$(curl -fsS -X POST "http://127.0.0.1:$SPORT6/v1/adapt/probe" -d "{\"paths\":[\"$AD/a.jsonl\",\"$AD/titles.csv\",\"$AD/book.json\"]}")"
+echo "$ADPROBE" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); ps=r["probes"]
+assert not r.get("failed"), r.get("failed")
+kinds={p["kind"] for p in ps}
+assert kinds=={"jsonl","csv","json-array"}, kinds
+byk={p["kind"]:p for p in ps}
+assert byk["jsonl"]["bodyish"]==["content"], byk["jsonl"]
+assert byk["jsonl"]["idish"]==["id"], byk["jsonl"]
+assert byk["jsonl"]["titleish"]==["title"], byk["jsonl"]
+assert "text_id" in byk["csv"]["idish"], byk["csv"]
+assert "text" in byk["csv"]["bodyish"], byk["csv"]
+assert "paragraphs" in byk["json-array"]["bodyish"], byk["json-array"]
+print("ok")' ; check "adapt: probe reports container + fields for three shapes" $?
+ADBAD="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT6/v1/adapt/ingest" -d "{\"paths\":[\"$AD/a.jsonl\"]}")"
+[ "$ADBAD" = "400" ] ; check "adapt: ingest without a bucket is refused (400)" $?
+ADUNREG="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT6/v1/adapt/ingest" -d "{\"paths\":[\"$AD/a.jsonl\"],\"ns\":\"not-a-bucket\"}")"
+[ "$ADUNREG" = "400" ] ; check "adapt: ingest into an unregistered bucket is refused (400)" $?
+ADJOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT6/v1/adapt/ingest" -d "{\"paths\":[\"$AD/a.jsonl\",\"$AD/titles.csv\",\"$AD/book.json\"],\"ns\":\"adaptgate\",\"job\":\"adaptjob\",\"id\":\"id\",\"title\":\"title\",\"body\":\"content\"}")"
+echo "$ADJOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("ns")=="adaptgate", r' ; check "adapt: mapped ingest queues a job" $?
+ADDONE=0
+for _ in $(seq 1 50); do
+	ADST="$(curl -fsS "http://127.0.0.1:$SPORT6/v1/ingest/jobs/adaptjob?ns=adaptgate" 2>/dev/null || true)"
+	echo "$ADST" | grep -q '"state":"done"' && { ADDONE=1; break; }
+	sleep 0.2
+done
+[ "$ADDONE" = "1" ] ; check "adapt: the job tracks to done" $?
+echo "$ADST" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["total"]==3 and d["done"]==3, d
+# 1 jsonl + 2 csv + 1 json-array record = 4 documents
+assert d.get("records")==4, d
+print("ok")' ; check "adapt: job accounts files and records in separate units" $?
+ADSRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT6/v1/search" -d '{"query":"连接池最大是多少","ns":"adaptgate"}')"
+echo "$ADSRC" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r.get("answer") or {}
+blob="".join(s.get("content","") for s in a.get("samples") or [])
+assert "256" in blob, blob[:160]
+print("ok")' ; check "adapt: an adapted jsonl record answers from the corpus" $?
+ADCSV="$(curl -fsS -X POST "http://127.0.0.1:$SPORT6/v1/search" -d '{"query":"黄冰糖","ns":"adaptgate"}')"
+echo "$ADCSV" | python3 -c '
+import json,sys
+r=json.load(sys.stdin); a=r.get("answer") or {}
+blob="".join(s.get("content","") for s in a.get("samples") or [])
+assert "黄冰糖" in blob, blob[:160]
+print("ok")' ; check "adapt: an adapted csv row answers from the corpus" $?
+kill "$SERVE6_PID" 2>/dev/null
+
 # --- Gate BB: eval scoreboard face (B3) ---------------------------------------
 # eval-run (Gate O, CLI) persists its aggregate into clus_evals; the
 # workbench 评测 pane reads it back here. Read-only face — triggering a run

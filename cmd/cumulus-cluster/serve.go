@@ -133,6 +133,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	registerClusterFace(mux, c, serveNS)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
 	registerScanFace(mux, serveNS)
+	registerAdaptFace(mux, c, st, sourcesColl, serveNS, ensure, buckets)
 	registerEvalFace(mux, c, serveNS)
 	registerModelFace(mux)
 	logModelReminder()

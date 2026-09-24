@@ -267,3 +267,65 @@ func TestParquetSchemaAutodetect(t *testing.T) {
 		t.Fatalf("the query is the natural title: %+v", d2)
 	}
 }
+
+// The width sampler re-chains the sampled rows in front of the remainder. The
+// header has to go back with them, or the replacement reader eats the first
+// data row as a header and that record is silently lost — which a 1M-row corpus
+// would not notice.
+func TestCSVFirstRowSurvivesSampling(t *testing.T) {
+	var lines []string
+	lines = append(lines, "text_id,text")
+	for i := 1; i <= 300; i++ { // more than the 200-row sample
+		lines = append(lines, itoa(i)+",商品标题 "+itoa(i))
+	}
+	in := strings.Join(lines, "\n") + "\n"
+	got := collect(t, "c.csv", in, Fields{})
+	if len(got) != 300 {
+		t.Fatalf("got %d rows, want 300 — the first data row was eaten as a header", len(got))
+	}
+	if got[0].Key != "1" || got[0].Body != "商品标题 1" {
+		t.Fatalf("first row wrong: %+v", got[0])
+	}
+	if got[299].Key != "300" {
+		t.Fatalf("last row wrong: %+v", got[299])
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+// An explicitly named field a record does not carry must fall back to
+// autodetect, not silently drop the record. One field map is routinely applied
+// to files with different shapes (jsonl with content/, csv with text,
+// poetry with paragraphs), and losing a whole file's records is invisible.
+func TestExplicitFieldAbsentFallsBack(t *testing.T) {
+	// jsonl carries content/title/id
+	got := collect(t, "a.jsonl", `{"title":"T","content":"正文","id":"1"}`, Fields{ID: "id", Title: "title", Body: "content"})
+	if len(got) != 1 || got[0].Body != "正文" || got[0].Key != "1" {
+		t.Fatalf("explicit map must be honoured when present: %+v", got)
+	}
+	// The array shape has no content field at all: it must still produce a doc.
+	got2 := collect(t, "b.json", `[{"chapter":"章一","paragraphs":["第一段。","第二段。"]}]`,
+		Fields{ID: "id", Title: "title", Body: "content"})
+	if len(got2) != 1 {
+		t.Fatalf("a record without the named field must not be dropped: %+v", got2)
+	}
+	if !strings.Contains(got2[0].Body, "第一段。") {
+		t.Fatalf("autodetect fallback should read paragraphs: %q", got2[0].Body)
+	}
+	if got2[0].Title != "章一" {
+		t.Fatalf("title should autodetect to the chapter: %+v", got2[0])
+	}
+	if got2[0].Key == "" || got2[0].Key == "1" {
+		t.Fatalf("identity must be derived, not stolen from an absent field: %q", got2[0].Key)
+	}
+}
