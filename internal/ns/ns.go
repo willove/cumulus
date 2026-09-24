@@ -1,4 +1,4 @@
-// Package ns scopes the ask suite to one cumudb namespace. The engine's
+// Package ns scopes the ask suite to one store namespace. The engine's
 // composite collection identity ("ns:coll", NS 线) is the isolation unit:
 // a bare name is the default library and a composite identity is a separate
 // collection, never an alias. Every collection, KV job cursor and session key
@@ -35,11 +35,10 @@ func KV(namespace, key string) string {
 	return "ns:" + namespace + ":" + key
 }
 
-// Validate mirrors the engine's namespace-segment byte rules
-// (cumudb/internal/keys ValidateNamespace): 1..128 bytes, letters, digits,
-// '_', '.' and '-', no leading '_' (the engine's reserve, default library
-// only) and no leading '.' or '-'. A ':' inside would make the identity
-// triple-composite, which the engine refuses.
+// Validate keeps a namespace segment composable into an identity: 1..128
+// bytes, letters, digits, '_', '.' and '-', no leading '_' (the reserve that
+// keeps the default library's bare keys unambiguous) and no leading '.' or
+// '-'. A ':' inside would make the identity triple-composite and ambiguous.
 func Validate(namespace string) error {
 	if namespace == "" {
 		return nil // default library: nothing to validate

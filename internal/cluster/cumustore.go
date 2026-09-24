@@ -4,18 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cumubase/ask/internal/mcs"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 )
 
-// CumuStore persists clusters in a cumudb collection (default ask_clusters).
+// CumuStore persists clusters in a store collection (default ask_clusters).
 type CumuStore struct {
 	c    cumulite.Port
 	coll string
+	// mu serializes insert-or-replace against delete, so a delete can never
+	// interleave with the read-then-write pair and have a removed cluster
+	// resurrected by the write half. Callers hold kb.Engine's write lock for
+	// the fold decision; this one guards the store primitive.
+	mu sync.Mutex
 }
 
 func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
@@ -53,6 +58,8 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 		doc["key_embeds"] = c.KeyEmbeds
 	}
 	// Insert-or-replace by _id (content-stable id).
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
 		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)
 		return err
@@ -64,7 +71,7 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 func (s *CumuStore) Get(ctx context.Context, id string) (*Cluster, error) {
 	d, err := s.c.GetDocument(ctx, s.coll, id)
 	if err != nil {
-		if client.IsNotFound(err) || contract.IsNotFound(err) {
+		if contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -111,6 +118,8 @@ func (s *CumuStore) All(ctx context.Context) ([]Cluster, error) {
 }
 
 func (s *CumuStore) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	ok, err := s.c.DeleteDocument(ctx, s.coll, id)
 	if err != nil {
 		return err

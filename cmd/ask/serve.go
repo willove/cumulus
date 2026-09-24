@@ -40,7 +40,7 @@ type jobIn struct {
 // POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}) and search (POST
 // /v1/search, POST /v1/search/stream). serveNS is the default namespace for
 // every face; request bodies may override it per call.
-func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, server, sourcesColl, serveNS string, verbose bool) {
+func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, serveNS string, verbose bool) {
 	mux := http.NewServeMux()
 
 	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose)
@@ -61,7 +61,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, se
 			writeJSON(w, http.StatusBadGateway, map[string]any{"status": "upstream", "error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "cumudb": h})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "store": h})
 	})
 
 	mux.HandleFunc("/v1/ingest/sources", func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +196,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, se
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("ask serve on %s (cumudb %s)", listen, server)
+	log.Printf("ask serve on %s", listen)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}

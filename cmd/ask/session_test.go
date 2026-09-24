@@ -4,18 +4,48 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cumuport"
-	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite/contract"
 )
 
+// Turns on one session are a read-modify-write of one KV document: without the
+// face's lock, two concurrent turns both read the old message list and the
+// later save drops the other's.
+func TestConcurrentTurnsAllLand(t *testing.T) {
+	p := newTestPort()
+	st := sessionStore{c: p, ns: "alpha"}
+	ctx := context.Background()
+	const turns = 4
+	var wg sync.WaitGroup
+	for i := 0; i < turns; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := st.appendTurn(ctx, "shared", "t", fmt.Sprintf("q%d", i), fmt.Sprintf("a%d", i)); err != nil {
+				t.Errorf("appendTurn %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	d, err := st.load(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Messages) != 2*turns {
+		t.Fatalf("messages = %d, want %d — a concurrent turn was lost", len(d.Messages), 2*turns)
+	}
+}
+
+// A read that fails must never be folded into "no such session": the first
+// would silently reset a conversation, the second legitimately starts one.
 func TestSessionReadOutcomes(t *testing.T) {
 	existing := sessionDoc{
 		ID: "shared", Title: "original title", CreatedAt: 10, UpdatedAt: 20,
@@ -30,37 +60,33 @@ func TestSessionReadOutcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name   string
-		status int
-		body   string
+		name  string
+		setup func(p *testPort)
 	}{
-		{name: "existing", status: http.StatusOK, body: string(raw)},
-		{name: "absent", status: http.StatusNotFound, body: `{"error":{"code":"NOT_FOUND","message":"missing"}}`},
-		{name: "backend failure", status: http.StatusInternalServerError, body: `{"error":{"code":"INTERNAL","message":"backend unavailable"}}`},
-		{name: "malformed document", status: http.StatusOK, body: `{"id":"shared","messages":`},
+		{
+			name:  "existing",
+			setup: func(p *testPort) { p.seed("ns:alpha:ask:session:shared", string(raw)) },
+		},
+		{name: "absent"},
+		{
+			name: "read failure",
+			setup: func(p *testPort) {
+				p.OnKVGet = func(string) error { return errors.New("backend unavailable") }
+			},
+		},
+		{
+			name:  "malformed document",
+			setup: func(p *testPort) { p.seed("ns:alpha:ask:session:shared", `{"id":"shared","messages":`) },
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var writes atomic.Int32
-			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/v1/kv/ns:alpha:ask:session:shared" {
-					t.Errorf("unexpected backend path: %s", r.URL.Path)
-				}
-				switch r.Method {
-				case http.MethodGet:
-					w.WriteHeader(tc.status)
-					_, _ = io.WriteString(w, tc.body)
-				case http.MethodPut:
-					writes.Add(1)
-					w.WriteHeader(http.StatusNoContent)
-				default:
-					t.Errorf("unexpected backend method: %s", r.Method)
-					http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
-				}
-			}))
-			defer backend.Close()
-			st := sessionStore{c: cumuport.New(client.New(backend.URL)), ns: "alpha"}
+			p := newTestPort()
+			if tc.setup != nil {
+				tc.setup(p)
+			}
+			st := sessionStore{c: p, ns: "alpha"}
 			ctx := context.Background()
-			wantFailure := tc.name == "backend failure" || tc.name == "malformed document"
+			wantFailure := tc.name == "read failure" || tc.name == "malformed document"
 			checkError := func(t *testing.T, err error) {
 				t.Helper()
 				if !wantFailure {
@@ -72,19 +98,18 @@ func TestSessionReadOutcomes(t *testing.T) {
 				if err == nil {
 					t.Fatal("read failure was treated as a missing session")
 				}
-				if client.IsNotFound(err) {
+				if contract.IsNotFound(err) {
 					t.Fatalf("read failure became NotFound: %v", err)
 				}
-				if tc.name == "backend failure" {
-					var apiErr *client.APIError
-					if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError || apiErr.Message != "backend unavailable" {
-						t.Fatalf("backend error not preserved: %v", err)
+				if tc.name == "read failure" {
+					if !strings.Contains(err.Error(), "backend unavailable") {
+						t.Fatalf("store error not preserved: %v", err)
 					}
-				} else {
-					var syntaxErr *json.SyntaxError
-					if !errors.As(err, &syntaxErr) || !strings.Contains(err.Error(), "session shared:") {
-						t.Fatalf("document decode error not preserved: %v", err)
-					}
+					return
+				}
+				var syntaxErr *json.SyntaxError
+				if !errors.As(err, &syntaxErr) || !strings.Contains(err.Error(), "session shared:") {
+					t.Fatalf("document decode error not preserved: %v", err)
 				}
 			}
 
@@ -119,8 +144,8 @@ func TestSessionReadOutcomes(t *testing.T) {
 					t.Fatalf("missing history = %v, session = %+v", history, d)
 				}
 			})
-			if got := writes.Load(); got != 0 {
-				t.Fatalf("ensure/history performed %d writes", got)
+			if _, puts, _, _ := p.calls(); len(puts) != 0 {
+				t.Fatalf("ensure/history performed %d writes", len(puts))
 			}
 			t.Run("append", func(t *testing.T) {
 				d, err := st.appendTurn(ctx, "shared", "new title", "new question", "new answer")
@@ -147,12 +172,12 @@ func TestSessionReadOutcomes(t *testing.T) {
 					t.Fatalf("unexpected appended messages: %+v", last)
 				}
 			})
-			wantWrites := int32(1)
+			wantWrites := 1
 			if wantFailure {
 				wantWrites = 0
 				t.Run("POST", func(t *testing.T) {
 					mux := http.NewServeMux()
-					registerSessionFace(mux, st.c, "alpha")
+					registerSessionFace(mux, p, "alpha")
 					w := httptest.NewRecorder()
 					mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/sessions", strings.NewReader(`{"id":"shared","title":"new title"}`)))
 					if w.Code != http.StatusInternalServerError {
@@ -160,8 +185,8 @@ func TestSessionReadOutcomes(t *testing.T) {
 					}
 				})
 			}
-			if got := writes.Load(); got != wantWrites {
-				t.Errorf("writes = %d, want %d", got, wantWrites)
+			if _, puts, _, _ := p.calls(); len(puts) != wantWrites {
+				t.Errorf("writes = %d, want %d", len(puts), wantWrites)
 			}
 		})
 	}

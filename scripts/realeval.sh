@@ -13,28 +13,18 @@ set -u
 cd "$(dirname "$0")/.."
 DATA="${CNLAW_DIR:-$HOME/datasets/cn-law-rag/finetune_dataset.jsonl}"
 N="${REALEVAL_N:-30}"
-DB_PORT="${REALEVAL_PORT:-8593}"
 STATE="$(pwd)/var/realeval"
+STORE="$STATE/data"
 mkdir -p "$STATE"
-SRV="http://127.0.0.1:$DB_PORT"
 
-db_up() {
-	if curl -fsS "$SRV/v1/health" >/dev/null 2>&1; then return 0; fi
-	(cd ../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb) || exit 1
-	go build -o "$STATE/ask" ./cmd/ask || exit 1
-	"$STATE/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$STATE/data" -log-level warn >>"$STATE/cumudb.log" 2>&1 &
-	for _ in $(seq 1 50); do
-		curl -fsS "$SRV/v1/health" >/dev/null 2>&1 && return 0
-		sleep 0.2
-	done
-	echo "realeval: cumudb failed to start (see $STATE/cumudb.log)" >&2
-	exit 1
-}
+# One embedded store directory — no server process, no port. Badger locks the
+# directory, so nothing else may hold it while a phase runs.
+build_ask() { go build -o "$STATE/ask" ./cmd/ask || exit 1; }
 
 case "${1:-report}" in
 prep)
 	[ -f "$DATA" ] || { echo "realeval: $DATA not found" >&2; exit 1; }
-	db_up
+	build_ask
 	python3 - "$DATA" "$N" "$STATE" <<'PY'
 import json, sys
 src, n, state = sys.argv[1], int(sys.argv[2]), sys.argv[3]
@@ -67,26 +57,26 @@ with open(state + "/corpus.jsonl", "w", encoding="utf-8") as f:
         f.write(json.dumps({"key": key, "title": key, "text": text}, ensure_ascii=False) + "\n")
 print("items=%d docs=%d" % (len(items), len(docs)))
 PY
-	"$STATE/ask" -server "$SRV" ensure
-	"$STATE/ask" -server "$SRV" ingest-jsonl -file "$STATE/corpus.jsonl" -job realeval
+	"$STATE/ask" -data "$STORE" ensure
+	"$STATE/ask" -data "$STORE" ingest-jsonl -file "$STATE/corpus.jsonl" -job realeval
 	;;
 step)
-	db_up
+	build_ask
 	OUT="$STATE/results.jsonl"
 	EXTRA=""
 	if [ "${L1PRE:-0}" = "1" ]; then
 		OUT="$STATE/results_l1.jsonl"   # 对照组：body_embed KNN 收窄候选（ASK_EMBED=minilm）
 		EXTRA="-l1pre"
 	fi
-	"$STATE/ask" -server "$SRV" eval-run -file "$STATE/items.jsonl" \
+	"$STATE/ask" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
 		-out "$OUT" -judge -prior $EXTRA -limit "${LIMIT:-4}"
 	;;
 report)
-	db_up
+	build_ask
 	# All items already recorded → resume-only pass; the aggregate is printed.
 	OUT="$STATE/results.jsonl"
 	if [ "${L1PRE:-0}" = "1" ]; then OUT="$STATE/results_l1.jsonl"; fi
-	"$STATE/ask" -server "$SRV" eval-run -file "$STATE/items.jsonl" \
+	"$STATE/ask" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
 		-out "$OUT" -limit 0
 	;;
 esac

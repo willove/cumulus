@@ -1,12 +1,12 @@
 # 认知检索套件（ask 套件）
 
-> CumuBase 功能套件：cumudb 基座之上的认知检索——证据可核、多跳可串、同类问题越问越快。
+> CumuBase 功能套件：cumulite 嵌入式存储之上的认知检索——证据可核、多跳可串、同类问题越问越快。
 > 文档主场（含设计 SSOT 与 LENS 论文对照）：[`docs/`](docs/)（**本地私有**——`/docs/` 已登记 .gitignore，不提交不外发）；设计单一事实源 [`design-plan.md`](docs/design-plan.md)；Sirchmunk 核心算法研究论文对照 [`lens-notes.md`](docs/lens-notes.md)。
 
 ## 定位
 
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
-本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层与知识簇生命周期；向量/全文/图/时序能力全部来自基座，模型流量一律经 aigate。
+本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量一律经 aigate。
 
 当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览全部落地**（门 A–U，门限 118、现 119 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）。设计 SSOT 见计划 v1.29。
 
@@ -15,55 +15,60 @@
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/ask
-make e2e                   # 门 A–U（真 cumudb，门限 118、现 119 断言）
+make e2e                   # 门 A–U（真 cumulite 嵌入库，门限 118、现 119 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
-# 多租户：一切集合/会话按 -ns 分域（ns:ask_* 复合身份；缺省 = 默认库裸名）
-./bin/ask -ns tenant_a put -title "部署手册" -key handbook -body-file doc.md
-./bin/ask -ns tenant_a search -q "连接池最大连接数"
+ASK="./bin/ask"                 # 默认存储 ./var/ask；-data DIR 覆盖；ask env / ask -h 不开库
 
-./bin/ask ensure                          # 声明集合（幂等）
-./bin/ask put -title "部署手册" -key handbook -body-file doc.md
-./bin/ask put -title "页面" -type html -key page -body-file page.html   # HTML 抽取为正文
-./bin/ask put -title "附件" -type docx -key spec -body-file spec.docx   # DOCX 段落抽取
-./bin/ask ingest-jsonl -file batch.jsonl -job batch1 [-map map.json]
-./bin/ask ingest-files -dir ./docs -recursive -job docs1
-./bin/ask job -job docs1                  # 摄取任务状态（queued/running/done/failed）
-./bin/ask search -q "连接池最大连接数" [-hopts 168h] [-prior] [-l1pre]
-./bin/ask search -q "那它最大是多少" -history "连接池最大连接数是多少|端口是多少"  # 多轮改写
-./bin/ask search -q "那它最大是多少" -session SID   # KV 会话（P2，优先于 -history）
-./bin/ask get <id>
-./bin/ask delete <id>
-./bin/ask reclaim -stale                  # 物理回收 tombstone/陈旧修订
-./bin/ask ensure [-embed]                 # 声明集合（-embed 兼补内容向量）
-./bin/ask reconcile                       # 消费 changelog：带外退役源→失效证据+标簇待复核
-./bin/ask cluster list                    # 知识簇（ask_clusters）
-./bin/ask cluster tidy [-dry-run] [-theta 0.55] [-max N]
+# 多租户：一切集合/会话按 -ns 分域（ns:ask_* 复合身份；缺省 = 默认库裸名）
+$ASK -ns tenant_a put -title "部署手册" -key handbook -body-file doc.md
+$ASK -ns tenant_a search -q "连接池最大连接数"
+
+$ASK ensure                          # 声明集合（幂等）
+$ASK put -title "部署手册" -key handbook -body-file doc.md
+$ASK put -title "页面" -type html -key page -body-file page.html   # HTML 抽取为正文
+$ASK put -title "附件" -type docx -key spec -body-file spec.docx   # DOCX 段落抽取
+$ASK ingest-jsonl -file batch.jsonl -job batch1 [-map map.json]
+$ASK ingest-files -dir ./docs -recursive -job docs1
+$ASK job -job docs1                  # 摄取任务状态（queued/running/done/failed）
+$ASK search -q "连接池最大连接数" [-hopts 168h] [-prior] [-l1pre]
+$ASK search -q "那它最大是多少" -history "连接池最大连接数是多少|端口是多少"  # 多轮改写
+$ASK search -q "那它最大是多少" -session SID   # KV 会话（P2，优先于 -history）
+$ASK get <id>
+$ASK delete <id>
+$ASK reclaim -stale                  # 物理回收 tombstone/陈旧修订
+$ASK ensure [-embed]                 # 声明集合（-embed 兼补内容向量）
+$ASK reconcile                       # 消费 changelog：带外退役源→失效证据+标簇待复核
+$ASK cluster list                    # 知识簇（ask_clusters）
+$ASK cluster tidy [-dry-run] [-theta 0.55] [-max N]
                                  # 簇整理：跨题近邻 sibling 的显式折叠（older 存活，幂等）
-./bin/ask conflicts list                  # 冲突边（ask_conflicts）
-./bin/ask cites  list                     # 簇→源证据边（ask_cites）
-./bin/ask session new | list | show <id> | rm <id>   # 会话（P2 KV）
-./bin/ask eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS 式评测（R-E1，可续跑）
-./bin/ask serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE) + 会话 REST + 内嵌工作台 /ui/
-./bin/ask eval-demo                       # 证据质量评测协议演示（B3，离线确定性）
+$ASK conflicts list                  # 冲突边（ask_conflicts）
+$ASK cites  list                     # 簇→源证据边（ask_cites）
+$ASK session new | list | show <id> | rm <id>   # 会话（P2 KV）
+$ASK eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS 式评测（R-E1，可续跑）
+$ASK serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE)
+                                 #   + 会话 REST + 内嵌工作台 /ui/（serve 持库期间 CLI 勿指同一目录）
+$ASK eval-demo                       # 证据质量评测协议演示（B3，离线确定性）
 ```
 
-## 免服务器：`-lite` 嵌入式存储（cumulite）
+## 存储：cumulite 嵌入式库
 
-默认路径连 cumudb 服务端（HTTP）。加 `-lite DIR` 即切到**嵌入式引擎**——进程内 Badger 单文件存储，**不连任何服务端、零网络**：
+存储是一个进程内的 Badger 单文件目录，由 `-data DIR` 指定，**默认 `./var/ask`**（不存在则创建）：**不连任何服务端、零网络**。
 
 ```bash
-./bin/ask -lite ./store put -title "部署手册" -key handbook -body-file doc.md
-./bin/ask -lite ./store search -q "连接池最大连接数"    # 集合/KV/向量/changelog 同一引擎，语义照旧
+./bin/ask ensure                                        # 声明集合（幂等）
+./bin/ask put -title "部署手册" -key handbook -body-file doc.md
+./bin/ask search -q "连接池最大连接数"                    # 集合/KV/向量/changelog 同一引擎
+./bin/ask serve -listen 127.0.0.1:8484                  # HTTP 面同样落在该目录
+./bin/ask -data ~/stores/law ensure                     # 换目录（-data 覆盖默认）
 ```
 
-- **同一条 Port 契约**：存储面收敛为 16 方法接口 `cumulite.Port`——HTTP 客户端（`*client.Client`，经 `internal/cumuport` 适配器在边界转换类型）与嵌入式引擎（`cumulite.Engine`）都满足它；`-lite` 缺席时行为逐字节不变，生产仍是 cumudb 服务端；
-- **cumulite 是独立仓库**（`../db-works/cumulite`，与 cumudb 零依赖；契约类型在其 `contract/` 包分叉维护），本仓只经 Port 消费，不为它改一行存储代码；
-- **适用**：离线 / 单机 / 评测 / 演示 / 灾备降级；ACL、审计、备份、SQL/AQL 等全面能力仍在服务端引擎侧；
-- **证据**：hermetic 回归 `cmd/ask/lite_test.go`——put/ensure/ensure-embed/reconcile/session/cluster/weak-edge 全链 + 一次真实 FAST search，进程内没有任何 cumudb 服务端；另有 20 查询离线 A/B 与真 cumudb 20/20 一致。
-
-运维注意（fsync、压缩、命名空间合成）见 cumulite README；设计 SSOT 与研究立档在本仓 `docs/`（本地私有，不入库）。
+- **一条 Port 契约**：存储面收敛为 16 方法接口 `cumulite.Port`，本仓只经它消费——不为引擎改一行存储代码；
+- **cumulite 是独立仓库**（`../db-works/cumulite`，契约类型在其 `contract/` 包维护）；
+- **单进程独占**：Badger 对目录取排他锁，同一 store 同时只能有一个进程打开——`serve` 与 CLI **不能**指向同一目录并跑，写入侧要走 serve 的 `/v1/ingest/*`；
+- **边界**：KNN 为精确扫描（无 ANN），无 CAS/自增，collection 是声明标记而非 schema；运维注意（fsync、压缩、命名空间合成）见 cumulite README；
+- **证据**：hermetic 回归 `cmd/ask/lite_test.go`——put/ensure/ensure-embed/reconcile/session/cluster/weak-edge 全链 + 一次真实 FAST search，进程内没有任何服务端。
 
 ## 架构
 
@@ -97,6 +102,7 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **hopTS 新鲜度剪枝**已接线（`search -hopts 168h`），默认关；
 - **R3 实测**（`go test ./internal/mcs -run TestR3AnchorProbe -v`）：CJK bigram 锚点命中率 **0.404**（23/57，噪声大→阶段①分层撒网臂必须保留）；答案入窗率 **0.714**（5/7）；
 - **R2 跨系统实测**（`bash scripts/r2-cluster-probe.sh`，指向外部 Sirchmunk）：同主题 10 措辞 Sirchmunk 裂 **4 簇** vs Gate B 改写族 ≤1；R5 阴性（无跨主题串台，G-pollute 素材用套内构造 fixture）；
-- 状态在 cumudb：`ask_sources` / `ask_evidence` / `ask_clusters` / `ask_weak_edges` / job 游标 KV；
+- 状态在 store：`ask_sources` / `ask_evidence` / `ask_clusters` / `ask_weak_edges` / job 游标 KV；
+- **部署边界（照实）**：HTTP 面（`ask serve`）按**可信本机工具**部署——没有应用层鉴权，请求体里的 `ns` 是**作用域**不是授权（租户隔离靠不把端口暴露给不受信方），`POST /v1/ingest/jobs` 的 `dir` 可读本机任意目录。要对外提供服务需另行加鉴权与目录白名单；
 - 不做查询期扫本地文件树、不把二进制原件写入引擎、模型不进库；
 - 规模假设：源 ≤10⁴、簇 ≤10³（见计划 §7）。

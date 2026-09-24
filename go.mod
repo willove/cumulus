@@ -2,10 +2,7 @@ module github.com/cumubase/ask
 
 go 1.27.0
 
-require (
-	github.com/willove/cumudb v0.0.0
-	github.com/willove/cumulite v0.0.0
-)
+require github.com/willove/cumulite v0.0.0
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -24,7 +21,5 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 )
 
-// The engines live across, under db-works/ (this repository is cumubase-project/cumulus).
-replace github.com/willove/cumudb => ../db-works/cumudb
-
+// The engine lives across, under db-works/ (this repository is cumubase-project/cumulus).
 replace github.com/willove/cumulite => ../db-works/cumulite

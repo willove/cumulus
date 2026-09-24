@@ -28,7 +28,7 @@ type Edge struct {
 	Source string  `json:"source"` // co_occur | query_seq | embed_sim
 }
 
-// Store persists edges (cumudb ask_weak_edges in production).
+// Store persists edges (ask_weak_edges in production).
 type Store interface {
 	Save(ctx context.Context, e Edge) error
 	From(ctx context.Context, id string) ([]Edge, error)

@@ -1,5 +1,5 @@
 // Command ask is the cognitive-search suite CLI: ingest sources and run the
-// FAST/DEEP search path against a running cumudb.
+// FAST/DEEP search path against a cumulite store directory.
 package main
 
 import (
@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/deep"
 	"github.com/cumubase/ask/internal/eval"
 	"github.com/cumubase/ask/internal/graph"
@@ -21,11 +20,10 @@ import (
 	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
 )
 
-const usage = `ask — cognitive search suite (on cumudb)
+const usage = `ask — cognitive search suite (on cumulite)
 
 Usage:
   ask put    -title T [-type md] [-uri U] [-key K] [-lang zh] -body-file F
@@ -50,9 +48,9 @@ Usage:
                                 # LENS 式评测：真实管线+Closed-Book 对照+判官，可续跑
 
 Flags:
-  -server URL    cumudb base URL (default http://127.0.0.1:8480)
-  -lite DIR      嵌入式存储（cumulite，Badger 单文件）：指向目录即完全不连
-                 cumudb 服务端，同一套集合与 KV 语义照旧；DIR 不存在则创建
+  -data DIR      存储目录（cumulite 嵌入式引擎，Badger 单文件；默认 var/ask，
+                 不存在则创建）。Badger 对该目录取排他锁：同一 store 同时只能
+                 有一个进程打开，serve 与 CLI 不能指向同一目录并跑
   -sources NAME  sources collection (default ask_sources; full identity wins over -ns)
   -evidence NAME evidence collection (default ask_evidence; full identity wins over -ns)
   -ns NAME       namespace scope: suite collections become ns:ask_* composite
@@ -66,6 +64,8 @@ Env:
   AIGATE_EMBED_MODEL embedder model; unset = offline Local embedder even when AIGATE_BASE_URL is set
   AIGATE_REASONING_SPLIT 1/0 force MiniMax reasoning_split (default: auto on minimaxi.com hosts)
   ASK_ENV            path to the suite's .env (default ./.env); LLM_* keys alias onto AIGATE_*
+  ASK_FSYNC          1 = fsync every transaction (default off; measured +0.05 ms/txn —
+                     only machine crash needs it, process death does not)
 `
 
 func main() {
@@ -78,8 +78,7 @@ func main() {
 		fatal(err)
 	}
 	applyLLMAliases()
-	server := "http://127.0.0.1:8480"
-	lite := ""
+	data := "var/ask"
 	sources := ""
 	evidence := ""
 	namespace := ""
@@ -87,11 +86,8 @@ func main() {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
-		case a == "-server" && i+1 < len(args):
-			server = args[i+1]
-			i++
-		case a == "-lite" && i+1 < len(args):
-			lite = args[i+1]
+		case a == "-data" && i+1 < len(args):
+			data = args[i+1]
 			i++
 		case a == "-sources" && i+1 < len(args):
 			sources = args[i+1]
@@ -146,21 +142,25 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	// 存储端口：-lite 指向 cumulite 嵌入式引擎（无服务端），否则连 cumudb。
-	// 两者满足同一个 Port 契约，以下的 store 装配对二者逐字节相同。
-	var port cumulite.Port
-	if lite != "" {
-		engine, err := cumulite.Open(lite)
+	// 存储：cumulite 嵌入式引擎（Badger 单文件）。env 只打印生效配置，不碰存储；
+	// 其余命令都用 -data 给的目录（默认 var/ask）。
+	var c cumulite.Port
+	var st *ingest.Store
+	if cmd != "env" {
+		var opts []cumulite.Option
+		if os.Getenv("ASK_FSYNC") == "1" {
+			// Durability opt-in: fsync每笔事务。实测代价 ≈0.05 ms/事务
+			// （cumulite engine_durability_test.go），1.4 万篇回填约 +1s。
+			opts = append(opts, cumulite.WithSyncWrites())
+		}
+		engine, err := cumulite.Open(data, opts...)
 		if err != nil {
 			fatal(err)
 		}
 		defer engine.Close()
-		port = engine
-	} else {
-		port = cumuport.New(client.New(server))
+		c = engine
+		st = ingest.New(c, sources, evidence, clustersColl, namespace)
 	}
-	c := port
-	st := ingest.New(c, sources, evidence, clustersColl, namespace)
 
 	switch cmd {
 	case "put":
@@ -384,7 +384,7 @@ func main() {
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
 		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also ASK_VERBOSE=1)")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, server, sources, namespace, *verbose)
+		runServe(ctx, c, st, *listen, sources, namespace, *verbose)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {
@@ -408,6 +408,7 @@ func main() {
 		printJSON(map[string]any{
 			"env_file":        envFilePath(),
 			"env_file_loaded": fileExists(envFilePath()),
+			"store":           data, // resolved only; env never opens it
 			"base_url":        base,
 			"chat_model":      os.Getenv("AIGATE_CHAT_MODEL"),
 			"embed_model":     os.Getenv("AIGATE_EMBED_MODEL"),

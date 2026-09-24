@@ -5,6 +5,7 @@ package kb
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/cumubase/ask/internal/cluster"
@@ -38,8 +39,15 @@ type Engine struct {
 	SourceReader SourceReader
 	ReuseTheta   float64
 	MergeTheta   float64
-	SplitCap     int
-	HopKNN       int
+	// writeMu serializes the cluster write path. Choosing a fold target is a
+	// read-modify-write — read the candidates, decide, save the merged snapshot
+	// — so two concurrent asks for one topic would either both create the same
+	// cluster (same deterministic id, one snapshot lost) or both fold into the
+	// same stale copy. The store is single-process (Badger holds an exclusive
+	// directory lock), so this lock is the whole scope of that race.
+	writeMu  sync.Mutex
+	SplitCap int
+	HopKNN   int
 	// RejectedProposals counts AcceptFold refusals (Self-Index cost line:
 	// rejected proposals are spend, not free). Read by eval-run per item.
 	RejectedProposals int
@@ -121,11 +129,7 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 	if err != nil {
 		return Result{}, err
 	}
-	candidates := same
-	if cross := e.crossTopicNear(ctx, key, qe, query); len(cross) > 0 {
-		candidates = append(append([]cluster.Cluster(nil), same...), cross...)
-	}
-	res, err := e.saveAnswer(ctx, ans, sources, candidates, qe, false)
+	res, err := e.saveAnswer(ctx, ans, sources, qe, false)
 	if err != nil {
 		return res, err
 	}
@@ -283,20 +287,37 @@ func (e *Engine) Persist(ctx context.Context, ans fast.Answer, sources []source.
 	if err != nil {
 		return res, err
 	}
-	same, err := e.Store.FindByTopic(ctx, cluster.TopicKey(ans.Query))
-	if err != nil {
-		return res, err
-	}
-	return e.saveAnswer(ctx, ans, sources, same, qe, true)
+	return e.saveAnswer(ctx, ans, sources, qe, true)
 }
 
-func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []source.Source, same []cluster.Cluster, qe []float64, replace bool) (Result, error) {
+// candidates is the fold-candidate set: same-topic clusters plus cross-topic
+// near hits. saveAnswer re-derives it under the write lock, because the fold
+// decision must see what the store holds now, not what it held before the
+// caller's search ran.
+func (e *Engine) candidates(ctx context.Context, key string, qe []float64, query string) ([]cluster.Cluster, error) {
+	same, err := e.Store.FindByTopic(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if cross := e.crossTopicNear(ctx, key, qe, query); len(cross) > 0 {
+		same = append(append([]cluster.Cluster(nil), same...), cross...)
+	}
+	return same, nil
+}
+
+func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []source.Source, qe []float64, replace bool) (Result, error) {
 	ans.Samples = cluster.NormalizeEvidence(ans.SourceID, ans.Samples)
 	res := Result{Answer: ans, Sampled: len(ans.Samples)}
 	if ans.Skipped || ans.Refused || ans.SourceID == "" || !cluster.RelevanceGate(ans.Query, cluster.Cluster{Content: ans.Summary}, 0.15) {
 		return res, nil
 	}
 	key := cluster.TopicKey(ans.Query)
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	same, err := e.candidates(ctx, key, qe, ans.Query)
+	if err != nil {
+		return res, err
+	}
 	target := e.pickMergeable(same, qe, ans.Query)
 	if target == nil && replace {
 		if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
@@ -324,7 +345,14 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 			target.Confidence = ans.Confidence
 			target.Evidence = ans.Samples
 		} else {
-			target.Content += "\n---\n" + ans.Summary
+			// The appended summary numbers its own evidence from 1, and that
+			// list now starts after the cluster's own: shift every marker, or
+			// the appended text cites the survivor's evidence.
+			remap := make(map[int]int, len(ans.Samples))
+			for k := range ans.Samples {
+				remap[k+1] = len(target.Evidence) + k + 1
+			}
+			target.Content += "\n---\n" + cluster.RenumberCitations(ans.Summary, remap)
 			target.Confidence = (target.Confidence + ans.Confidence) / 2
 			target.Evidence = append(target.Evidence, ans.Samples...)
 		}

@@ -15,9 +15,8 @@ import (
 
 // The portability claim, executed: the whole suite — put, ensure, ensure-embed,
 // reconcile, sessions, cluster/graph reuse and a real FAST search — runs
-// against the embedded cumulite engine with no cumudb server anywhere in the
-// process. Before -lite this was only an architecture intention; now it is a
-// test that fails the moment a store path grows a dependency outside Port.
+// against the embedded cumulite engine with no server anywhere in the process,
+// and it fails the moment a store path grows a dependency outside Port.
 func TestAskRunsOnCumuliteWithoutServer(t *testing.T) {
 	t.Setenv("AIGATE_BASE_URL", "") // offline gates: no network in tests
 	ctx := context.Background()

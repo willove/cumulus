@@ -258,12 +258,8 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 			if in.ID == "" {
 				in.ID = newSessionID()
 			}
-			d, err := st.ensure(r.Context(), in.ID, in.Title)
+			d, err := st.create(r.Context(), in.ID, in.Title)
 			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
-			}
-			if err := st.save(r.Context(), d); err != nil {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}

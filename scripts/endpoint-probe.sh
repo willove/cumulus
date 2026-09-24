@@ -20,20 +20,11 @@ fi
 [ -n "${AIGATE_API_KEY:-}" ] || { echo "endpoint-probe: AIGATE_API_KEY required"; exit 1; }
 
 WORK="$(mktemp -d)"
-DB_PID=""
-trap 'if [ -n "$DB_PID" ] && [ "$DB_PID" -eq "$DB_PID" ] 2>/dev/null; then kill "$DB_PID" 2>/dev/null; fi; rm -rf "$WORK"' EXIT
-DB_PORT=8593
+STORE="$WORK/data"
+trap 'rm -rf "$WORK"' EXIT
 
-(cd ../db-works/cumudb && go build -o "$WORK/cumudb" ./cmd/cumudb)
 go build -o "$WORK/ask" ./cmd/ask || exit 1
-"$WORK/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$WORK/data" -log-level warn >"$WORK/cumudb.log" 2>&1 &
-DB_PID=$!
-for _ in $(seq 1 50); do
-	kill -0 "$DB_PID" 2>/dev/null || { echo "endpoint-probe: cumudb died"; tail -5 "$WORK/cumudb.log"; exit 1; }
-	curl -fsS "http://127.0.0.1:$DB_PORT/v1/health" >/dev/null 2>&1 && break
-	sleep 0.2
-done
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" ensure >/dev/null
+"$WORK/ask" -data "$STORE" ensure >/dev/null
 
 python3 - "$WORK" <<'PY'
 import sys, os
@@ -43,10 +34,10 @@ body = "# 部署手册\n\n## 连接池\n" + pad * 12 + "关键配置：连接池
        "## 扩容\n单机连接数超过 3000 触发扩容评审，新上限由 capacity 模块计算。\n" + pad * 6
 open(os.path.join(w, "manual.md"), "w").write(body)
 PY
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" put -title "部署手册" -key manual -body-file "$WORK/manual.md" >/dev/null
+"$WORK/ask" -data "$STORE" put -title "部署手册" -key manual -body-file "$WORK/manual.md" >/dev/null
 
 export AIGATE_BASE_URL="$BASE" AIGATE_CHAT_MODEL="$MODEL" AIGATE_API_KEY
-A=("$WORK/ask" -server "http://127.0.0.1:$DB_PORT")
+A=("$WORK/ask" -data "$STORE")
 echo "direct endpoint: $BASE model=$MODEL"
 
 run() { # label query

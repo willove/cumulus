@@ -1,6 +1,6 @@
 package main
 
-// Session persistence: chat sessions live in cumudb KV under
+// Session persistence: chat sessions live in the store's KV under
 // ask:session:<id> — one JSON document per session holding the message
 // stream. `ask search -session <id>` folds the recent turns into the history
 // rewriter and appends the new turn afterwards; the HTTP /v1/search body
@@ -14,13 +14,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 )
+
+// sessionWriteMu serializes session turns. A turn is a read-modify-write of one
+// KV document, so two concurrent turns on the same session would both read the
+// old message list and the later save would drop the other turn. A turn costs
+// one KV put, so a single lock for all sessions costs nothing measurable and
+// avoids a per-session lock map that would grow without bound.
+var sessionWriteMu sync.Mutex
 
 const sessionKeyPrefix = "ask:session:"
 
@@ -89,7 +96,7 @@ func (st sessionStore) save(ctx context.Context, d *sessionDoc) error {
 func (st sessionStore) ensure(ctx context.Context, id, title string) (*sessionDoc, error) {
 	if d, err := st.load(ctx, id); err == nil {
 		return d, nil
-	} else if !contract.IsNotFound(err) && !client.IsNotFound(err) {
+	} else if !contract.IsNotFound(err) {
 		return nil, err
 	}
 	now := time.Now().UnixMilli()
@@ -97,6 +104,8 @@ func (st sessionStore) ensure(ctx context.Context, id, title string) (*sessionDo
 }
 
 func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer string) (*sessionDoc, error) {
+	sessionWriteMu.Lock()
+	defer sessionWriteMu.Unlock()
 	d, err := st.ensure(ctx, id, title)
 	if err != nil {
 		return nil, err
@@ -110,6 +119,18 @@ func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer 
 		sessionMessage{Role: "assistant", Content: answer, At: now},
 	)
 	d.UpdatedAt = now
+	return d, st.save(ctx, d)
+}
+
+// create is ensure-then-save under the same lock appendTurn takes: the pair is
+// one read-modify-write, so the HTTP face must not run it unguarded either.
+func (st sessionStore) create(ctx context.Context, id, title string) (*sessionDoc, error) {
+	sessionWriteMu.Lock()
+	defer sessionWriteMu.Unlock()
+	d, err := st.ensure(ctx, id, title)
+	if err != nil {
+		return nil, err
+	}
 	return d, st.save(ctx, d)
 }
 
@@ -138,7 +159,7 @@ func (st sessionStore) list(ctx context.Context) ([]*sessionDoc, error) {
 // a missing session yields an empty history (first turn).
 func sessionHistory(ctx context.Context, st sessionStore, id string, max int) ([]string, *sessionDoc, error) {
 	d, err := st.load(ctx, id)
-	if client.IsNotFound(err) || contract.IsNotFound(err) {
+	if contract.IsNotFound(err) {
 		return nil, &sessionDoc{ID: id}, nil // first turn: create on append
 	}
 	if err != nil {

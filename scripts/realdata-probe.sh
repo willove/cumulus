@@ -20,20 +20,11 @@ if [ ! -f "$DATA" ]; then
 fi
 
 WORK="$(mktemp -d)"
-DB_PID=""
-trap 'if [ -n "$DB_PID" ] && [ "$DB_PID" -eq "$DB_PID" ] 2>/dev/null; then kill "$DB_PID" 2>/dev/null; fi; rm -rf "$WORK"' EXIT
-DB_PORT=8592
+STORE="$WORK/data"
+trap 'rm -rf "$WORK"' EXIT
 
-(cd ../db-works/cumudb && go build -o "$WORK/cumudb" ./cmd/cumudb)
 go build -o "$WORK/ask" ./cmd/ask || exit 1
-"$WORK/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$WORK/data" -log-level warn >"$WORK/cumudb.log" 2>&1 &
-DB_PID=$!
-for _ in $(seq 1 50); do
-	kill -0 "$DB_PID" 2>/dev/null || { echo "realdata-probe: cumudb died"; exit 1; }
-	curl -fsS "http://127.0.0.1:$DB_PORT/v1/health" >/dev/null 2>&1 && break
-	sleep 0.2
-done
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" ensure >/dev/null
+"$WORK/ask" -data "$STORE" ensure >/dev/null
 
 # Sample N triples; positives AND negatives both enter the corpus (hard
 # negatives are the point). Keys: law<k> / neg<k>.
@@ -66,18 +57,17 @@ with open(work + "/corpus.jsonl", "w", encoding="utf-8") as f:
 print("corpus docs=%d queries=%d" % (len(docs), len(qs)))
 PY
 
-A=("$WORK/ask" -server "http://127.0.0.1:$DB_PORT")
 export ASK="$WORK/ask"
-export SRV="http://127.0.0.1:$DB_PORT"
-"${A[@]}" ingest-jsonl -file "$WORK/corpus.jsonl" -job cnlaw >/dev/null
+export STORE
+"$WORK/ask" -data "$STORE" ingest-jsonl -file "$WORK/corpus.jsonl" -job cnlaw >/dev/null
 
 python3 - "$WORK/queries.json" <<'PY'
 import json, os, subprocess, sys
-ask = os.environ["ASK"]; srv = os.environ["SRV"]
+ask = os.environ["ASK"]; store = os.environ["STORE"]
 qs = json.load(open(sys.argv[1], encoding="utf-8"))
 hit = cite = n = 0
 for item in qs:
-    r = subprocess.run([ask, "-server", srv, "search", "-q", item["q"], "-raw"],
+    r = subprocess.run([ask, "-data", store, "search", "-q", item["q"], "-raw"],
                        capture_output=True, text=True)
     try:
         res = json.loads(r.stdout)

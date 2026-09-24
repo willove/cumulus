@@ -50,8 +50,29 @@ func Digest(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// IDFor is the content-addressed default identity: a document with no business
+// identity of its own dedupes by its bytes. It is NOT a revision identity —
+// see RevisionID.
 func IDFor(body string) string {
 	return "src:" + Digest(body)[:16]
+}
+
+// RevisionID is the storage identity of one revision. Content addressing alone
+// cannot serve as it: a revision is a distinct document even when its bytes
+// repeat an earlier one (restoring after an update, re-importing after a
+// delete), and two business keys may legitimately hold identical text. So the
+// identity is the business identity — key, else title, else the content digest
+// — plus the revision number. Ids keep the "src:" prefix that citation
+// classification and eval accounting key off.
+func RevisionID(businessKey, title, bodyDigest string, version int) string {
+	identity := businessKey
+	if identity == "" {
+		identity = title
+	}
+	if identity == "" {
+		identity = bodyDigest[:16]
+	}
+	return fmt.Sprintf("src:%s#%d", identity, version)
 }
 
 // Normalize collapses whitespace runs and strips NUL.

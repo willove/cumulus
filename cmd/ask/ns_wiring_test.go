@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,8 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cumubase/ask/internal/cumuport"
-	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite/contract"
 )
 
 // The session KV keys are scoped through ns.KV — a tenant's session list
@@ -38,37 +36,28 @@ func TestFirstNonEmpty(t *testing.T) {
 	}
 }
 
+// A request whose store read is still in flight must not steer a second
+// tenant's request: per-request store scoping is what keeps the two key spaces
+// apart, so the interleave is forced rather than hoped for.
 func TestSessionFaceConcurrentNamespaces(t *testing.T) {
+	p := newTestPort()
 	alphaRead := make(chan struct{})
 	releaseAlpha := make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(releaseAlpha) }) }
-	savedKeys := make(chan string, 2)
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/kv/ns:alpha:ask:session:shared":
-			close(alphaRead)
-			select {
-			case <-releaseAlpha:
-			case <-r.Context().Done():
-				return
-			}
-			http.NotFound(w, r)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/kv/ns:beta:ask:session:shared":
-			_, _ = io.WriteString(w, `{"id":"shared","title":"beta","messages":[]}`)
-		case r.Method == http.MethodPut:
-			savedKeys <- strings.TrimPrefix(r.URL.Path, "/v1/kv/")
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Errorf("unexpected backend request: %s %s", r.Method, r.URL)
-			http.Error(w, "unexpected request", http.StatusInternalServerError)
-		}
-	}))
-	defer backend.Close()
 	defer unblock()
+	p.OnKVGet = func(key string) error {
+		if key != "ns:alpha:ask:session:shared" {
+			return nil
+		}
+		close(alphaRead)
+		<-releaseAlpha
+		return contract.ErrNotFound // alpha legitimately starts its own session
+	}
+	p.seed("ns:beta:ask:session:shared", `{"id":"shared","title":"beta","messages":[]}`)
 
 	mux := http.NewServeMux()
-	registerSessionFace(mux, cumuport.New(client.New(backend.URL)), "serve")
+	registerSessionFace(mux, p, "serve")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	alphaDone := make(chan *httptest.ResponseRecorder, 1)
@@ -81,7 +70,7 @@ func TestSessionFaceConcurrentNamespaces(t *testing.T) {
 	select {
 	case <-alphaRead:
 	case <-ctx.Done():
-		t.Fatal("alpha POST did not reach its backend GET")
+		t.Fatal("alpha POST did not reach its store read")
 	}
 
 	beta := httptest.NewRecorder()
@@ -98,16 +87,16 @@ func TestSessionFaceConcurrentNamespaces(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("alpha POST did not complete")
 	}
-	select {
-	case key := <-savedKeys:
-		if key != "ns:alpha:ask:session:shared" {
-			t.Fatalf("alpha POST saved to %q, want alpha namespace", key)
-		}
-	default:
-		t.Fatal("alpha POST did not save a session")
+
+	_, puts, _, _ := p.calls()
+	if len(puts) != 1 || puts[0] != "ns:alpha:ask:session:shared" {
+		t.Fatalf("alpha POST wrote %v, want the alpha namespace key", puts)
 	}
 }
 
+// Every method resolves the namespace where that method actually reads it
+// (GET: query; POST/DELETE: body), touches only that tenant's keys, and refuses
+// a malformed namespace before reaching the store at all.
 func TestSessionFaceNamespaceMethods(t *testing.T) {
 	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
 		for _, namespace := range []string{"", "tenant", "bad:ns"} {
@@ -120,31 +109,15 @@ func TestSessionFaceNamespaceMethods(t *testing.T) {
 			for _, path := range paths {
 				t.Run(method+"/"+namespace+path, func(t *testing.T) {
 					wantNS := firstNonEmpty(namespace, "serve")
-					requests := make(chan string, 4)
-					backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						requests <- r.Method + " " + r.URL.String()
-						if namespace == "bad:ns" {
-							t.Error("invalid namespace reached backend")
-						}
-						if r.URL.Path == "/v1/kv" {
-							if got := r.URL.Query().Get("prefix"); got != "ns:"+wantNS+":ask:session:" {
-								t.Errorf("list prefix = %q", got)
-							}
-							_, _ = io.WriteString(w, `{"keys":[]}`)
-							return
-						}
-						if want := "/v1/kv/ns:" + wantNS + ":ask:session:shared"; r.URL.Path != want {
-							t.Errorf("backend path = %q, want %q", r.URL.Path, want)
-						}
-						if r.Method == http.MethodGet {
-							_, _ = io.WriteString(w, `{"id":"shared","messages":[]}`)
-						} else {
-							w.WriteHeader(http.StatusNoContent)
-						}
-					}))
-					defer backend.Close()
+					prefix := "ns:" + wantNS + ":ask:session:"
+					p := newTestPort()
+					// Requests aimed at the "shared" document find one already
+					// stored; the list path legitimately sees none.
+					if method == http.MethodPost || strings.HasSuffix(path, "/shared") {
+						p.seed(prefix+"shared", `{"id":"shared","messages":[]}`)
+					}
 					mux := http.NewServeMux()
-					registerSessionFace(mux, cumuport.New(client.New(backend.URL)), "serve")
+					registerSessionFace(mux, p, "serve")
 					// GET uses the query; POST and DELETE use the body, not the query.
 					queryNS, bodyNS := "ignored", namespace
 					if method == http.MethodGet {
@@ -153,21 +126,47 @@ func TestSessionFaceNamespaceMethods(t *testing.T) {
 					body := `{"id":"shared","ns":"` + bodyNS + `"}`
 					w := httptest.NewRecorder()
 					mux.ServeHTTP(w, httptest.NewRequest(method, path+"?ns="+queryNS, strings.NewReader(body)))
+
 					wantStatus := http.StatusOK
-					wantRequests := 1
 					if method == http.MethodPost {
 						wantStatus = http.StatusCreated
-						wantRequests = 2
 					}
 					if namespace == "bad:ns" {
 						wantStatus = http.StatusBadRequest
-						wantRequests = 0
 					}
 					if w.Code != wantStatus {
 						t.Errorf("status = %d, want %d; body %s", w.Code, wantStatus, w.Body.String())
 					}
-					if got := len(requests); got != wantRequests {
-						t.Errorf("backend requests = %d, want %d", got, wantRequests)
+
+					gets, puts, dels, lists := p.calls()
+					if namespace == "bad:ns" {
+						if len(gets)+len(puts)+len(dels)+len(lists) != 0 {
+							t.Fatalf("invalid namespace reached the store: gets=%v puts=%v dels=%v lists=%v", gets, puts, dels, lists)
+						}
+						return
+					}
+					touched := append(append(append(append([]string{}, gets...), puts...), dels...), lists...)
+					for _, key := range touched {
+						if !strings.HasPrefix(key, prefix) {
+							t.Errorf("store key %q does not carry namespace %q", key, wantNS)
+						}
+					}
+					wantGet, wantPut, wantDel, wantList := 0, 0, 0, 0
+					switch method {
+					case http.MethodPost:
+						wantGet, wantPut = 1, 1
+					case http.MethodDelete:
+						wantDel = 1
+					case http.MethodGet:
+						if strings.HasSuffix(path, "/shared") {
+							wantGet = 1
+						} else {
+							wantList = 1
+						}
+					}
+					if len(gets) != wantGet || len(puts) != wantPut || len(dels) != wantDel || len(lists) != wantList {
+						t.Errorf("store calls = get:%v put:%v del:%v list:%v, want get:%d put:%d del:%d list:%d",
+							gets, puts, dels, lists, wantGet, wantPut, wantDel, wantList)
 					}
 				})
 			}

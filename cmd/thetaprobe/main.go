@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	ASK_EMBED=minilm thetaprobe -server URL -seeds seeds.jsonl [-ns default]
+//	ASK_EMBED=minilm thetaprobe -data DIR -seeds seeds.jsonl [-ns default]
 package main
 
 import (
@@ -26,10 +26,9 @@ import (
 	"strings"
 
 	"github.com/cumubase/ask/internal/cluster"
-	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/minilm"
 	"github.com/cumubase/ask/internal/ns"
-	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 type seed struct {
@@ -51,7 +50,7 @@ type row struct {
 }
 
 func main() {
-	server := flag.String("server", "http://127.0.0.1:8480", "cumudb URL")
+	lite := flag.String("lite", "", "cumulite store directory")
 	namespace := flag.String("ns", "", "namespace (empty = default library)")
 	seedsFile := flag.String("seeds", "", "seeds jsonl: {query, expect_key}")
 	flag.Parse()
@@ -72,9 +71,13 @@ func main() {
 		embedFn = loc.Embed
 	}
 
-	c := client.New(*server)
+	c, err := cumulite.Open(*lite)
+	if err != nil {
+		fatal(err)
+	}
+	defer c.Close()
 	ctx := context.Background()
-	st := cluster.NewCumuStore(cumuport.New(c), ns.Coll(*namespace, "ask_clusters"))
+	st := cluster.NewCumuStore(c, ns.Coll(*namespace, "ask_clusters"))
 	clusters, err := st.All(ctx)
 	if err != nil {
 		fatal(err)
@@ -200,7 +203,7 @@ func readSeeds(path string) ([]seed, error) {
 	return out, sc.Err()
 }
 
-func businessKeyOf(ctx context.Context, c *client.Client, sourcesColl, id string) string {
+func businessKeyOf(ctx context.Context, c cumulite.Port, sourcesColl, id string) string {
 	if id == "" {
 		return ""
 	}

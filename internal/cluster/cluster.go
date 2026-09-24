@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,6 +152,48 @@ func Unigrams(query string) []string {
 	flush()
 	sort.Strings(out)
 	return out
+}
+
+// RenumberCitations rewrites [n] markers in a summary through remap: marker n
+// becomes remap[n], and a marker with no entry is left alone. Folding two
+// summaries into one cluster concatenates their texts while the evidence list
+// is re-indexed, so without this every [n] in the appended text still points at
+// whatever held that position in the survivor's evidence.
+func RenumberCitations(content string, remap map[int]int) string {
+	if content == "" || len(remap) == 0 {
+		return content
+	}
+	var b strings.Builder
+	b.Grow(len(content))
+	for i := 0; i < len(content); {
+		if content[i] != '[' {
+			b.WriteByte(content[i])
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(content) && content[j] >= '0' && content[j] <= '9' {
+			j++
+		}
+		if j == i+1 || j >= len(content) || content[j] != ']' {
+			b.WriteByte(content[i])
+			i++
+			continue
+		}
+		n, err := strconv.Atoi(content[i+1 : j])
+		if err != nil {
+			b.WriteByte(content[i])
+			i++
+			continue
+		}
+		if to, ok := remap[n]; ok {
+			b.WriteString("[" + strconv.Itoa(to) + "]")
+		} else {
+			b.WriteString(content[i : j+1])
+		}
+		i = j + 1
+	}
+	return b.String()
 }
 
 // TopicKey is the stable identity of a question's intent.
@@ -456,7 +499,7 @@ func containsString(xs []string, s string) bool {
 	return false
 }
 
-// Store is the cluster persistence facade (cumudb-backed in production; the
+// Store is the cluster persistence facade (store-backed in production; the
 // in-memory map keeps unit tests free of the engine).
 type Store interface {
 	Save(ctx context.Context, c Cluster) error

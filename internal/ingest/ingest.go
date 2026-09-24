@@ -18,7 +18,6 @@ import (
 
 	"github.com/cumubase/ask/internal/ns"
 	"github.com/cumubase/ask/internal/source"
-	"github.com/willove/cumudb/pkg/client"
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 )
@@ -26,13 +25,13 @@ import (
 // Result reports what a single put did.
 type Result struct {
 	ID      string `json:"id"`
-	Status  string `json:"status"` // created | updated | unchanged
+	Status  string `json:"status"` // created | updated | unchanged (created = no live revision existed)
 	Version int    `json:"version"`
 	Digest  string `json:"digest"`
 	StaleID string `json:"stale_id,omitempty"`
 }
 
-// Store writes ask_sources and ask_evidence against cumudb. Every identity it
+// Store writes ask_sources and ask_evidence against the storage Port. Every identity it
 // touches is passed in already scoped (composite "ns:coll" identity for a
 // tenant, bare name for the default library); namespace only scopes the flat
 // KV keys the Store owns (job cursors, reconcile cursor) via ns.KV.
@@ -65,8 +64,14 @@ func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store 
 // go through the Job path (ingest-files / serve jobs), never block a request.
 const MaxSyncBodyBytes = 256 << 10
 
-// Put upserts one source. Same digest → unchanged. New digest under the same
-// business key → version+1, previous content marked stale.
+// Put upserts one source as a revision of its business identity. Same digest as
+// the live revision → unchanged. A different digest → the next revision number,
+// with every other live revision of that identity retired (stale) and its
+// evidence invalidated.
+//
+// The retire step is what makes this self-healing: an update interrupted after
+// the insert (the previous revision never marked stale) leaves two live
+// revisions, and the next Put — even of identical bytes — converges them.
 func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
 	if src.Body == "" {
 		return Result{}, fmt.Errorf("ingest: body is required")
@@ -80,52 +85,139 @@ func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
 		src.Status = source.StatusActive
 	}
 
-	prev, err := s.findByBusiness(ctx, src.BusinessKey, src.Title)
+	revs, err := s.revisions(ctx, src.BusinessKey, src.Title)
 	if err != nil {
 		return Result{}, err
 	}
+	live := latestActive(revs)
 
-	if prev != nil && prev.Digest == src.Digest && prev.Status == source.StatusActive {
-		return Result{ID: prev.ID, Status: "unchanged", Version: prev.Version, Digest: prev.Digest}, nil
-	}
-
-	if prev == nil {
-		src.ID = source.IDFor(src.Body)
-		src.Version = 1
-		src.IngestedAt = now
-		src.UpdatedAt = now
-		if _, err := s.c.Insert(ctx, s.sources, []map[string]any{toDoc(src)}); err != nil {
-			if existing, gerr := s.getSource(ctx, src.ID); gerr == nil && existing != nil {
-				return Result{ID: existing.ID, Status: "unchanged", Version: existing.Version, Digest: existing.Digest}, nil
-			}
+	if live != nil && live.Digest == src.Digest {
+		// Nothing new to store, but still converge: an earlier attempt may have
+		// left another revision live.
+		if _, err := s.retireLive(ctx, revs, live.ID, now); err != nil {
 			return Result{}, err
 		}
-		return Result{ID: src.ID, Status: "created", Version: 1, Digest: src.Digest}, nil
+		return Result{ID: live.ID, Status: "unchanged", Version: live.Version, Digest: live.Digest}, nil
 	}
 
-	staleID := prev.ID
-	src.ID = source.IDFor(src.Body)
-	src.Version = prev.Version + 1
-	src.IngestedAt = prev.IngestedAt
+	next := 1
+	for i := range revs {
+		if revs[i].Version >= next {
+			next = revs[i].Version + 1
+		}
+	}
+	status := "created" // no live revision existed (first write, or re-import after a delete)
+	if live != nil {
+		status = "updated"
+		src.IngestedAt = live.IngestedAt
+		if src.BusinessKey == "" {
+			src.BusinessKey = live.BusinessKey
+		}
+	} else {
+		src.IngestedAt = now
+	}
+	src.ID = source.RevisionID(src.BusinessKey, src.Title, src.Digest, next)
+	src.Version = next
 	src.UpdatedAt = now
-	if src.BusinessKey == "" {
-		src.BusinessKey = prev.BusinessKey
-	}
+
 	if _, err := s.c.Insert(ctx, s.sources, []map[string]any{toDoc(src)}); err != nil {
+		// A concurrent writer stored this revision first: that write is the
+		// state, so report it instead of failing the caller.
+		if existing, gerr := s.getSource(ctx, src.ID); gerr == nil && existing != nil {
+			return Result{ID: existing.ID, Status: "unchanged", Version: existing.Version, Digest: existing.Digest}, nil
+		}
 		return Result{}, err
 	}
-	if _, err := s.c.PatchDocument(ctx, s.sources, staleID, map[string]any{
-		"$set": map[string]any{
-			"status":     source.StatusStale,
-			"updated_at": now.Format(time.RFC3339Nano),
-		},
-	}); err != nil {
-		return Result{}, fmt.Errorf("marking stale %s: %w", staleID, err)
+	retired, err := s.retireLive(ctx, revs, src.ID, now)
+	if err != nil {
+		return Result{}, fmt.Errorf("retiring previous revisions: %w", err)
 	}
-	if _, err := s.invalidateEvidence(ctx, staleID); err != nil {
-		return Result{}, err
+	stale := ""
+	if len(retired) > 0 {
+		stale = retired[0]
 	}
-	return Result{ID: src.ID, Status: "updated", Version: src.Version, Digest: src.Digest, StaleID: staleID}, nil
+	return Result{ID: src.ID, Status: status, Version: next, Digest: src.Digest, StaleID: stale}, nil
+}
+
+// revisions returns every stored revision under one business identity, any
+// status. The identity is the business key when present, else the title (the
+// long-standing fallback). A document with neither has no identity to revise:
+// it dedupes by content instead, so the caller gets a nil slice.
+func (s *Store) revisions(ctx context.Context, businessKey, title string) ([]source.Source, error) {
+	filter := map[string]any{}
+	if businessKey != "" {
+		filter["business_key"] = businessKey
+	} else if title != "" {
+		filter["title"] = title
+	} else {
+		return nil, nil
+	}
+	// Paginate: a long-lived key accumulates one stale revision per update
+	// until Reclaim runs, and a truncated page would hide the live revision
+	// from the version arithmetic below.
+	const page = 1000
+	var out []source.Source
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.sources, contract.Query{Filter: filter, Skip: skip, Limit: page})
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range res.Documents {
+			src, err := fromDoc(d)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, *src)
+		}
+		if len(res.Documents) < page {
+			return out, nil
+		}
+	}
+}
+
+// latestActive is the revision an identity currently resolves to: the highest
+// version still live. Choosing by version — not by whatever the store pages
+// first, and not by page size — is what keeps a long revision history from
+// regressing the current revision.
+func latestActive(revs []source.Source) *source.Source {
+	var best *source.Source
+	for i := range revs {
+		r := &revs[i]
+		if r.Status != source.StatusActive {
+			continue
+		}
+		if best == nil || r.Version > best.Version {
+			best = r
+		}
+	}
+	return best
+}
+
+// retireLive marks every live revision of the identity stale except keepID and
+// invalidates their evidence. It is the single writer of the "one live revision
+// per identity" invariant, so it both enforces uniqueness on a fresh store and
+// repairs a store that a failed update left with two.
+func (s *Store) retireLive(ctx context.Context, revs []source.Source, keepID string, now time.Time) ([]string, error) {
+	var retired []string
+	for i := range revs {
+		r := &revs[i]
+		if r.Status != source.StatusActive || r.ID == keepID {
+			continue
+		}
+		if _, err := s.c.PatchDocument(ctx, s.sources, r.ID, map[string]any{
+			"$set": map[string]any{
+				"status":     source.StatusStale,
+				"updated_at": now.Format(time.RFC3339Nano),
+			},
+		}); err != nil {
+			return retired, fmt.Errorf("marking stale %s: %w", r.ID, err)
+		}
+		if _, err := s.invalidateEvidence(ctx, r.ID); err != nil {
+			return retired, err
+		}
+		retired = append(retired, r.ID)
+	}
+	return retired, nil
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
@@ -283,7 +375,7 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 	if jobKey == "" {
 		jobKey = "default"
 	}
-	cursorKey := s.jobs + jobKey
+	cursorKey := s.jobs + jobKey + jobCursorSuffix
 	start := 0
 	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
 		if n, err := strconv.Atoi(string(raw)); err == nil {
@@ -343,7 +435,10 @@ type ReconcileReport struct {
 // Reconcile consumes ask_sources changes since the persisted cursor: sources
 // retired out-of-band (stale/deleted written without going through Put) get
 // their live evidence invalidated and clusters anchored on them marked 待复核.
-// Every action is idempotent, so at-least-once delivery is safe.
+// Every action is idempotent, so reprocessing a page is safe — and it is also
+// the safe choice: on failure the cursor stays where the last fully consumed
+// page ended, so a read or patch that failed is retried instead of being
+// skipped forever.
 func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 	rep := ReconcileReport{}
 	cursorKey := ns.KV(s.namespace, "ask:reconcile:"+s.sources)
@@ -359,19 +454,27 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 		}
 		for _, ch := range page.Changes {
 			rep.Scanned++
+			// The document is read only to tell a live write (which Put already
+			// handled) from a retirement. The cleanup itself keys off the change
+			// id, so a source purged physically — document gone, changelog
+			// record left behind — is still cleaned up.
 			src, err := s.getSource(ctx, ch.ID)
-			if err != nil || src == nil {
-				continue // physically gone: nothing left to reconcile
+			if err != nil {
+				return rep, err
 			}
-			if src.Status == source.StatusActive {
-				continue // live write: put already handled its downstream
+			if src != nil && src.Status == source.StatusActive {
+				continue
 			}
-			if n, err := s.invalidateEvidence(ctx, ch.ID); err == nil {
-				rep.EvInvalidated += n
+			n, err := s.invalidateEvidence(ctx, ch.ID)
+			if err != nil {
+				return rep, fmt.Errorf("invalidating evidence for %s: %w", ch.ID, err)
 			}
-			if s.markClustersStale(ctx, ch.ID) {
-				rep.ClustersMarked++
+			rep.EvInvalidated += n
+			marked, err := s.markClustersStale(ctx, ch.ID)
+			if err != nil {
+				return rep, fmt.Errorf("marking clusters of %s: %w", ch.ID, err)
 			}
+			rep.ClustersMarked += marked
 		}
 		cur = page.Cursor
 		rep.Cursor = cur
@@ -386,16 +489,18 @@ func (s *Store) Reconcile(ctx context.Context) (ReconcileReport, error) {
 }
 
 // markClustersStale flags clusters anchored on a retired source 待复核
-// (emerging) — the reconcile-side trigger for the re-validation.
-func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
+// (emerging) — the reconcile-side trigger for the re-validation. It reports
+// both the count and the error: swallowing a query failure here used to be
+// indistinguishable from "there were no clusters to mark".
+func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error) {
 	res, err := s.c.Query(ctx, s.clusters, contract.Query{
 		Filter: map[string]any{"source_id": docID},
 		Limit:  1000,
 	})
 	if err != nil {
-		return false
+		return 0, err
 	}
-	marked := false
+	marked := 0
 	for _, d := range res.Documents {
 		id, _ := d["_id"].(string)
 		if id == "" || d["lifecycle"] == "emerging" {
@@ -403,11 +508,12 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) bool {
 		}
 		if _, err := s.c.PatchDocument(ctx, s.clusters, id, map[string]any{
 			"$set": map[string]any{"lifecycle": "emerging"},
-		}); err == nil {
-			marked = true
+		}); err != nil {
+			return marked, err
 		}
+		marked++
 	}
-	return marked
+	return marked, nil
 }
 
 // Reclaim physically removes retired sources ("保留是决策不是副作用"):
@@ -570,6 +676,12 @@ func trimRunes(s string, n int) string {
 	return string(r[:n])
 }
 
+// jobCursorSuffix keeps the resumable cursor out of the job document's key.
+// They used to share one key, so every job-state write clobbered the cursor (a
+// finished job restarted from zero) and the cursor read parsed JSON as an
+// integer, silently falling back to zero.
+const jobCursorSuffix = ":cursor"
+
 // JobDoc is the async-ingest state-machine state under KV ask:job:<name>.
 type JobDoc struct {
 	Job     string `json:"job"`
@@ -637,7 +749,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 	if jobKey == "" {
 		jobKey = "files"
 	}
-	cursorKey := s.jobs + jobKey
+	cursorKey := s.jobs + jobKey + jobCursorSuffix
 	start := 0
 	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
 		if n, err := strconv.Atoi(string(raw)); err == nil {
@@ -654,7 +766,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 		if err != nil {
 			_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 				State: "failed", Phase: "extracting", Total: len(files),
-				Done: done, Failed: 1, Error: err.Error(),
+				Done: start + done, Failed: 1, Error: err.Error(),
 			})
 			return done, err
 		}
@@ -673,7 +785,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 			if derr != nil {
 				_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 					State: "failed", Phase: "extracting", Total: len(files),
-					Done: done, Failed: 1, Error: derr.Error(),
+					Done: start + done, Failed: 1, Error: derr.Error(),
 				})
 				return done, fmt.Errorf("file %s: %w", p, derr)
 			}
@@ -687,16 +799,16 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 			rel = filepath.Base(p)
 		}
 		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "running", Phase: "normalizing", Total: len(files), Done: done,
+			State: "running", Phase: "normalizing", Total: len(files), Done: start + done,
 		})
 		src := source.New(filepath.Base(p), typ, "file://"+p, filepath.ToSlash(rel), "zh", text, nil)
 		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "running", Phase: "upserting", Total: len(files), Done: done,
+			State: "running", Phase: "upserting", Total: len(files), Done: start + done,
 		})
 		if _, err := s.Put(ctx, src); err != nil {
 			_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 				State: "failed", Phase: "upserting", Total: len(files),
-				Done: done, Failed: 1, Error: err.Error(),
+				Done: start + done, Failed: 1, Error: err.Error(),
 			})
 			return done, fmt.Errorf("file %s: %w", p, err)
 		}
@@ -706,7 +818,7 @@ func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, job
 		}
 	}
 	if err := s.PutJobDoc(ctx, jobKey, JobDoc{
-		State: "done", Phase: "upserting", Total: len(files), Done: done,
+		State: "done", Phase: "upserting", Total: len(files), Done: start + done,
 	}); err != nil {
 		return done, err
 	}
@@ -804,43 +916,10 @@ func (s *Store) invalidateEvidence(ctx context.Context, docID string) (int, erro
 	return n, nil
 }
 
-func (s *Store) findByBusiness(ctx context.Context, businessKey, title string) (*source.Source, error) {
-	filter := map[string]any{}
-	if businessKey != "" {
-		filter["business_key"] = businessKey
-	} else if title != "" {
-		filter["title"] = title
-	} else {
-		return nil, nil
-	}
-	res, err := s.c.Query(ctx, s.sources, contract.Query{Filter: filter, Limit: 8})
-	if err != nil {
-		return nil, err
-	}
-	var best *source.Source
-	for _, d := range res.Documents {
-		src, err := fromDoc(d)
-		if err != nil {
-			return nil, err
-		}
-		if src.Status == source.StatusDeleted {
-			continue
-		}
-		if best == nil {
-			best = src
-			continue
-		}
-		if src.Status == source.StatusActive && best.Status != source.StatusActive {
-			best = src
-		}
-	}
-	return best, nil
-}
-
 func (s *Store) getSource(ctx context.Context, id string) (*source.Source, error) {
 	d, err := s.c.GetDocument(ctx, s.sources, id)
 	if err != nil {
-		if client.IsNotFound(err) || contract.IsNotFound(err) {
+		if contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -851,7 +930,7 @@ func (s *Store) getSource(ctx context.Context, id string) (*source.Source, error
 func (s *Store) getEvidence(ctx context.Context, id string) (map[string]any, error) {
 	d, err := s.c.GetDocument(ctx, s.evidence, id)
 	if err != nil {
-		if client.IsNotFound(err) || contract.IsNotFound(err) {
+		if contract.IsNotFound(err) {
 			return nil, nil
 		}
 		return nil, err

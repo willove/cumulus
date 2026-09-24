@@ -21,7 +21,7 @@ test:
 build:
 	go build -o bin/ask ./cmd/ask
 
-## e2e: 门 A–E——真 cumudb（prod-validation ask 阶段）
+## e2e: 门 A–T——真 cumulite 嵌入式库（无服务端进程）
 e2e:
 	bash scripts/e2e.sh
 

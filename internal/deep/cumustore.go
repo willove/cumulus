@@ -52,7 +52,7 @@ func (s *CumuCiteStore) List(ctx context.Context) ([]map[string]any, error) {
 	return res.Documents, nil
 }
 
-// CumuStore persists conflict edges in a cumudb collection (ask_conflicts).
+// CumuStore persists conflict edges in a store collection (ask_conflicts).
 type CumuStore struct {
 	c    cumulite.Port
 	coll string

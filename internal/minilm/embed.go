@@ -1,7 +1,7 @@
 package minilm
 
 // Embedder adapts the pure-Go MiniLM encoder to the ask suite's
-// cluster.Embedder interface (float64 vectors — the cumudb vector JSON shape).
+// cluster.Embedder interface (float64 vectors — the store's vector JSON shape).
 // Load is lazy: New is cheap, the 449MB mmap happens on first Embed.
 
 import (

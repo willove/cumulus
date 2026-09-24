@@ -3,8 +3,8 @@
 // diagnostic for the L1 prefilter; not part of the gates.
 // Usage:
 //
-//	ASK_EMBED=minilm knnprobe -server URL -q "查询" [-k 40]
-//	ASK_EMBED=minilm knnprobe -server URL -items items.jsonl -out ranks.json [-k 8]
+//	ASK_EMBED=minilm knnprobe -data DIR -q "查询" [-k 40]
+//	ASK_EMBED=minilm knnprobe -data DIR -items items.jsonl -out ranks.json [-k 8]
 //
 // The -items mode writes {"id":…,"rank":…} (0 = gold not in top-K) per item.
 package main
@@ -18,7 +18,8 @@ import (
 
 	"github.com/cumubase/ask/internal/cluster"
 	"github.com/cumubase/ask/internal/minilm"
-	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 type item struct {
@@ -34,7 +35,7 @@ type rankOut struct {
 }
 
 func main() {
-	server := flag.String("server", "http://127.0.0.1:8480", "cumudb URL")
+	lite := flag.String("lite", "", "cumulite store directory")
 	coll := flag.String("coll", "ask_sources", "sources collection")
 	query := flag.String("q", "", "query")
 	itemsFile := flag.String("items", "", "items jsonl: rank gold per item instead of printing one ranking")
@@ -56,14 +57,24 @@ func main() {
 		embedFn = loc.Embed
 		fmt.Fprintln(os.Stderr, "embedder: local-hash-64")
 	}
-	c := client.New(*server)
+	if *lite == "" {
+		fmt.Fprintln(os.Stderr, "knnprobe: -data DIR required")
+		os.Exit(2)
+	}
+	engine, err := cumulite.Open(*lite)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "knnprobe:", err)
+		os.Exit(1)
+	}
+	defer engine.Close()
+	var c cumulite.Port = engine
 
 	rankOf := func(q, gold string) (int, float64, error) {
 		qv, err := embedFn(context.Background(), []string{q})
 		if err != nil || len(qv) != 1 {
 			return 0, 0, err
 		}
-		res, err := c.KNN(context.Background(), *coll, client.KNNRequest{
+		res, err := c.KNN(context.Background(), *coll, contract.KNNRequest{
 			Field: *field, Vector: qv[0], K: *k, Metric: "cosine",
 		})
 		if err != nil {
@@ -140,12 +151,12 @@ func main() {
 	_ = dist
 }
 
-func knnList(c *client.Client, coll, field string, embedFn func(ctx context.Context, texts []string) ([][]float64, error), q string, k int) (*client.KNNResult, error) {
+func knnList(c cumulite.Port, coll, field string, embedFn func(ctx context.Context, texts []string) ([][]float64, error), q string, k int) (*contract.KNNResult, error) {
 	qv, err := embedFn(context.Background(), []string{q})
 	if err != nil || len(qv) != 1 {
 		return nil, err
 	}
-	return c.KNN(context.Background(), coll, client.KNNRequest{
+	return c.KNN(context.Background(), coll, contract.KNNRequest{
 		Field: field, Vector: qv[0], K: k, Metric: "cosine",
 	})
 }

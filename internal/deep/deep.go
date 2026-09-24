@@ -461,8 +461,12 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 
 	// a narrow reuse hit that still needs DEEP must now pay for the
 	// corpus — load it exactly once, here (nil corpus = lazy path).
+	// Escalation has to pay for the corpus. The narrow anchor set a warm reuse
+	// hit leaves in citeCorpus is not a DEEP corpus: sampling, self-correction
+	// and widening would all be confined to the anchors. So load whenever a
+	// loader exists — a nil corpus only means nobody has loaded it yet.
 	deepCorpus := citeCorpus
-	if len(deepCorpus) == 0 && load != nil {
+	if load != nil {
 		if deepCorpus, err = load(ctx); err != nil {
 			return Result{}, err
 		}
@@ -476,7 +480,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	// 文档族亲缘: the FAST answer's source votes for its family — answers
 	// cluster within a family (11/13 failures were same-family near-misses).
 	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, deepCorpus)
-	deepAns, cover, loops, wid, sc, admitted, err := e.runDeep(ctx, query, deepCorpus, affinity)
+	deepAns, cover, loops, wid, sc, admitted, cited, err := e.runDeep(ctx, query, deepCorpus, affinity)
 	if err != nil {
 		return Result{}, err
 	}
@@ -486,7 +490,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	res.SelfCorrected = sc
 	res.Widened = wid
 	res.Admitted = admitted
-	res.Citations = BuildCitations(query, deepAns, deepCorpus)
+	res.Citations = BuildCitations(query, deepAns, cited)
 	// Mark unresolved refs when DEEP still cannot pin a quote.
 	unresolved := false
 	for _, r := range res.Citations.Refs {
@@ -557,6 +561,12 @@ func topKeepsWith(kept []mcs.Sample, sources []source.Source) []mcs.Sample {
 	if sources != nil {
 		live = expandWindows(live, sources)
 		live = consolidateWindows(live)
+		// Consolidation can span further than any single window it absorbed,
+		// and it has no body in scope to rebuild the text. Re-derive every kept
+		// window from its coordinates last: otherwise the span and the text
+		// describe different ranges, citations fail to resolve, and the cluster
+		// built from them is judged stale on the next read.
+		live = resyncContent(live, sources)
 	}
 	sort.Slice(live, func(i, j int) bool { return live[i].Score > live[j].Score })
 	if len(live) > maxKeepWindows {
@@ -621,6 +631,31 @@ func consolidateWindows(kept []mcs.Sample) []mcs.Sample {
 		}
 	}
 	return out
+}
+
+// resyncContent re-derives each window's text from its source coordinates.
+// Samples carrying a sampling-method label instead of a document id (the
+// FAST/cluster-reuse shape) have no body here and are left alone.
+func resyncContent(kept []mcs.Sample, sources []source.Source) []mcs.Sample {
+	if len(kept) == 0 || len(sources) == 0 {
+		return kept
+	}
+	byID := make(map[string][]rune, len(sources))
+	for _, s := range sources {
+		byID[s.ID] = []rune(s.Body)
+	}
+	for i := range kept {
+		body, ok := byID[kept[i].Source]
+		if !ok {
+			continue
+		}
+		start, end := kept[i].Start, kept[i].End
+		if start < 0 || start >= end || end > len(body) {
+			continue
+		}
+		kept[i].Content = string(body[start:end])
+	}
+	return kept
 }
 
 // expandWindows grows each kept span by expandMargin runes against the live
@@ -691,7 +726,36 @@ func unionStrings(a, b []string) []string {
 // weakest (missing) requirements → synthesize. Offline stub is deterministic.
 // Returns admitted source IDs (every file the loop scored) for ir-rag 1.5
 // not-retrieved decomposition.
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, error) {
+// citationCorpus is the source set citations resolve against: the corpus the
+// run started from plus whatever widening admitted from outside it. Without
+// the extras a widened window resolves to no title and no quote, so the answer
+// cites a source it cannot show.
+func citationCorpus(corpus, widened []source.Source) []source.Source {
+	if len(widened) == 0 {
+		return corpus
+	}
+	out := make([]source.Source, 0, len(corpus)+len(widened))
+	out = append(out, corpus...)
+	return append(out, widened...)
+}
+
+// budgetHit reports whether the independent search-token budget is spent, and
+// records it. Every stage that spends tokens must consult this — initial
+// admission, self-correction, widening and the query simulator all call the
+// model, so a gate that guards only the first loop still lets the budget be
+// blown afterwards.
+func (e *Engine) budgetHit() bool {
+	if e.TokenBudget <= 0 || e.TokensUsed == nil {
+		return false
+	}
+	if e.TokensUsed() < e.TokenBudget {
+		return false
+	}
+	e.BudgetHit = true
+	return true
+}
+
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, error) {
 	if affinity == nil {
 		affinity = map[string]bool{}
 	}
@@ -761,14 +825,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		tried[s.ID] = true
 		// Independent token stop (LENS Def 3): check BEFORE scoring this
 		// file so an exhausted budget never starts another oracle batch.
-		if e.TokenBudget > 0 && e.TokensUsed != nil {
-			if used := e.TokensUsed(); used >= e.TokenBudget {
-				e.BudgetHit = true
-				if e.Verbose != nil {
-					e.Verbose("token budget hit: used=%d budget=%d", used, e.TokenBudget)
-				}
-				break
+		if e.budgetHit() {
+			if e.Verbose != nil {
+				e.Verbose("token budget hit after %d files", loops)
 			}
+			break
 		}
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		if err != nil {
@@ -804,7 +865,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// Prefer files admission never reached, then re-sample tried ones with
 	// the missing-fact queries.
 	selfCorrected := false
-	if !rep.Complete && correctBudget > 0 {
+	if !rep.Complete && correctBudget > 0 && !e.budgetHit() {
 		selfCorrected = true
 		var order []source.Source
 		for _, s := range sources {
@@ -837,7 +898,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// 2.4: MissingQueries first, then two-call complements (Jaccard-filtered)
 		// so self-correction is not locked to the original wording.
 		mqs := facts.MissingQueries(fx, rep)
-		if e.QuerySim != nil {
+		if e.QuerySim != nil && !e.budgetHit() {
 			triedQ := make([]string, 0, len(mqs)+1)
 			triedQ = append(triedQ, query)
 			triedQ = append(triedQ, mqs...)
@@ -848,7 +909,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	outer_correct:
 		for _, mq := range mqs {
 			for _, s := range order {
-				if correctUsed >= correctBudget {
+				if correctUsed >= correctBudget || e.budgetHit() {
 					break outer_correct
 				}
 				correctUsed++
@@ -885,10 +946,13 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// a generous oracle can mark wrong-doc windows "complete".
 	// D1: exclude = tried only (see widenExclude).
 	widened := 0
+	// Documents widening admitted from outside the corpus: citations must
+	// resolve against them too, so the run reports what it actually sampled.
+	var widenedDocs []source.Source
 	if os.Getenv("ASK_DEBUG_WIDEN") == "1" {
 		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v tried=%d\n", len(kept), rep.Complete, bestScore, e.Widen != nil, len(tried))
 	}
-	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil {
+	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -897,7 +961,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			affinity[k] = true
 		}
 		if extra, err := e.Widen(ctx, query, widenExclude(), widenBudget, affinity); err == nil && len(extra) > 0 {
+			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
+				if e.budgetHit() {
+					break
+				}
 				loops++
 				widened++
 				tried[s.ID] = true
@@ -931,7 +999,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
 			Summary: "深度检索仍证据不足",
-		}, rep, loops, widened, selfCorrected, admissionIDs(tried), nil
+		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), nil
 	}
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
@@ -983,7 +1051,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// low-confidence fired on almost every answer and doubled latency
 	// (真机: 长时间无输出的元凶); mediocre-but-cited answers are acceptable.
 	// D1: same tried-only exclude as the primary widen gate.
-	if best.Refused && widened == 0 && e.Widen != nil && len(affinity) > 0 {
+	if best.Refused && widened == 0 && e.Widen != nil && len(affinity) > 0 && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -996,7 +1064,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			exclude[id] = true
 		}
 		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
+			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
+				if e.budgetHit() {
+					break
+				}
 				loops++
 				widened++
 				tried[s.ID] = true
@@ -1057,7 +1129,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 	}
-	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), nil
+	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), nil
 }
 
 // render prefers the production Synthesizer (synthesize_roi) and degrades to

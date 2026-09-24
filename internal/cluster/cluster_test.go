@@ -4,14 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"testing"
 
-	"github.com/cumubase/ask/internal/cumuport"
 	"github.com/cumubase/ask/internal/mcs"
-	"github.com/willove/cumudb/pkg/client"
+	"github.com/willove/cumulite"
 )
 
 func embedOf(t *testing.T, e Embedder, s string) []float64 {
@@ -231,61 +228,25 @@ func TestTopicAliasesJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// Exercise the real client wire format without requiring a running database.
+// Store-boundary discipline: Save is insert-then-replace, aliases survive the
+// round trip, and FindByTopic resolves all three alias shapes through the
+// engine's own filter semantics.
 func TestCumuStoreTopicAliases(t *testing.T) {
 	for _, key := range []string{"own", "folded", "inherited"} {
 		t.Run(key, func(t *testing.T) {
 			ctx := context.Background()
+			engine, err := cumulite.Open(t.TempDir())
+			if err != nil {
+				t.Fatalf("open engine: %v", err)
+			}
+			defer engine.Close()
+			if err := engine.EnsureCollection(ctx, "ask_clusters"); err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			st := NewCumuStore(engine, "")
+
 			c := New("own", "name", "answer", "original query", "doc", nil, nil, 0.8)
 			c.TopicKeys = []string{"folded", "inherited"}
-			var saved map[string]any
-			inserts, replacements := 0, 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch {
-				case r.Method == http.MethodGet:
-					if saved == nil {
-						http.Error(w, "not found", http.StatusNotFound)
-						return
-					}
-					_ = json.NewEncoder(w).Encode(saved)
-				case r.Method == http.MethodPost && r.URL.Path == "/v1/db/ask_clusters":
-					var body struct {
-						Documents []map[string]any `json:"documents"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Documents) != 1 {
-						t.Errorf("insert body = %+v, err = %v", body, err)
-						http.Error(w, "bad insert", http.StatusBadRequest)
-						return
-					}
-					inserts++
-					saved = body.Documents[0]
-					_ = json.NewEncoder(w).Encode(map[string]any{"ids": []string{c.ID}})
-				case r.Method == http.MethodPut:
-					if err := json.NewDecoder(r.Body).Decode(&saved); err != nil {
-						t.Error(err)
-					}
-					replacements++
-					_ = json.NewEncoder(w).Encode(saved)
-				case r.Method == http.MethodPost && r.URL.Path == "/v1/db/ask_clusters/_ops/query":
-					var body struct {
-						Filter json.RawMessage `json:"filter"`
-					}
-					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-						t.Error(err)
-					}
-					want := fmt.Sprintf(`{"$or":[{"topic_key":%q},{"topic_keys":{"$in":[%q]}}]}`, key, key)
-					if string(body.Filter) != want {
-						t.Errorf("topic filter = %s, want %s", body.Filter, want)
-					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"documents": []map[string]any{saved}})
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					http.Error(w, "unexpected request", http.StatusBadRequest)
-				}
-			}))
-			defer server.Close()
-			st := NewCumuStore(cumuport.New(client.New(server.URL)), "")
 			if err := st.Save(ctx, c); err != nil {
 				t.Fatal(err)
 			}
@@ -309,9 +270,11 @@ func TestCumuStoreTopicAliases(t *testing.T) {
 			if !reflect.DeepEqual(found[0], *got) || found[0].TopicKey != c.TopicKey || found[0].ID != c.ID {
 				t.Fatalf("persisted survivor = %+v, want %+v", found[0], got)
 			}
-			server.Close()
-			if inserts != 1 || replacements != 1 {
-				t.Fatalf("save paths: inserts=%d replacements=%d", inserts, replacements)
+			// Two saves, one document: a second insert would fail loudly on the
+			// duplicate identity, and a replace that missed would leave two.
+			all, err := st.All(ctx)
+			if err != nil || len(all) != 1 {
+				t.Fatalf("save must be insert-or-replace, got %d documents (err %v)", len(all), err)
 			}
 		})
 	}

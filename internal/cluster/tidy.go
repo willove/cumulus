@@ -328,7 +328,6 @@ func orderByAge(a, b Cluster) (winner, loser Cluster) {
 // deduped by window identity, hotness takes the max (heat transfers, doubles
 // do not stack), and flags union.
 func foldInto(winner, loser *Cluster) {
-	winner.Content = winner.Content + "\n---\n" + loser.Content
 	winner.Confidence = (winner.Confidence + loser.Confidence) / 2
 	if loser.Hotness > winner.Hotness {
 		winner.Hotness = loser.Hotness
@@ -364,20 +363,27 @@ func foldInto(winner, loser *Cluster) {
 
 	// Legacy samples carry sampling methods, not document IDs. Normalize both
 	// sides before comparing spans, without mutating either input evidence slice.
+	// The evidence merge comes first: the appended summary's [n] markers have to
+	// be renumbered against the merged list, and a window the survivor already
+	// carries must map back to that existing copy rather than to a duplicate.
 	winner.Evidence = NormalizeEvidence(winner.SourceID, winner.Evidence)
 	loserEvidence := NormalizeEvidence(loser.SourceID, loser.Evidence)
-	seen := map[string]bool{}
-	for _, ev := range winner.Evidence {
-		seen[evidenceKey(ev)] = true
+	index := make(map[string]int, len(winner.Evidence))
+	for i, ev := range winner.Evidence {
+		index[evidenceKey(ev)] = i + 1
 	}
-	for _, ev := range loserEvidence {
-		k := evidenceKey(ev)
-		if seen[k] {
+	remap := make(map[int]int, len(loserEvidence))
+	for k, ev := range loserEvidence {
+		key := evidenceKey(ev)
+		if pos, dup := index[key]; dup {
+			remap[k+1] = pos
 			continue
 		}
-		seen[k] = true
 		winner.Evidence = append(winner.Evidence, ev)
+		index[key] = len(winner.Evidence)
+		remap[k+1] = len(winner.Evidence)
 	}
+	winner.Content = winner.Content + "\n---\n" + RenumberCitations(loser.Content, remap)
 	for f, v := range loser.Flags {
 		if v {
 			if winner.Flags == nil {

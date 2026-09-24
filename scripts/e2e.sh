@@ -7,7 +7,8 @@
 # eval-run offline face + resume (O) + search HTTP/SSE face (P) +
 # chat sessions (Q) + web UI (R) + namespace scoping (S) +
 # cluster tidy (T),
-# against a REAL cumudb. Scorer/embedder are the offline stubs by design
+# against a REAL cumulite store — one embedded Badger directory, no server
+# process. Scorer/embedder are the offline stubs by design
 # (put never blocks on a model). Summary line: ask-e2e: N ok, M fail
 set -u
 cd "$(dirname "$0")/.."
@@ -15,36 +16,31 @@ cd "$(dirname "$0")/.."
 # them at a live model (each search would cost real tokens and flake).
 export ASK_ENV=/dev/null
 WORK="$(mktemp -d)"
-DB_PID=""
+DATA="$WORK/data"
 SERVE_PID=""
 PASS=0
 FAIL=0
-DB_PORT="${E2E_DB_PORT:-8598}"
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS + 1)); printf '  ok: %s\n' "$1"; else FAIL=$((FAIL + 1)); printf '  FAIL: %s\n' "$1"; fi; }
 cleanup() {
-	if [ -n "$DB_PID" ] && [ "$DB_PID" -eq "$DB_PID" ] 2>/dev/null; then kill "$DB_PID" 2>/dev/null; fi
 	if [ -n "$SERVE_PID" ] && [ "$SERVE_PID" -eq "$SERVE_PID" ] 2>/dev/null; then kill "$SERVE_PID" 2>/dev/null; fi
 	rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-(cd ../db-works/cumudb && go build -o "$WORK/cumudb" ./cmd/cumudb && go build -o "$WORK/cumuctl" ./cmd/cumuctl) || { echo "ask-e2e: FAIL building cumudb"; exit 1; }
+(cd ../db-works/cumulite && go build -o "$WORK/cumulite" ./cmd/cumulite) || { echo "ask-e2e: FAIL building cumulite"; exit 1; }
 go build -o "$WORK/ask" ./cmd/ask || { echo "ask-e2e: FAIL building ask"; exit 1; }
 
-"$WORK/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$WORK/data" -log-level warn >"$WORK/cumudb.log" 2>&1 &
-DB_PID=$!
-for _ in $(seq 1 50); do
-	kill -0 "$DB_PID" 2>/dev/null || { echo "ask-e2e: FAIL cumudb died"; tail -5 "$WORK/cumudb.log"; exit 1; }
-	curl -fsS "http://127.0.0.1:$DB_PORT/v1/health" >/dev/null 2>&1 && break
-	sleep 0.2
-done
-curl -fsS "http://127.0.0.1:$DB_PORT/v1/health" >/dev/null || { echo "ask-e2e: FAIL cumudb not healthy"; exit 1; }
-
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" coll create ask_sources >/dev/null
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" coll create ask_evidence >/dev/null
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" coll create ask_clusters >/dev/null
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" coll create ask_weak_edges >/dev/null
-A="$WORK/ask -server http://127.0.0.1:$DB_PORT"
+# One store directory. Badger locks it exclusively, so every phase below either
+# drives the CLI or the serve process — never both at once.
+A="$WORK/ask -data $DATA"
+CUM="$WORK/cumulite"
+# One page of documents matching a filter. Flag order matters: the CLI's
+# FlagSet stops at the first positional, so -data/-filter come before the
+# collection name.
+Q() { "$CUM" doc query -data "$DATA" -limit 500 -filter "$2" "$1"; }
+# How many documents match.
+QQ() { Q "$1" "$2" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["documents"]))'; }
+$A ensure >/dev/null || { echo "ask-e2e: FAIL ensure"; exit 1; }
 
 cat >"$WORK/handbook.md" <<'MD'
 # 部署手册
@@ -85,7 +81,7 @@ print("ok")
 
 S1="$($A search -q "连接池最大连接数" -raw)"
 echo "$S1" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["samples"], "no samples"' ; check "search finds a sample window" $?
-EV1="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_evidence '{}')"
+EV1="$(Q ask_evidence '{}')"
 echo "$EV1" | grep -q "ev:" ; check "evidence window recorded after search" $?
 
 cat >"$WORK/handbook2.md" <<'MD'
@@ -96,7 +92,7 @@ P3="$($A put -title "部署手册" -key handbook -body-file "$WORK/handbook2.md"
 ST3="$(echo "$P3" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 STALE="$(echo "$P3" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("stale_id",""))')"
 [ "$ST3" = "updated" ] && [ -n "$STALE" ] ; check "changed body updates version and marks stale_id" $?
-EVST="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_evidence '{"status":"stale"}')"
+EVST="$(Q ask_evidence '{"status":"stale"}')"
 echo "$EVST" | grep -q "stale" ; check "evidence pointing at old content is invalidated" $?
 
 $A delete "$ID1" >/dev/null
@@ -117,7 +113,7 @@ cat >"$WORK/batch.jsonl" <<'JSONL'
 JSONL
 $A ingest-jsonl -file "$WORK/batch.jsonl" -job batch1 >/dev/null
 $A ingest-jsonl -file "$WORK/batch.jsonl" -job batch1 >/dev/null
-CNT="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_sources '{"business_key":{"$in":["j1","j2","j3"]}}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+CNT="$(QQ ask_sources '{"business_key":{"$in":["j1","j2","j3"]}}')"
 [ "$CNT" -le 3 ] ; check "re-running the same job is idempotent (no duplicate keys)" $?
 
 cat >"$WORK/pool.md" <<'MD'
@@ -158,15 +154,15 @@ echo "$R2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("
 echo "$R2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("cluster_id")=="'"$CID"'", r' ; check "reuse hits the same cluster id" $?
 R3="$($A search -q "最大连接数 连接池" -raw)"
 echo "$R3" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("reused") or r.get("merged") or r.get("cluster_id")=="'"$CID"'", r' ; check "reordered paraphrase does not fracture (G-id)" $?
-NST="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_clusters '{}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+NST="$(QQ ask_clusters '{}')"
 [ "$NST" -le 3 ] ; check "paraphrase family stays within split budget (clusters=$NST)" $?
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_clusters '{}' >/dev/null
+Q ask_clusters '{}' >/dev/null
 R4="$($A search -q "连接池最大连接数是多少" -raw)"
 echo "$R4" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("cluster_id")=="'"$CID"'", r' ; check "cluster id is stable across rebuilds (G-drop)" $?
 
 # --- Gate C: graph expansion / hopKNN / empty-graph fallback ------------------
 # After Gate B, at least one query_seq edge may exist from A→B session order.
-EDGE_N="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_weak_edges '{}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+EDGE_N="$(QQ ask_weak_edges '{}')"
 [ "${EDGE_N:-0}" -ge 0 ] ; check "weak_edges collection is readable (edges=${EDGE_N:-0})" $?
 # Fresh topic on empty neighborhood: neighbors must be empty (fallback L0 ok)
 R5="$($A search -q "防火墙策略配置顺序是什么" -raw)"
@@ -175,7 +171,7 @@ echo "$R5" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("
 # Two related asks should produce query_seq link (A then B)
 $A search -q "路由器基本配置步骤" -raw >/dev/null
 $A search -q "交换机基本配置步骤" -raw >/dev/null
-EDGE_N2="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_weak_edges '{"source":"query_seq"}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+EDGE_N2="$(QQ ask_weak_edges '{"source":"query_seq"}')"
 [ "${EDGE_N2:-0}" -ge 1 ] ; check "query_seq weak edge recorded across asks (n=${EDGE_N2:-0})" $?
 R6="$($A search -q "路由器基本配置步骤" -raw)"
 echo "$R6" | python3 -c 'import json,sys; r=json.load(sys.stdin); nb=r.get("neighbors") or []
@@ -248,7 +244,7 @@ printf '# notes\n文件匹配测试内容。\n' >"$WORK/docs/notes.md"
 printf '纯文本补充说明。\n' >"$WORK/docs/extra.txt"
 $A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
 $A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
-FCNT="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_sources '{"business_key":{"$in":["notes.md","extra.txt"]}}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+FCNT="$(QQ ask_sources '{"business_key":{"$in":["notes.md","extra.txt"]}}')"
 [ "$FCNT" -le 2 ] ; check "ingest-files is resumable/idempotent (n=$FCNT)" $?
 FNAME2="$($A search -q "notes.md" -raw)"
 echo "$FNAME2" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["mode"]=="FILENAME_ONLY" and a.get("source_id"), r' ; check "extension lookup is FILENAME_ONLY" $?
@@ -259,7 +255,7 @@ cat >"$WORK/mapped.jsonl" <<'JSONL'
 {"name":"路由器条目","desc":"型号 AX3000","vendor":"TP"}
 JSONL
 $A ingest-jsonl -file "$WORK/mapped.jsonl" -map "$WORK/map.json" -job map1 >/dev/null
-MAPB="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_sources '{"business_key":"路由器条目"}')"
+MAPB="$(Q ask_sources '{"business_key":"路由器条目"}')"
 echo "$MAPB" | python3 -c '
 import sys
 raw = sys.stdin.read()
@@ -272,7 +268,7 @@ CFL="$($A conflicts list)"
 echo "$CFL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "conflicts list reads ask_conflicts" $?
 RC="$($A reclaim -stale)"
 echo "$RC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("reclaimed",0)>=1, r' ; check "reclaim -stale physically removes retired sources" $?
-RES="$("$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc find ask_sources '{"status":{"$in":["stale","deleted"]}}' | python3 -c 'import sys; print(sys.stdin.read().count("\"_id\""))')"
+RES="$(QQ ask_sources '{"status":{"$in":["stale","deleted"]}}')"
 [ "$RES" -eq 0 ] ; check "no stale/tombstone residue after reclaim" $?
 
 # --- Gate H: html ingest / embed backfill / job state / serve / cites --------
@@ -298,8 +294,24 @@ EMB2="$($A ensure -embed)"
 echo "$EMB2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r; assert r.get("embedded",0)>=1, r' ; check "ensure -embed reports the embedder it used (offline=hash-64, idempotent)" $?
 JOB="$($A job -job fg1)"
 echo "$JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="done" and r["total"]>=2 and r["done"]==r["total"], r' ; check "job state machine reports done with real progress" $?
+
+# --- Gate Q (CLI half): chat sessions (P2, KV) --------------------------------
+# It runs here, before serve: the serve process started just below holds the
+# store directory exclusively, so a CLI turn can no longer run alongside it.
+SESS="e2e-$(date +%s)"
+$A search -q "连接池最大连接数是多少" -session "$SESS" -raw >/dev/null
+$A search -q "它的来源文档标题是什么" -session "$SESS" -raw >/dev/null
+SESSJSON="$($A session show "$SESS")"
+echo "$SESSJSON" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert d["id"].startswith("e2e-"), d
+assert len(d["messages"])==4, ("two turns recorded", len(d["messages"]))
+assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant"
+print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
+
 SPORT="${E2E_SERVE_PORT:-8599}"
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
+"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
 SERVE_PID=$!
 SRV=0
 for _ in $(seq 1 50); do
@@ -334,21 +346,12 @@ for line in raw.splitlines():
 print("ok")' ; check "POST /v1/search/stream emits SSE status/content/citations/done (P1 SSE face)" $?
 
 # --- Gate Q: chat sessions (P2, KV) ------------------------------------------
-SESS="e2e-$(date +%s)"
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" search -q "HTTP 摄取的内容里连接池最大是多少" -session "$SESS" -raw >/dev/null
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" search -q "它的来源文档标题是什么" -session "$SESS" -raw >/dev/null
-SESSJSON="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
-echo "$SESSJSON" | python3 -c '
-import json,sys
-d=json.load(sys.stdin)
-assert d["id"].startswith("e2e-"), d
-assert len(d["messages"])==4, ("two turns recorded", len(d["messages"]))
-assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant"
-print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
+# The CLI half ran before serve came up; the same session is driven over HTTP
+# here, against the store serve now holds.
 PSJ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d "{\"query\":\"连接池最大是多少\",\"session\":\"$SESS\"}")"
 echo "$PSJ" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("session"), r' ; check "HTTP /v1/search echoes session id (P2)" $?
-SESSN="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" session show "$SESS")"
-echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "session show lists appended HTTP turn (P2)" $?
+SESSN="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions/$SESS")"
+echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(d["messages"])==6, ("http turn appended", len(d["messages"]))' ; check "the HTTP turn lands on the CLI-created session (P2)" $?
 
 # --- Gate R: web UI (P7 v0 + UI v1 簇浏览) -----------------------------------
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
@@ -419,13 +422,13 @@ $A put -title "旧版连接池说明" -key pool-old -body "连接池最大 96，
 $A search -q "旧版连接池最大是多少" -raw >/dev/null
 $A put -title "新版连接池说明" -key pool-new -body "连接池上限最大 192，超时 30 秒。新版硬件默认值。" >/dev/null
 $A search -q "新版连接池上限是多少" -raw >/dev/null
-CID96="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" cluster list | python3 -c '
+CID96="$($A cluster list | python3 -c '
 import json,sys
 cs=json.load(sys.stdin)
 hits=[c for c in cs if "96" in (c.get("content") or "")]
 print(hits[0]["_id"] if hits else "")
 ' 2>/dev/null)"
-CID192="$("$WORK/ask" -server "http://127.0.0.1:$DB_PORT" cluster list | python3 -c '
+CID192="$($A cluster list | python3 -c '
 import json,sys
 cs=json.load(sys.stdin)
 hits=[c for c in cs if "192" in (c.get("content") or "")]
@@ -528,7 +531,7 @@ assert len(nb)>=2, ("want both hops of neighbors", len(nb), texts)
 assert any("保险丝" in t for t in texts) and any("监控" in t for t in texts), texts
 print("ok")' ; check "sixmod: graph chain reaches depth-2 neighbors (doc+vector+graph)" $?
 LCID="$($A put -title "照明监控旧版" -key lit-c -body-file "$WORK/litC.md" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
-"$WORK/cumuctl" -server "http://127.0.0.1:$DB_PORT" doc patch ask_sources "$LCID" '{"$set":{"updated_at":"2026-08-20T00:00:00Z"}}' >/dev/null
+"$CUM" doc patch -data "$DATA" -set '{"updated_at":"2026-08-20T00:00:00Z"}' ask_sources "$LCID" >/dev/null
 N2="$($A search -q "照明系统主灯功率是多大" -raw -hopts 168h)"
 echo "$N2" | python3 -c '
 import json,sys
@@ -649,7 +652,7 @@ $A session show "$NSSID" >/dev/null 2>&1 && NSCROSS=1
 
 # HTTP face: per-request "ns" overrides the serve-level namespace (P3)。
 SPORT2="${E2E_SERVE_PORT2:-8600}"
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
+"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
 SERVE2_PID=$!
 SRV2=0
 for _ in $(seq 1 50); do
@@ -750,7 +753,7 @@ DAFTER="$($A cluster list | python3 -c 'import json,sys; print(len(json.load(sys
 # The web workbench's cluster page reads these; list is ns-scoped like every
 # other face, detail carries the cluster's cite edges in one response.
 SPORT3="${E2E_SERVE_PORT3:-8601}"
-"$WORK/ask" -server "http://127.0.0.1:$DB_PORT" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
+"$WORK/ask" -data "$DATA" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
 SERVE3_PID=$!
 SRV3=0
 for _ in $(seq 1 50); do

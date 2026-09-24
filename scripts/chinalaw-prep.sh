@@ -8,40 +8,27 @@
 #   scripts/chinalaw-prep.sh ingest       # build + ensure + ingest-jsonl
 # Env:
 #   LAW_DIR   default ~/datasets/KuugoRen/Chinese_Law
-#   DB_PORT   default 8594 (chinalaw goldeval port)
 #   JOB       default chinalaw
 set -euo pipefail
 cd "$(dirname "$0")/.."
 LAW_DIR="${LAW_DIR:-$HOME/datasets/KuugoRen/Chinese_Law}"
 OUT="${OUT:-var/chinalaw/corpus.jsonl}"
-DB_PORT="${DB_PORT:-8594}"
 JOB="${JOB:-chinalaw}"
-SRV="http://127.0.0.1:$DB_PORT"
 STATE="$(pwd)/var/chinalaw"
+STORE="$STATE/data"
 mkdir -p "$STATE"
 
 [ -d "$LAW_DIR" ] || { echo "chinalaw-prep: LAW_DIR not found: $LAW_DIR" >&2; exit 1; }
 python3 scripts/chinalaw_corpus.py --dir "$LAW_DIR" --out "$OUT"
 
 if [ "${1:-}" != "ingest" ]; then
-	echo "chinalaw-prep: wrote $OUT (pass 'ingest' to load into cumudb :$DB_PORT)"
+	echo "chinalaw-prep: wrote $OUT (pass 'ingest' to load it into the store at $STORE)"
 	exit 0
 fi
 
-db_up() {
-	if curl -fsS "$SRV/v1/health" >/dev/null 2>&1; then return 0; fi
-	(cd ../db-works/cumudb && go build -o "$STATE/cumudb" ./cmd/cumudb) || exit 1
-	go build -o "$STATE/ask" ./cmd/ask || exit 1
-	"$STATE/cumudb" -listen "127.0.0.1:$DB_PORT" -data "$STATE/data" -log-level warn >>"$STATE/db.log" 2>&1 &
-	for _ in $(seq 1 50); do
-		curl -fsS "$SRV/v1/health" >/dev/null 2>&1 && return 0
-		sleep 0.2
-	done
-	echo "chinalaw-prep: cumudb failed" >&2
-	exit 1
-}
-db_up
+# One embedded store directory — no server process. Badger locks it, so no
+# other ask/cumulite process may hold it while this runs.
 go build -o "$STATE/ask" ./cmd/ask || exit 1
-"$STATE/ask" -server "$SRV" ensure
-"$STATE/ask" -server "$SRV" ingest-jsonl -file "$OUT" -job "$JOB"
-echo "chinalaw-prep: ingested $OUT → $SRV job=$JOB"
+"$STATE/ask" -data "$STORE" ensure
+"$STATE/ask" -data "$STORE" ingest-jsonl -file "$OUT" -job "$JOB"
+echo "chinalaw-prep: ingested $OUT → $STORE job=$JOB"
