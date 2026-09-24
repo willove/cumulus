@@ -119,24 +119,29 @@ func Score(it Item, p Prediction) ItemScore {
 			got[strings.ToLower(s)] = true
 		}
 	}
-	ev := false
+	// Ev.Rec is exact membership over CANONICAL keys — never substring
+	// containment. The old two-way strings.Contains made gold "law1" count as
+	// retrieved by "law10" and "src:x" by "src:xy", so an unrelated document
+	// could satisfy evidence retrieval. Canonicalization covers the one
+	// legitimate mismatch: gold is a business key ("handbook") while the
+	// prediction carries the internal revision id ("src:handbook#1").
+	canonGold := map[string]bool{}
 	for g := range gold {
-		if got[g] {
-			ev = true
-			break
+		for _, k := range canonicalKeys(g) {
+			canonGold[k] = true
 		}
 	}
-	if !ev {
-		for g := range gold {
-			for id := range got {
-				if strings.Contains(id, g) || strings.Contains(g, id) {
-					ev = true
-					break
-				}
-			}
-			if ev {
-				break
-			}
+	canonGot := map[string]bool{}
+	for id := range got {
+		for _, k := range canonicalKeys(id) {
+			canonGot[k] = true
+		}
+	}
+	ev := false
+	for g := range canonGold {
+		if canonGot[g] {
+			ev = true
+			break
 		}
 	}
 	grounded := !p.Skipped && strings.TrimSpace(p.Answer) != "" && p.Refs > 0 && p.Resolved >= p.Refs
@@ -150,6 +155,12 @@ func Score(it Item, p Prediction) ItemScore {
 }
 
 // Correct is a lenient exact-match: gold is a substring of the produced answer.
+//
+// A NUMERIC gold must sit on a digit boundary. Plain substring matching made
+// gold "128" score "1280" and "12800" correct — and gold answers in this suite
+// are overwhelmingly numeric claims, so EM was silently inflated on exactly the
+// facts that matter most. Non-numeric gold keeps substring semantics (natural
+// language answers legitimately wrap the gold phrase).
 func Correct(gold, got string) bool {
 	g := strings.TrimSpace(gold)
 	if g == "" {
@@ -162,8 +173,48 @@ func Correct(gold, got string) bool {
 	if strings.EqualFold(g, a) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(a), strings.ToLower(g))
+	lowA, lowG := strings.ToLower(a), strings.ToLower(g)
+	if isNumeric(lowG) {
+		return boundedContains(lowA, lowG)
+	}
+	return strings.Contains(lowA, lowG)
 }
+
+// isNumeric reports whether s is a decimal number (separators allowed).
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && r != '.' && r != ',' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// boundedContains reports whether needle appears in hay delimited by non-digits
+// (or the string bounds) on both sides — so "128" matches "128，超时" and
+// "(128)" but not "1280".
+func boundedContains(hay, needle string) bool {
+	for from := 0; from <= len(hay)-len(needle); {
+		i := strings.Index(hay[from:], needle)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(needle)
+		leftOK := start == 0 || !isDigit(hay[start-1])
+		rightOK := end == len(hay) || !isDigit(hay[end])
+		if leftOK && rightOK {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // Aggregate rolls item scores into the LENS scorecard.
 func Aggregate(items []ItemScore) Report {
@@ -198,6 +249,27 @@ func Aggregate(items []ItemScore) Report {
 	r.EvRec = e / n
 	r.Ground = g / n
 	return r
+}
+
+// canonicalKeys returns the forms an identifier may be matched under: itself
+// (lowercased) and, for an internal revision identity "src:<key>#<version>",
+// the bare business key. Both the gold list and the prediction may carry either
+// form, so both are indexed and compared exactly.
+func canonicalKeys(id string) []string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return nil
+	}
+	out := []string{id}
+	if rest, ok := strings.CutPrefix(id, "src:"); ok {
+		if i := strings.LastIndex(rest, "#"); i > 0 {
+			rest = rest[:i]
+		}
+		if rest != "" && rest != id {
+			out = append(out, rest)
+		}
+	}
+	return out
 }
 
 // ClosedBook scores a no-retrieval run. EM still counts; EvRec and Ground are false.

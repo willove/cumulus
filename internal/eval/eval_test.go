@@ -11,7 +11,7 @@ func TestScoreEvRecAndGround(t *testing.T) {
 	}
 	s := Score(it, p)
 	if !s.EvRec {
-		t.Fatal("gold handbook should hit src:handbook substring")
+		t.Fatal("gold handbook must match the internal id src:handbook via canonical key")
 	}
 	if !s.Grounded {
 		t.Fatal("all refs resolved and non-empty answer → grounded")
