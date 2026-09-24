@@ -538,17 +538,22 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 
 func window(runes []rune, center, half int, source string) Sample {
 	n := len(runes)
-	// CLAMP, never reset. A jittered center past either end used to be handled
-	// by widening the window to the WHOLE body (start > end → [0,n)), so one
-	// "sample" could silently become the entire document — blowing the
-	// MaxEvidence budget and dominating the score ranking — and a center past
-	// the tail produced an empty [n,n) window that still cost a scorer call.
+	// CLAMP the CENTER into the body first, then clamp the span. A jittered
+	// center past either end used to be handled by widening the window to the
+	// WHOLE body (start > end → [0,n)), so one "sample" could silently become
+	// the entire document — blowing the MaxEvidence budget and dominating the
+	// score ranking. Clamping only the span instead gives an empty window and
+	// loses the sample; clamping the center keeps a half-width sliver at the
+	// edge, which is what the jitter intended.
+	if center < 0 {
+		center = 0
+	}
+	if center > n {
+		center = n
+	}
 	start := center - half
 	if start < 0 {
 		start = 0
-	}
-	if start > n {
-		start = n
 	}
 	end := center + half
 	if end > n {

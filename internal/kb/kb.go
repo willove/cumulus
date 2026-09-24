@@ -311,7 +311,12 @@ func mergeEvidence(have, add []mcs.Sample) []mcs.Sample {
 	for _, sm := range have {
 		seen[evidenceKey(sm)] = true
 	}
-	out := have
+	// Copy, never append in place: the input slice belongs to the cluster we
+	// are about to overwrite, and appending into its spare capacity would
+	// mutate data a concurrent reader may still hold (the registry shares
+	// CumuStore instances process-wide).
+	out := make([]mcs.Sample, len(have), len(have)+len(add))
+	copy(out, have)
 	for _, sm := range add {
 		k := evidenceKey(sm)
 		if seen[k] {

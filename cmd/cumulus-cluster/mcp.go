@@ -243,6 +243,9 @@ func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 		return mcpJSON(res), false
 
 	case "list_clusters":
+		if eerr := ensure.declare(ctx, nsForReq); eerr != nil {
+			return mcpErrJSON(fmt.Sprintf("ensure ns %q: %v", nsForReq, eerr)), true
+		}
 		store := cluster.NewCumuStore(c, ns.Coll(nsForReq, "clus_clusters"))
 		all, err := store.All(ctx)
 		if err != nil {
@@ -271,6 +274,9 @@ func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 		id := argStr("id")
 		if id == "" {
 			return mcpErrJSON("id required"), true
+		}
+		if eerr := ensure.declare(ctx, nsForReq); eerr != nil {
+			return mcpErrJSON(fmt.Sprintf("ensure ns %q: %v", nsForReq, eerr)), true
 		}
 		cl, err := cluster.NewCumuStore(c, ns.Coll(nsForReq, "clus_clusters")).Get(ctx, id)
 		if err != nil {

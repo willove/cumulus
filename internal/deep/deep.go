@@ -547,6 +547,16 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	return res, nil
 }
 
+// srcLabel is the deterministic template's source label: the title, falling
+// back to the id. Kept identical to the pre-refactor inline expression so the
+// fallback text never changes.
+func srcLabel(s source.Source) string {
+	if s.Title != "" {
+		return s.Title
+	}
+	return s.ID
+}
+
 // deepMetrics derives the DEEP answer's coverage, confidence and deterministic
 // template from the FINAL kept set. Both the primary build and the post-widen
 // rebuild go through here: they used to be two ~30-line copies that had already
@@ -573,11 +583,7 @@ func (e *Engine) deepMetrics(query, srcTitle string, kept []mcs.Sample, rep fact
 	b.WriteString("【DEEP 摘要】")
 	b.WriteString(query)
 	b.WriteString("\n【来源】")
-	title := srcTitle
-	if title == "" {
-		title = "（未命名来源）"
-	}
-	b.WriteString(title)
+	b.WriteString(srcTitle)
 	b.WriteString("\n")
 	for i, sm := range kept {
 		fmt.Fprintf(&b, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
@@ -1075,7 +1081,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
 	rep = report(kept)
-	cov, conf, template := e.deepMetrics(query, bestSrc.Title, kept, rep)
+	cov, conf, template := e.deepMetrics(query, srcLabel(bestSrc), kept, rep)
 	buildAnswer := func(tmpl string) fast.Answer {
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops,
@@ -1135,7 +1141,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if widened > 0 {
 				kept = topKeepsWith(kept, sources)
 				rep = report(kept)
-				cov, conf, template = e.deepMetrics(query, bestSrc.Title, kept, rep)
+				cov, conf, template = e.deepMetrics(query, srcLabel(bestSrc), kept, rep)
 				best = buildAnswer(template)
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 			}
