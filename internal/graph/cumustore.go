@@ -56,7 +56,7 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 
 func (s *CumuStore) Save(ctx context.Context, e Edge) error {
 	if e.ID == "" {
-		e.ID = edgeID(e.From, e.To, e.Source)
+		e.ID = edgeIDWithKind(e.From, e.To, e.Source, e.Kind)
 	}
 	doc := map[string]any{
 		"_id":    e.ID,
@@ -111,13 +111,22 @@ func (s *CumuStore) To(ctx context.Context, id string) ([]Edge, error) {
 	return edges, nil
 }
 
-// All is the unfiltered edge list (maintenance faces; not cached).
+// All is the unfiltered edge list (maintenance faces; not cached). Paginated:
+// a hardcoded single page silently truncated at the design's weak-edge ceiling
+// (≤10⁴), so embed_sim backfill and the tidy sweep saw a partial graph.
 func (s *CumuStore) All(ctx context.Context) ([]Edge, error) {
-	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 1000})
-	if err != nil {
-		return nil, err
+	const page = 1000
+	var out []Edge
+	for skip := 0; ; skip += page {
+		res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: page, Skip: skip})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, docsToEdges(res.Documents)...)
+		if len(res.Documents) < page {
+			return out, nil
+		}
 	}
-	return docsToEdges(res.Documents), nil
 }
 
 func (s *CumuStore) Delete(ctx context.Context, id string) error {

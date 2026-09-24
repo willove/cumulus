@@ -9,7 +9,9 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -140,6 +142,73 @@ func DefaultConfig() Config {
 		SmallFileRunes:  1000,
 		MaxEvidence:     15000,
 	}
+}
+
+// EnvConfig is DefaultConfig with operator overrides from the environment.
+// SSOT §3.3: "参数：samples_per_round、top_seeds、sigma、小文档阈值——配置驱动，
+// 进 scenario". Before this, DefaultConfig() was the ONLY source, so a knob the
+// design promises could not actually be turned. Every override is optional and
+// must be positive; anything unparseable is ignored, so an unconfigured
+// process behaves exactly as before.
+//
+//	CLUS_MCS_WINDOW            window half-width in runes
+//	CLUS_MCS_SAMPLES_PER_ROUND slots per proposal round
+//	CLUS_MCS_ROUNDS            proposal rounds
+//	CLUS_MCS_TOP_SEEDS         seeds carried into stage 2
+//	CLUS_MCS_SIGMA             gaussian jitter in runes
+//	CLUS_MCS_SMALL_FILE        rune threshold for the whole-file shortcut
+//	CLUS_MCS_MAX_EVIDENCE      rune budget over kept windows
+func EnvConfig() Config {
+	c := DefaultConfig()
+	if n, ok := envInt("CLUS_MCS_WINDOW"); ok {
+		c.Window = n
+	}
+	if n, ok := envInt("CLUS_MCS_SAMPLES_PER_ROUND"); ok {
+		c.SamplesPerRound = n
+	}
+	if n, ok := envInt("CLUS_MCS_ROUNDS"); ok {
+		c.Rounds = n
+	}
+	if n, ok := envInt("CLUS_MCS_TOP_SEEDS"); ok {
+		c.TopSeeds = n
+	}
+	if f, ok := envFloat("CLUS_MCS_SIGMA"); ok {
+		c.Sigma = f
+	}
+	if n, ok := envInt("CLUS_MCS_SMALL_FILE"); ok {
+		c.SmallFileRunes = n
+	}
+	if n, ok := envInt("CLUS_MCS_MAX_EVIDENCE"); ok {
+		c.MaxEvidence = n
+	}
+	if c.Window <= 0 {
+		c = DefaultConfig() // an unusable window would make every probe empty
+	}
+	return c
+}
+
+func envFloat(key string) (float64, bool) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	return f, true
+}
+
+func envInt(key string) (int, bool) {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // Sampler runs the three-stage loop.
@@ -469,16 +538,24 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 
 func window(runes []rune, center, half int, source string) Sample {
 	n := len(runes)
+	// CLAMP, never reset. A jittered center past either end used to be handled
+	// by widening the window to the WHOLE body (start > end → [0,n)), so one
+	// "sample" could silently become the entire document — blowing the
+	// MaxEvidence budget and dominating the score ranking — and a center past
+	// the tail produced an empty [n,n) window that still cost a scorer call.
 	start := center - half
 	if start < 0 {
 		start = 0
+	}
+	if start > n {
+		start = n
 	}
 	end := center + half
 	if end > n {
 		end = n
 	}
-	if start > end {
-		start, end = 0, n
+	if end < start {
+		end = start
 	}
 	arm := "local"
 	switch source {

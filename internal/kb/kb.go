@@ -92,15 +92,21 @@ func New(f *fast.Engine, st cluster.Store, emb cluster.Embedder) *Engine {
 
 // Result wraps a FAST answer with cluster bookkeeping and graph expansion.
 type Result struct {
-	Answer      fast.Answer          `json:"answer"`
-	Reused      bool                 `json:"reused"`
-	ClusterID   string               `json:"cluster_id,omitempty"`
-	ClusterVer  int                  `json:"cluster_version,omitempty"`
-	Sampled     int                  `json:"sampled"` // 0 on reuse
-	Persisted   bool                 `json:"persisted"`
-	Merged      bool                 `json:"merged"`
-	Neighbors   []graph.ExpandResult `json:"neighbors,omitempty"`
-	PrevCluster string               `json:"prev_cluster,omitempty"`
+	Answer     fast.Answer `json:"answer"`
+	Reused     bool        `json:"reused"`
+	ClusterID  string      `json:"cluster_id,omitempty"`
+	ClusterVer int         `json:"cluster_version,omitempty"`
+	Sampled    int         `json:"sampled"` // 0 on reuse
+	Persisted  bool        `json:"persisted"`
+	Merged     bool        `json:"merged"`
+	// FoldRejected carries the AcceptFold verdict when a proposed fold was
+	// refused. Non-empty means the answer was NOT folded into the target's
+	// content/evidence (only the ask was recorded, so the topic does not
+	// fracture); it used to be discarded, making a refused fold look like a
+	// successful merge in the eval cost line.
+	FoldRejected string               `json:"fold_rejected,omitempty"`
+	Neighbors    []graph.ExpandResult `json:"neighbors,omitempty"`
+	PrevCluster  string               `json:"prev_cluster,omitempty"`
 }
 
 // Ask runs reuse-or-search. Reuse path: 0 samples. Fresh path: FAST + save/merge.
@@ -261,9 +267,16 @@ func anchoredSourceIDs(c cluster.Cluster) []string {
 	return out
 }
 
-// crossTopicNear returns clusters outside this topic_key whose max-over-keys
-// score clears ReuseTheta and that pass the G-pollute relevance gate. They
-// are offered to the merge path only — not to answer reuse.
+// crossTopicNear returns clusters outside this topic_key that are close enough
+// to be MERGE candidates and that pass the G-pollute relevance gate. They are
+// offered to the merge path only — never returned as a reused answer.
+//
+// The bar is MergeTheta, NOT ReuseTheta. SSOT D3: "未过复用线但与既有簇
+// embed_sim ≥ merge_θ 时 merge 进旧簇（追加 evidence/query），不新建" — the
+// merge band is precisely the band BELOW the reuse line. Pre-filtering at
+// ReuseTheta here made MergeTheta unreachable cross-topic (the candidate set
+// was already truncated to ≥0.85), so G-merge only ever fired inside one
+// topic_key where reuse usually fires first.
 func (e *Engine) crossTopicNear(ctx context.Context, key string, qe []float64, query string) []cluster.Cluster {
 	all, err := e.Store.All(ctx)
 	if err != nil {
@@ -274,7 +287,7 @@ func (e *Engine) crossTopicNear(ctx context.Context, key string, qe []float64, q
 		if c.TopicKey == key || containsTopicAlias(c, key) {
 			continue
 		}
-		if !cluster.ShouldReuse(&c, query, qe, e.ReuseTheta) {
+		if !cluster.CanMerge(&c, query, qe, e.MergeTheta) {
 			continue
 		}
 		if !cluster.RelevanceGate(query, c, 0.15) {
@@ -283,6 +296,35 @@ func (e *Engine) crossTopicNear(ctx context.Context, key string, qe []float64, q
 		out = append(out, c)
 	}
 	return out
+}
+
+// mergeEvidence appends the new windows to the cluster's, dropping any window
+// already present by (source, start, end). Without the dedup every ask that
+// lands in the [MergeTheta, ReuseTheta) band re-appended the same windows, so a
+// hot cluster's evidence list grew without bound and G-idem ("evidence 不重复
+// 追加") was violated.
+func mergeEvidence(have, add []mcs.Sample) []mcs.Sample {
+	if len(add) == 0 {
+		return have
+	}
+	seen := make(map[string]bool, len(have))
+	for _, sm := range have {
+		seen[evidenceKey(sm)] = true
+	}
+	out := have
+	for _, sm := range add {
+		k := evidenceKey(sm)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, sm)
+	}
+	return out
+}
+
+func evidenceKey(sm mcs.Sample) string {
+	return fmt.Sprintf("%s|%d|%d", sm.Source, sm.Start, sm.End)
 }
 
 func containsTopicAlias(c cluster.Cluster, key string) bool {
@@ -340,13 +382,18 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 			target = &existing[0]
 		}
 	}
+	// A rejected fold must stay rejected. The A2 verdict (specificity /
+	// separation / cross-topic divergent claims) decides whether the new
+	// answer's CONTENT may be folded in; falling through to a query-only
+	// evolve and reporting it as a merge used to undo the verdict silently —
+	// and RejectedProposals then counted a fold that in fact happened.
+	foldRejected := ""
 	if target != nil {
-		// A2: fold only when Self-Index Specificity/Separation pass.
 		if ok, why := cluster.AcceptFold(*target, cluster.Cluster{
 			ID: "proposed", TopicKey: key, Queries: []string{ans.Query},
 			Content: ans.Summary,
 		}, same, 3); !ok {
-			_ = why
+			foldRejected = why
 			e.RejectedProposals++
 			target = nil
 		}
@@ -355,6 +402,12 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		wasStale := e.priorStale(ctx, target, sources)
 		target.Evidence = cluster.NormalizeEvidence(target.SourceID, target.Evidence)
 		target.Evolve(ans.Query, nil)
+		// A cross-topic fold must leave the loser's topic key behind as an
+		// alias, or the new wording can never be found by FindByTopic again —
+		// every repeat would re-run L0 and re-merge instead of reusing.
+		if key != target.TopicKey && !containsTopicAlias(*target, key) {
+			target.TopicKeys = append(target.TopicKeys, key)
+		}
 		e.refreshEmbeds(ctx, target)
 		if replace || wasStale {
 			target.Content = ans.Summary
@@ -370,7 +423,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 			}
 			target.Content += "\n---\n" + cluster.RenumberCitations(ans.Summary, remap)
 			target.Confidence = (target.Confidence + ans.Confidence) / 2
-			target.Evidence = append(target.Evidence, ans.Samples...)
+			// G-idem: a repeated ask must not append the same window twice.
+			target.Evidence = mergeEvidence(target.Evidence, ans.Samples)
 		}
 		target.SourceID = ans.SourceID
 		if wasStale {
@@ -387,6 +441,12 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		return res, nil
 	}
 
+	// No foldable target. The topic may still already exist, and G-id caps
+	// same-topic clusters at split_cap (default 1): record the ask on the
+	// existing cluster instead of fracturing it. This is a QUERY-ONLY
+	// evolution — content and evidence stay exactly as they were, because the
+	// A2 gate just refused them — so it is reported as NOT merged. Without the
+	// honest flag a rejected fold looked like a successful one.
 	if existing := cluster.SplitCap(same, key, e.SplitCap); len(existing) > 0 {
 		c := existing[0]
 		c.Evolve(ans.Query, nil)
@@ -397,7 +457,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		res.ClusterID = c.ID
 		res.ClusterVer = c.Version
 		res.Persisted = true
-		res.Merged = true
+		res.Merged = false
+		res.FoldRejected = foldRejected
 		return res, nil
 	}
 
@@ -631,5 +692,3 @@ func (e *Engine) refreshEmbeds(ctx context.Context, c *cluster.Cluster) {
 	}
 	c.AttachKeyEmbeds(vs)
 }
-
-var _ = mcs.Sample{}

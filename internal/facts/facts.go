@@ -7,6 +7,7 @@
 package facts
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/willove/cumulus/internal/mcs"
@@ -207,17 +208,37 @@ func NeedContinue(rep Report, loops, maxLoops int) bool {
 	return !rep.Complete
 }
 
-// MissingQueries returns the fact queries still open (self-correction input).
+// MissingQueries returns the fact queries still open (self-correction input),
+// WEAKEST FIRST. SSOT §3.5: "NeedContinue/MissingQueries 驱动有界自纠错（最弱
+// 需求优先扩窗）". Declaration order made every uncovered fact tie at score 0,
+// so "weakest" was never computed and the re-sampling order was arbitrary.
+// Uncovered facts score 0 and come first; ties keep declaration order so the
+// result stays deterministic.
 func MissingQueries(facts []Fact, rep Report) []string {
 	miss := map[string]bool{}
 	for _, id := range rep.Missing {
 		miss[id] = true
 	}
-	var out []string
-	for _, f := range facts {
+	type open struct {
+		query string
+		score float64
+		order int
+	}
+	var opens []open
+	for i, f := range facts {
 		if miss[f.ID] {
-			out = append(out, f.Query)
+			opens = append(opens, open{query: f.Query, score: f.Score, order: i})
 		}
+	}
+	sort.SliceStable(opens, func(i, j int) bool {
+		if opens[i].score != opens[j].score {
+			return opens[i].score < opens[j].score // weakest requirement first
+		}
+		return opens[i].order < opens[j].order
+	})
+	out := make([]string, 0, len(opens))
+	for _, o := range opens {
+		out = append(out, o.query)
 	}
 	return out
 }

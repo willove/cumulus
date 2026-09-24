@@ -90,11 +90,16 @@ type Engine struct {
 	// PriorHist feeds the prior's history arm from successful evidence
 	// (clus_evidence). nil = history arm silent.
 	PriorHist *prior.History
+	// Verbose, when set, receives per-step diagnostics (serve -verbose /
+	// CLUS_VERBOSE). nil → silent. It exists so a degraded step (a failed
+	// expander, a refused synthesis) is visible instead of looking like a
+	// clean miss.
+	Verbose func(format string, a ...any)
 }
 
 func New(scorer mcs.Scorer) *Engine {
 	return &Engine{
-		Sampler:  mcs.New(mcs.DefaultConfig(), scorer),
+		Sampler:  mcs.New(mcs.EnvConfig(), scorer),
 		MaxChars: 15000,
 	}
 }
@@ -122,13 +127,19 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			Summary: "整文档意图超出 v1 证据检索范围"}, nil
 	}
 
-	// Keyword cascade: primary → fallback → expander levels.
+	// Keyword cascade: primary → fallback → expander levels. calls counts the
+	// LLM-shaped steps actually taken, so the D5/§6.2 gate ("FAST 档 LLM 调用
+	// 次数 ≤2") is asserted against reality instead of a hardcoded 2 — the
+	// expander is a third call and used to be invisible in the accounting.
+	calls := 1 // the analyze call above
 	ranked := e.rankFields(orderedKeys(a.Primary), sources)
 	if len(ranked) == 0 {
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
 	}
 	if len(ranked) == 0 && e.Expander != nil {
-		if levels, err := e.Expander.Expand(ctx, query, 3); err == nil {
+		levels, xerr := e.Expander.Expand(ctx, query, 3)
+		if xerr == nil {
+			calls++ // the expander really did call the model
 			for _, lv := range levels {
 				if len(lv) == 0 {
 					continue
@@ -138,9 +149,16 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 				}
 			}
 		}
+		// A failed expander is a degraded retrieval, not a silent no-op.
+		if xerr != nil && e.Verbose != nil {
+			e.Verbose("expander failed, cascade stays at primary/fallback: %v", xerr)
+		}
 	}
 	if len(ranked) == 0 {
-		return Answer{Query: query, Mode: ModeFAST, LLMCalls: 1, Skipped: true}, nil
+		return Answer{Query: query, Mode: ModeFAST, LLMCalls: calls, Skipped: true}, nil
+	}
+	if ctx.Err() != nil {
+		return Answer{}, ctx.Err()
 	}
 	best := ranked[0].src
 	samples, err := e.Sampler.SampleBody(ctx, query, best.Body)
@@ -161,7 +179,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}
 	if len(kept) == 0 {
 		return Answer{
-			Query: query, Mode: ModeFAST, LLMCalls: 2, SourceID: best.ID,
+			Query: query, Mode: ModeFAST, LLMCalls: calls + 1, SourceID: best.ID,
 			Skipped: true, Summary: "证据不足，未合成",
 		}, nil
 	}
@@ -176,16 +194,21 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	return Answer{
 		Query:      query,
 		Mode:       ModeFAST,
-		LLMCalls:   2,
+		LLMCalls:   calls + 1, // + the synthesis call
 		SourceID:   best.ID,
 		Samples:    kept,
 		Coverage:   cov,
 		Confidence: conf,
 		Summary:    summary,
-		Skipped:    conf < 0.35,
+		Skipped:    conf < SkipBelow,
 		Refused:    RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
 	}, nil
 }
+
+// SkipBelow is the FAST confidence floor below which an answer is marked
+// skipped. It mirrors deep.EscalateBelow so tuning one line cannot desynchronize
+// the FAST skip flag from the DEEP escalation line.
+const SkipBelow = 0.35
 
 // AdmitByFields admits up to m active sources matching the given fields
 // directly (the widen loop's refinement round: keywords regenerated after a
@@ -390,21 +413,32 @@ func MatchFilename(query string, sources []source.Source) (Answer, bool) {
 	}, true
 }
 
-// rankFields ranks sources by the keyword cascade, or by the prior when
-// the engine opts in (empty prior result falls back to the plain cascade).
+// rankFields ranks sources for one keyword level. Without UsePrior it is the
+// plain TF-IDF-ish cascade. With UsePrior the prior REORDERS the cascade's own
+// hits — it is a re-ranker over retrieved candidates, not a candidate
+// generator.
+//
+// That distinction is the fix for a real bug: prior.Rank scores every ACTIVE
+// source (its scan arm has a 0.3 floor plus 0.2 for being active), so it never
+// returns an empty list. Feeding its output straight through meant
+// `if len(out) > 0 { return out }` always fired — the plain cascade, and the
+// documented "empty prior result falls back to the plain cascade", were
+// unreachable, and a zero-signal query got an arbitrary pick instead of the
+// honest skip.
 func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
-	if e.UsePrior && len(fields) > 0 {
-		var out []scored
-		for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
-			if s := sourceByID(sources, f.SourceID); s != nil {
-				out = append(out, scored{src: *s, score: f.Score})
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
+	plain := rankSources(fields, sources)
+	if !e.UsePrior || len(fields) == 0 || len(plain) == 0 {
+		return plain
 	}
-	return rankSources(fields, sources)
+	priorScore := make(map[string]float64)
+	for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
+		priorScore[f.SourceID] = f.Score
+	}
+	out := append([]scored(nil), plain...)
+	sort.SliceStable(out, func(i, j int) bool {
+		return priorScore[out[i].src.ID] > priorScore[out[j].src.ID]
+	})
+	return out
 }
 
 func sourceByID(sources []source.Source, id string) *source.Source {
@@ -421,12 +455,22 @@ type scored struct {
 	score float64
 }
 
+// orderedKeys returns the cascade's field order: by IDF weight DESCENDING, then
+// by name for a deterministic tie-break. The weights used to be dropped
+// entirely (plain alphabetical order), which threw away the IDF channel the
+// fast_analyze contract promises (§6.3: "意图 + 两级关键词 + IDF 权重") and
+// made the two-level cascade order arbitrary in production.
 func orderedKeys(m map[string]float64) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Strings(out) // deterministic cascade order
+	sort.Slice(out, func(i, j int) bool {
+		if m[out[i]] != m[out[j]] {
+			return m[out[i]] > m[out[j]] // highest IDF first
+		}
+		return out[i] < out[j] // deterministic cascade order
+	})
 	return out
 }
 

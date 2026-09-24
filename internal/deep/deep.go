@@ -283,6 +283,14 @@ func lawAffinity(ids map[string]bool, sources []source.Source) map[string]bool {
 	return aff
 }
 
+// cancelled reports whether the caller went away. The DEEP loops consult it
+// before every paying stage: serve's SSE path cancels through r.Context(), and
+// without this a disconnected client kept burning scorer/synthesizer calls
+// until the loop ran out.
+func cancelled(ctx context.Context) bool {
+	return ctx.Err() != nil
+}
+
 func (e *Engine) scorer() mcs.Scorer {
 	if e.Scorer != nil {
 		return e.Scorer
@@ -352,11 +360,6 @@ func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (
 	if load == nil {
 		return Result{}, fmt.Errorf("deep: AskLazy requires a loader")
 	}
-	if e.Sources == nil {
-		// Keep the engine's cached corpus view honest; the lazy path fills
-		// it when (and only when) the corpus is actually needed.
-		_ = e.Sources
-	}
 	query = e.effectiveQuery(ctx, query)
 	fx := facts.Build(query)
 	thr := e.thresholdFor(fx)
@@ -410,7 +413,11 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	}
 
 	// Single-fact paraphrases may miss lexical coverage despite a validated prior.
+	// A conflicts edge is an escalation condition in its own right (D5: "或命中
+	// conflicts 边"): a contested prior must be re-searched, not served as a
+	// normal FAST answer.
 	need := base.Answer.Skipped || base.Answer.Refused || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
+		len(res.Conflicts) > 0 ||
 		(!res.Cover.Complete && (!base.Reused || len(fx) > 1))
 	// Zero-LLM abstention head (ir-rag 3.1): structural features only; nil
 	// head keeps the historical escalate/refuse gates unchanged.
@@ -538,6 +545,52 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	res.Sampled = len(deepAns.Samples)
 	res.BudgetHit = e.BudgetHit
 	return res, nil
+}
+
+// deepMetrics derives the DEEP answer's coverage, confidence and deterministic
+// template from the FINAL kept set. Both the primary build and the post-widen
+// rebuild go through here: they used to be two ~30-line copies that had already
+// drifted apart (the second re-applied the 0.45 incomplete-cover cap, the first
+// did not), so a refused-and-recovered answer was scored by different rules
+// than a first-pass one.
+//
+// The +0.1 synthesis bonus and the 0.45 incomplete-cover cap are the DEEP-tier
+// calibration; they live in one place so they can be re-measured together.
+func (e *Engine) deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (coverage, confidence float64, template string) {
+	cov := mcs.Coverage(query, kept)
+	mean := 0.0
+	for _, sm := range kept {
+		mean += sm.Score
+	}
+	if len(kept) > 0 {
+		mean /= float64(len(kept))
+	}
+	conf := mcs.Confidence(mean, cov)
+	if conf < 1 {
+		conf = min1(conf + 0.1)
+	}
+	var b strings.Builder
+	b.WriteString("【DEEP 摘要】")
+	b.WriteString(query)
+	b.WriteString("\n【来源】")
+	title := srcTitle
+	if title == "" {
+		title = "（未命名来源）"
+	}
+	b.WriteString(title)
+	b.WriteString("\n")
+	for i, sm := range kept {
+		fmt.Fprintf(&b, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
+	}
+	if !rep.Complete {
+		b.WriteString("\n【未覆盖需求】")
+		b.WriteString(strings.Join(rep.Missing, ", "))
+		// Weakest-requirement floor: open facts cap confidence.
+		if conf > 0.45 {
+			conf = 0.45
+		}
+	}
+	return cov, conf, b.String()
 }
 
 // topKeeps sorts kept windows by score and truncates to the synthesis budget.
@@ -776,7 +829,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		return facts.ReportFor(fx, samples)
 	}
 	newSampler := func() *mcs.Sampler {
-		smp := mcs.New(mcs.DefaultConfig(), e.scorer())
+		smp := mcs.New(mcs.EnvConfig(), e.scorer())
 		smp.FactHints = hints
 		return smp
 	}
@@ -806,6 +859,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	bestScore := -1.0
 	rep := report(kept)
 	for _, s := range ranked {
+		if cancelled(ctx) {
+			break
+		}
 		if s.Status != source.StatusActive {
 			continue
 		}
@@ -888,7 +944,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			gap = float64(len(rep.Missing)) / float64(len(fx))
 		}
 		exploreSampler := func() *mcs.Sampler {
-			smp := mcs.New(mcs.DefaultConfig(), e.scorer())
+			smp := mcs.New(mcs.EnvConfig(), e.scorer())
 			smp.FactHints = hints
 			if gap > 0 {
 				smp.ExploreBoost = 1 + 2*gap // 1.0 (no gap) → 3.0 (all open)
@@ -904,11 +960,22 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			triedQ = append(triedQ, mqs...)
 			if extra, err := e.QuerySim.Complement(ctx, query, triedQ); err == nil && len(extra) > 0 {
 				mqs = append(mqs, facts.FilterDissimilar(query, triedQ, extra, 0)...)
+			} else if err != nil && e.Verbose != nil {
+				// Best-effort by design, but it must be visible: a silently
+				// failing complement generator makes self-correction look like
+				// it had nothing to add.
+				e.Verbose("query sim failed, self-correction stays on missing facts: %v", err)
 			}
 		}
 	outer_correct:
 		for _, mq := range mqs {
+			if cancelled(ctx) {
+				break outer_correct
+			}
 			for _, s := range order {
+				if cancelled(ctx) {
+					break outer_correct
+				}
 				if correctUsed >= correctBudget || e.budgetHit() {
 					break outer_correct
 				}
@@ -952,7 +1019,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	if os.Getenv("CLUS_DEBUG_WIDEN") == "1" {
 		fmt.Fprintf(os.Stderr, "deep: widen gate kept=%d complete=%v best=%.1f hook=%v tried=%d\n", len(kept), rep.Complete, bestScore, e.Widen != nil, len(tried))
 	}
-	if (facts.NeedContinue(rep, 0, MaxLoops) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
+	// Covers alone cannot veto widening: a generous oracle can mark
+	// wrong-doc windows "complete". The budget term uses the REAL loop count
+	// (passing 0 made the predicate collapse to !Complete, so the "budget
+	// aware" gate never saw the budget).
+	if (facts.NeedContinue(rep, loops, MaxLoops+correctBudget+widenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -963,7 +1034,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if extra, err := e.Widen(ctx, query, widenExclude(), widenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
-				if e.budgetHit() {
+				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
 				loops++
@@ -1004,46 +1075,16 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
 	rep = report(kept)
-	cov := mcs.Coverage(query, kept)
-	mean := 0.0
-	for _, sm := range kept {
-		mean += sm.Score
-	}
-	mean /= float64(len(kept))
-	conf := mcs.Confidence(mean, cov)
-	if conf < 1 {
-		conf = min1(conf + 0.1)
-	}
-	var b strings.Builder
-	b.WriteString("【DEEP 摘要】")
-	b.WriteString(query)
-	b.WriteString("\n【来源】")
-	title := bestSrc.Title
-	if title == "" {
-		title = bestSrc.ID
-	}
-	b.WriteString(title)
-	b.WriteString("\n")
-	for i, sm := range kept {
-		fmt.Fprintf(&b, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
-	}
-	if !rep.Complete {
-		b.WriteString("\n【未覆盖需求】")
-		b.WriteString(strings.Join(rep.Missing, ", "))
-		// Weakest-requirement floor: open facts cap confidence.
-		if conf > 0.45 {
-			conf = 0.45
-		}
-	}
-	buildAnswer := func(template string) fast.Answer {
+	cov, conf, template := e.deepMetrics(query, bestSrc.Title, kept, rep)
+	buildAnswer := func(tmpl string) fast.Answer {
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops,
 			SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
-			Confidence: conf, Summary: e.render(ctx, query, kept, template),
-			Skipped: conf < 0.35,
+			Confidence: conf, Summary: e.render(ctx, query, kept, tmpl),
+			Skipped: conf < fast.SkipBelow,
 		}
 	}
-	best = buildAnswer(b.String())
+	best = buildAnswer(template)
 	best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 
 	// ReAct 观察轮: ONLY on a genuine refusal (flag or template degradation)
@@ -1066,7 +1107,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if extra, err := e.Widen(ctx, query, exclude, widenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
-				if e.budgetHit() {
+				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
 				loops++
@@ -1094,37 +1135,8 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if widened > 0 {
 				kept = topKeepsWith(kept, sources)
 				rep = report(kept)
-				cov = mcs.Coverage(query, kept)
-				mean = 0.0
-				for _, sm := range kept {
-					mean += sm.Score
-				}
-				mean /= float64(len(kept))
-				conf = mcs.Confidence(mean, cov)
-				if conf < 1 {
-					conf = min1(conf + 0.1)
-				}
-				if !rep.Complete && conf > 0.45 {
-					conf = 0.45
-				}
-				var b2 strings.Builder
-				b2.WriteString("【DEEP 摘要】")
-				b2.WriteString(query)
-				b2.WriteString("\n【来源】")
-				title := bestSrc.Title
-				if title == "" {
-					title = bestSrc.ID
-				}
-				b2.WriteString(title)
-				b2.WriteString("\n")
-				for i, sm := range kept {
-					fmt.Fprintf(&b2, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, trim(sm.Content, 200))
-				}
-				if !rep.Complete {
-					b2.WriteString("\n【未覆盖需求】")
-					b2.WriteString(strings.Join(rep.Missing, ", "))
-				}
-				best = buildAnswer(b2.String())
+				cov, conf, template = e.deepMetrics(query, bestSrc.Title, kept, rep)
+				best = buildAnswer(template)
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 			}
 		}

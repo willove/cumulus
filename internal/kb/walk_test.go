@@ -18,13 +18,13 @@ import (
 func TestRepeatedWalkUpgradesPathway(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()
-	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "交换机"}}), st, cluster.Local{N: 64})
+	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "防火墙"}}), st, cluster.Local{N: 64})
 	srcs := []source.Source{
 		source.New("路由器", "md", "file://r", "r", "zh", "路由器基本配置步骤", nil),
-		source.New("交换机", "md", "file://s", "s", "zh", "交换机基本配置步骤", nil),
+		source.New("防火墙", "md", "file://s", "s", "zh", "防火墙端口开放策略", nil),
 	}
 	var a, b string
-	for i, q := range []string{"路由器基本配置步骤", "交换机基本配置步骤", "路由器基本配置步骤", "交换机基本配置步骤"} {
+	for i, q := range []string{"路由器基本配置步骤", "防火墙端口开放策略", "路由器基本配置步骤", "防火墙端口开放策略"} {
 		r, err := e.Ask(ctx, q, srcs)
 		if err != nil {
 			t.Fatalf("ask %d: %v", i, err)
@@ -64,13 +64,13 @@ func TestRepeatedWalkUpgradesPathway(t *testing.T) {
 func TestSingleWalkStaysWeak(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()
-	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "交换机"}}), st, cluster.Local{N: 64})
+	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "防火墙"}}), st, cluster.Local{N: 64})
 	srcs := []source.Source{
 		source.New("路由器", "md", "file://r", "r", "zh", "路由器基本配置步骤", nil),
-		source.New("交换机", "md", "file://s", "s", "zh", "交换机基本配置步骤", nil),
+		source.New("防火墙", "md", "file://s", "s", "zh", "防火墙端口开放策略", nil),
 	}
 	var a, b string
-	for i, q := range []string{"路由器基本配置步骤", "交换机基本配置步骤"} {
+	for i, q := range []string{"路由器基本配置步骤", "防火墙端口开放策略"} {
 		r, err := e.Ask(ctx, q, srcs)
 		if err != nil {
 			t.Fatalf("ask %d: %v", i, err)
@@ -109,14 +109,14 @@ func (m *mapCursor) SaveLastCluster(_ context.Context, id string) error {
 func TestWalkWithCursorLinksBothDirections(t *testing.T) {
 	ctx := context.Background()
 	st := cluster.NewMemory()
-	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "交换机"}}), st, cluster.Local{N: 64})
+	e := New(fast.New(mcs.KeywordScorer{Keywords: []string{"路由器", "防火墙"}}), st, cluster.Local{N: 64})
 	e.Cursor = &mapCursor{}
 	srcs := []source.Source{
 		source.New("路由器", "md", "file://r", "r", "zh", "路由器基本配置步骤", nil),
-		source.New("交换机", "md", "file://s", "s", "zh", "交换机基本配置步骤", nil),
+		source.New("防火墙", "md", "file://s", "s", "zh", "防火墙端口开放策略", nil),
 	}
 	var a, b string
-	for i, q := range []string{"路由器基本配置步骤", "交换机基本配置步骤", "路由器基本配置步骤", "交换机基本配置步骤"} {
+	for i, q := range []string{"路由器基本配置步骤", "防火墙端口开放策略", "路由器基本配置步骤", "防火墙端口开放策略"} {
 		r, err := e.Ask(ctx, q, srcs)
 		if err != nil {
 			t.Fatalf("ask %d: %v", i, err)

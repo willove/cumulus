@@ -204,7 +204,10 @@ func pathScore(fields []string, s source.Source) float64 {
 
 func structScore(fields []string, s source.Source) float64 {
 	if len(s.Structure) == 0 {
-		return 0.2
+		// No structure = no structural evidence. This used to return a free
+		// 0.2 baseline, so structure-less documents scored HIGHER on this arm
+		// than structured documents with no label hit — backwards.
+		return 0
 	}
 	if len(fields) == 0 {
 		return 0
@@ -231,7 +234,10 @@ func historyScore(s source.Source, hist *History) float64 {
 		return 0
 	}
 	for _, id := range hist.SourceIDs {
-		if id == s.ID || strings.Contains(s.ID, id) || strings.Contains(id, s.ID) {
+		// Exact match only: substring matching made src:abc a history hit for
+		// src:abcdef, so an unrelated document inherited a full-strength
+		// history signal.
+		if id == s.ID {
 			return 1.0
 		}
 	}
@@ -268,6 +274,11 @@ func scanScore(s source.Source) float64 {
 
 func posScore(fields []string, s source.Source) PosScore {
 	best := PosScore{SourceID: s.ID, Start: 0, End: minInt(240, len([]rune(s.Body)))}
+	// An empty body yields [0,0) — not a span. Drop the entry rather than
+	// hand the sampler a zero-length window it would score as a miss.
+	if best.End <= best.Start {
+		return PosScore{SourceID: s.ID}
+	}
 	if len(s.Structure) == 0 {
 		return best
 	}

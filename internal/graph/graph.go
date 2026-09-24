@@ -71,9 +71,22 @@ func NewMemory() *Memory { return &Memory{m: map[string]Edge{}} }
 
 func edgeID(from, to, source string) string { return "e:" + from + "-" + to + "-" + source }
 
+// edgeIDWithKind composes an edge id that also carries the rich kind. Plain
+// weak edges keep the historical id (pre-P4 documents stay readable); rich
+// edges (pathway/barrier) get their own namespace so a later plain save of the
+// same (from,to,source) can never clobber them. Without this, LinkCoOcur
+// overwrote a barrier edge — the conflict bar vanished and expansion served
+// the contested cluster as evidence (P4 / G-pollute violated).
+func edgeIDWithKind(from, to, source, kind string) string {
+	if kind == "" {
+		return edgeID(from, to, source)
+	}
+	return "e:" + kind + ":" + from + "-" + to + "-" + source
+}
+
 func (s *Memory) Save(_ context.Context, e Edge) error {
 	if e.ID == "" {
-		e.ID = edgeID(e.From, e.To, e.Source)
+		e.ID = edgeIDWithKind(e.From, e.To, e.Source, e.Kind)
 	}
 	s.m[e.ID] = e
 	return nil
@@ -145,9 +158,8 @@ type ExpandRequest struct {
 type ExpandResult struct {
 	Cluster cluster.Cluster `json:"cluster"`
 	Depth   int             `json:"depth"`
-	Via     []string        `json:"via"`    // edge ids on the path
-	Score   float64         `json:"score"`  // accumulated edge weight
-	Pruned  bool            `json:"pruned"` // dropped by hopKNN this hop (kept for assertions)
+	Via     []string        `json:"via"`   // edge ids on the path
+	Score   float64         `json:"score"` // accumulated edge weight
 }
 
 // Expander walks weak edges over a cluster store.
@@ -425,6 +437,10 @@ func LinkQuerySeq(ctx context.Context, st Store, from, to string) error {
 	for _, prev := range mustFrom(ctx, st, from) {
 		if prev.To == to && prev.Source == SourceQuerySeq {
 			ed.Hits = prev.Hits + 1
+			// Carry the previous id so an upgrade REPLACES the plain edge
+			// instead of leaving a duplicate beside it (rich kinds now own
+			// their id namespace — see edgeIDWithKind).
+			ed.ID = prev.ID
 			if ed.Hits >= PathwayMinHits {
 				ed.Kind = KindPathway
 				ed.Reason = fmt.Sprintf("query_seq×%d", ed.Hits)
@@ -491,6 +507,9 @@ func LinkCoOcur(ctx context.Context, st Store, a, b string) error {
 }
 
 // CoOccurWeight is the current co_occur weight between two clusters (0 if none).
+// Barrier edges are excluded: they record a CONTESTED link (weight 1 by
+// construction), so counting them would report a contested pair as the
+// strongest co-retrieval partner and inflate tidy's co signal.
 func CoOccurWeight(ctx context.Context, st Store, a, b string) float64 {
 	if st == nil || a == "" || b == "" || a == b {
 		return 0
@@ -500,7 +519,7 @@ func CoOccurWeight(ctx context.Context, st Store, a, b string) float64 {
 		return 0
 	}
 	for _, e := range es {
-		if e.Source == SourceCoOcur && ((e.From == a && e.To == b) || (e.From == b && e.To == a)) {
+		if e.Source == SourceCoOcur && e.Kind != KindBarrier && ((e.From == a && e.To == b) || (e.From == b && e.To == a)) {
 			return e.Weight
 		}
 	}
@@ -510,7 +529,7 @@ func CoOccurWeight(ctx context.Context, st Store, a, b string) float64 {
 		return 0
 	}
 	for _, e := range ts {
-		if e.Source == SourceCoOcur && (e.From == b || e.To == b) {
+		if e.Source == SourceCoOcur && e.Kind != KindBarrier && (e.From == b || e.To == b) {
 			return e.Weight
 		}
 	}
@@ -518,7 +537,8 @@ func CoOccurWeight(ctx context.Context, st Store, a, b string) float64 {
 }
 
 // CoOccurPartners is the co-retrieval profile of one cluster: partners sorted
-// by weight desc (Self-Index A.1.2 comparative diagnosis input).
+// by weight desc (Self-Index A.1.2 comparative diagnosis input). Barrier edges
+// are not co-retrieval signal and are left out.
 func CoOccurPartners(ctx context.Context, st Store, id string) []Edge {
 	if st == nil || id == "" {
 		return nil
@@ -526,14 +546,14 @@ func CoOccurPartners(ctx context.Context, st Store, id string) []Edge {
 	var out []Edge
 	if es, err := st.From(ctx, id); err == nil {
 		for _, e := range es {
-			if e.Source == SourceCoOcur {
+			if e.Source == SourceCoOcur && e.Kind != KindBarrier {
 				out = append(out, e)
 			}
 		}
 	}
 	if ts, err := st.To(ctx, id); err == nil {
 		for _, e := range ts {
-			if e.Source == SourceCoOcur {
+			if e.Source == SourceCoOcur && e.Kind != KindBarrier {
 				out = append(out, e)
 			}
 		}

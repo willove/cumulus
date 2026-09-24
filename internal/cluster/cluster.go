@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/willove/cumulus/internal/mcs"
-	"github.com/willove/cumulus/internal/source"
 )
 
 const (
@@ -758,4 +757,3 @@ func keyRel(key string, c Cluster) float64 {
 }
 
 // Ensure unused import of source stays meaningful for future cites typing.
-var _ = source.StatusActive

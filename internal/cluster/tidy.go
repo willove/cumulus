@@ -21,6 +21,13 @@ import (
 // write path applies within a topic (G-merge), now across topics.
 const DefaultTidyTheta = 0.55
 
+// TidyRejection is one refused fold with the A2 verdict that refused it.
+type TidyRejection struct {
+	Winner string `json:"winner"`
+	Loser  string `json:"loser"`
+	Reason string `json:"reason"`
+}
+
 // TidyPair records one fold (or, in dry-run, one fold that would happen).
 type TidyPair struct {
 	Winner string  `json:"winner"`       // surviving cluster (older CreatedAt wins)
@@ -36,15 +43,18 @@ type TidyPair struct {
 // delta makes the effect visible and falsifiable. It is never computed over
 // evaluation items (论文纪律：不许用评测题选演进停止点).
 type TidyReport struct {
-	Scanned           int            `json:"scanned"`
-	Merged            int            `json:"merged"`
-	Rejected          int            `json:"rejected"` // AcceptFold refused (A2)
-	SkippedContested  int            `json:"skipped_contested"`
-	SkippedDeprecated int            `json:"skipped_deprecated"`
-	Lifecycle         map[string]int `json:"lifecycle"`
-	Pairs             []TidyPair     `json:"pairs,omitempty"`
-	DryRun            bool           `json:"dry_run"`
-	Delta             *TidyDelta     `json:"delta,omitempty"`
+	Scanned           int `json:"scanned"`
+	Merged            int `json:"merged"`
+	Rejected          int `json:"rejected"` // AcceptFold refused (A2)
+	SkippedContested  int `json:"skipped_contested"`
+	SkippedDeprecated int `json:"skipped_deprecated"`
+	// Rejections records WHY each refused fold was refused (A2 verdict), so the
+	// sweep's refusals are auditable instead of a bare counter.
+	Rejections []TidyRejection `json:"rejections,omitempty"`
+	Lifecycle  map[string]int  `json:"lifecycle"`
+	Pairs      []TidyPair      `json:"pairs,omitempty"`
+	DryRun     bool            `json:"dry_run"`
+	Delta      *TidyDelta      `json:"delta,omitempty"`
 }
 
 // TidyDelta is the before/after population snapshot of one sweep.
@@ -214,9 +224,13 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 		winner, loser := orderByAge(work[bestWI], work[bestLI])
 		// A2: unvalidated evolution is net-negative — refuse the fold.
 		if ok, why := AcceptFold(winner, loser, work, 3); !ok {
-			_ = why
+			// The reason used to be discarded, so a refused fold was invisible
+			// in the report the operator reads.
 			rejectedPair[pairKey(best.Winner, best.Loser)] = true
 			rep.Rejected++
+			rep.Rejections = append(rep.Rejections, TidyRejection{
+				Winner: winner.ID, Loser: loser.ID, Reason: why,
+			})
 			continue
 		}
 		rep.Pairs = append(rep.Pairs, *best)
