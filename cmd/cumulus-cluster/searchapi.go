@@ -571,6 +571,10 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	ans := res.Answer
 	if ans.Skipped {
 		emit("status", map[string]any{"stage": "insufficient-evidence"})
+	} else if ans.Refused {
+		// 与「没检索到」不同：检索到了最接近的条文，但语料里没有能回答的依据。
+		// 不单独说出来的话，界面会把一段无关引文当成答案展示。
+		emit("status", map[string]any{"stage": "refused"})
 	}
 	emit("content", map[string]any{"text": ans.Summary})
 	if len(res.Citations.Refs) > 0 {
@@ -581,7 +585,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		"coverage": ans.Coverage, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS, "widened": res.Widened,
-		"stop_reason": res.StopReason,
+		"stop_reason": res.StopReason, "refused": ans.Refused, "skipped": ans.Skipped,
 	}
 	if sess != nil {
 		if _, aerr := sess.appendTurnDurable(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {

@@ -98,6 +98,7 @@ export function useChatPane() {
     working: "",
     sampling: "正在采样证据窗口",
     synthesize: "正在合成答案",
+    refused: "语料中没有能回答这个问题的依据，正在整理最接近的条文",
   };
 
   async function loadSessions() {
@@ -238,6 +239,7 @@ export function useChatPane() {
           coverage: m.coverage ?? 0, reused: !!m.reused,
           cluster_id: m.cluster_id || "", stop_reason: m.stop_reason || "",
           insufficient: !!op.insufficient,
+          refused: !!m.refused,
         };
         // 服务端明确说了这一轮没写进会话：必须让用户看见，而不是下次点开才发现
         // 历史里少了这一问。

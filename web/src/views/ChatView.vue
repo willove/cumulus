@@ -55,6 +55,10 @@
           </eb-chatbot>
         </div>
         <eb-alert v-if="stats?.insufficient" type="warning" title="当前证据不足，建议补充文档或缩小问题范围。" :closable="false" show-icon />
+        <eb-alert v-else-if="stats?.refused" type="warning" :closable="false" show-icon
+                  title="这份语料里没有能直接回答这个问题的依据">
+          下面给出的是本库最接近的条文，<b>不等于答案</b>。请补充相关法规或文档后再问（例如工伤认定需要《工伤保险条例》，本库目前只有法律、没有行政法规）。
+        </eb-alert>
         <details v-if="stats || sources.length" class="evidence-tray">
           <summary>查看本次回答的证据 <eb-tag size="small">{{ sources.length }} 个窗口</eb-tag><span v-if="stats" class="tiny">{{ tierLabel(stats.mode) }} · {{ (stats.latency / 1000).toFixed(1) }} 秒</span></summary>
           <div class="evidence-list">

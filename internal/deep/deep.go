@@ -611,7 +611,15 @@ func deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (c
 	var b strings.Builder
 	b.WriteString("【DEEP 摘要】")
 	b.WriteString(query)
-	b.WriteString("\n【来源】")
+	b.WriteString("\n")
+	// 证据不足时必须先说结论，再说依据。以前这里直接跳到【来源】贴一段最接近的
+	// 条文，只在末尾挂一行内部事实 id（"f1"），于是「拒答」在界面上长成了一个像
+	// 答案的摘要——用户看到的是引文，读不出「这句话回答不了你的问题」。
+	// 头部前缀保持原样：模板识别（fast.RefusedOfSummary 依赖「摘要】」）不能破。
+	if !rep.Complete {
+		b.WriteString("⚠ 证据不足：这份语料里没有能直接回答这个问题的依据。以下是最接近的条文，它不等于答案；请补充相关法规或文档后再问。\n")
+	}
+	b.WriteString("【来源】")
 	b.WriteString(srcTitle)
 	b.WriteString("\n")
 	for i, sm := range kept {
@@ -619,13 +627,36 @@ func deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (c
 	}
 	if !rep.Complete {
 		b.WriteString("\n【未覆盖需求】")
-		b.WriteString(strings.Join(rep.Missing, ", "))
+		b.WriteString(missingTexts(rep))
 		// Weakest-requirement floor: open facts cap confidence.
 		if conf > 0.45 {
 			conf = 0.45
 		}
 	}
 	return cov, conf, b.String()
+}
+
+// missingTexts renders uncovered requirements as the questions a reader asked,
+// not the internal fact ids ("f1" means nothing to whoever typed the query).
+func missingTexts(rep facts.Report) string {
+	texts := map[string]string{}
+	for _, f := range rep.Facts {
+		if f.Query != "" {
+			texts[f.ID] = f.Query
+		}
+	}
+	out := make([]string, 0, len(rep.Missing))
+	for _, id := range rep.Missing {
+		if text, ok := texts[id]; ok {
+			out = append(out, text)
+			continue
+		}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return "（未细分）"
+	}
+	return strings.Join(out, "; ")
 }
 
 // topKeeps sorts kept windows by score and truncates to the synthesis budget.

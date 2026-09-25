@@ -586,6 +586,27 @@ for (const [label, response, expected] of [
   });
 }
 
+test("a refused answer is surfaced as such, not as a normal answer", async () => {
+  const state = app(async (url) => {
+    if (url === "/v1/search/stream") {
+      return new Response(
+        'event: status\ndata: {"stage":"refused"}\n\n' +
+        'event: content\ndata: {"text":"【DEEP 摘要】工伤是如何认定的\\n⚠ 证据不足：……"}\n\n' +
+        'event: done\ndata: {"mode":"DEEP","conf":0.45,"refused":true}\n\n',
+      );
+    }
+    return json([]);
+  });
+  await state.mount("chat");
+  await state.onSend("工伤是如何认定的");
+  assert.equal(state.stats.value.refused, true);
+  assert.equal(state.stats.value.insufficient, false);
+  // 阶段文案在 done 之后会被清掉（正常行为），所以断言落在状态与正文上
+  assert.match(state.messages.value[1].content, /证据不足/);
+  // 拒答仍是「完成」，不是错误：正文是服务端给的摘要，但状态标记必须为真
+  assert.equal(state.messages.value[1].status, "done");
+});
+
 test("stop aborts a pending SSE read and retains partial text as cancelled", async () => {
   let signal, cancelled = false;
   const state = app(async (_url, options) => {

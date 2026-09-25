@@ -289,3 +289,48 @@ func TestCoverRecomputedAfterTopKeeps(t *testing.T) {
 		t.Fatalf("D2: missing must list dropped facts: %+v", after)
 	}
 }
+
+// A refusal must look like a refusal. The template used to open with 【DEEP 摘要】
+// and only hang the uncovered requirement on the tail as an internal fact id, so
+// the screen showed a confident-looking digest over an unrelated quote. The
+// header prefix stays untouched (fast.RefusedOfSummary keys on 【...摘要】).
+func TestIncompleteCoverageLeadsWithTheInsufficiency(t *testing.T) {
+	kept := []mcs.Sample{{Source: "src:中华人民共和国社会保险法.txt#1", Start: 3234, End: 3762, Content: "疗服务行为。……", Score: 4}}
+	rep := facts.Report{
+		Complete: false,
+		Missing:  []string{"f1"},
+		Facts:    []facts.Fact{{ID: "f1", Query: "工伤是如何认定的", Covered: false}},
+	}
+	_, conf, text := deepMetrics("工伤是如何认定的", "中华人民共和国社会保险法.txt", kept, rep)
+
+	if !strings.HasPrefix(text, "【DEEP 摘要】工伤是如何认定的\n") {
+		t.Fatalf("模板头必须保持原样（模板识别依赖它）:\n%s", text)
+	}
+	warn := strings.Index(text, "⚠ 证据不足")
+	source := strings.Index(text, "【来源】")
+	if warn < 0 || warn > source {
+		t.Fatalf("拒答提示必须在【来源】之前:\n%s", text)
+	}
+	if !strings.Contains(text, "不等于答案") {
+		t.Fatalf("必须说清引文不是答案:\n%s", text)
+	}
+	if !strings.Contains(text, "工伤是如何认定的") || strings.Contains(text, "f1") {
+		t.Fatalf("未覆盖需求要给人看的文本而不是内部 id:\n%s", text)
+	}
+	if conf > 0.45 {
+		t.Fatalf("未覆盖需求必须压住置信度: %v", conf)
+	}
+
+	// 证据齐全时不得出现这条警告
+	_, _, complete := deepMetrics("工伤是如何认定的", "t", kept, facts.Report{Complete: true})
+	if strings.Contains(complete, "⚠ 证据不足") {
+		t.Fatalf("完整覆盖不该报拒答:\n%s", complete)
+	}
+	// 拿不到事实文本时退回 id，但仍有可读兜底
+	if _, _, fallback := deepMetrics("q", "t", kept, facts.Report{Complete: false, Missing: []string{"f9"}}); !strings.Contains(fallback, "f9") {
+		t.Fatalf("缺事实文本时应退回 id:\n%s", fallback)
+	}
+	if _, _, none := deepMetrics("q", "t", kept, facts.Report{Complete: false}); !strings.Contains(none, "（未细分）") {
+		t.Fatalf("空 missing 要有兜底文案:\n%s", none)
+	}
+}
