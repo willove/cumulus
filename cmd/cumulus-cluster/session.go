@@ -122,6 +122,24 @@ func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer 
 	return d, st.save(ctx, d)
 }
 
+// sessionWriteTimeout bounds a detached turn write. The write is a single KV put
+// on a local engine, so seconds is generous; the bound exists only so a wedged
+// store cannot pin the caller forever.
+const sessionWriteTimeout = 5 * time.Second
+
+// appendTurnDurable writes an already-finished turn even when the caller has gone
+// away. This is the fix for the empty-history bug: the search completed, the user
+// had navigated to another pane (or the SSE stream was aborted), r.Context() was
+// cancelled, the KV put failed, and the turn was dropped silently — the session
+// stayed behind as an empty shell that could no longer be opened into anything.
+// The write is therefore detached from the request context and bounded by its own
+// deadline.
+func (st sessionStore) appendTurnDurable(ctx context.Context, id, title, query, answer string) (*sessionDoc, error) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionWriteTimeout)
+	defer cancel()
+	return st.appendTurn(writeCtx, id, title, query, answer)
+}
+
 // create is ensure-then-save under the same lock appendTurn takes: the pair is
 // one read-modify-write, so the HTTP face must not run it unguarded either.
 func (st sessionStore) create(ctx context.Context, id, title string) (*sessionDoc, error) {

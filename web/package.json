@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@wil-works/evoke-business-ui": "file:/Users/willove/wil-works/evoke-ui-project/packages/evoke-business-ui",
+    "@wil-works/evoke-charts": "file:/Users/willove/wil-works/evoke-ui-project/packages/evoke-charts",
     "@wil-works/evoke-chat": "file:/Users/willove/wil-works/evoke-ui-project/packages/evoke-chat",
     "vue": "^3.5.0"
   },

@@ -11,6 +11,7 @@ export function useChatPane() {
   const loading = ref(false);
   const sources = ref([]);
   const meta = ref("");
+  const elapsed = ref(0); // 秒；来自服务端 status 事件，不本地计时（连接断了就该停）
   const error = ref("");
   const stats = ref(null);
   const { messages, addUserMessage, createAssistantMessage, appendContent, appendThinkContent,
@@ -62,6 +63,7 @@ export function useChatPane() {
     }
     loading.value = false;
     meta.value = "";
+    elapsed.value = 0;
     stats.value = null;
     error.value = "已取消";
   }
@@ -72,18 +74,31 @@ export function useChatPane() {
     sessionRequests.clear();
     sessionsBusy.value = false;
     listRequest = viewRequest = null;
-    sources.value = []; meta.value = ""; stats.value = null; error.value = "";
+    sources.value = []; meta.value = ""; elapsed.value = 0; stats.value = null; error.value = "";
   }
   function clearConversation() {
     current.value = "";
     messages.value = [];
   }
   function showError(e) { error.value = "出错：" + e.message; }
-  async function createSession(op, title) {
-    const d = await sessionJSON(op, "/v1/sessions", jsonPost({ ns: op.ns || undefined, title }));
-    if (!d || typeof d.id !== "string" || !d.id) throw new Error("创建会话失败：响应缺少 session id");
-    return d.id;
+  // 会话 id 由前端生成，服务端在第一次成功落库时才真正建会话（appendTurn 的
+  // ensure）。原来「先 POST 建会话再检索」会留下空壳：检索中断/失败时，列表里
+  // 多出一个 messages 为空的会话，点进去什么都没有——这正是用户报的
+  // 「历史会话点进去无法打开会话内容」。惰性建会话把这一类空壳整体消掉。
+  function newClientSessionID() {
+    const bytes = new Uint8Array(6);
+    (globalThis.crypto || {}).getRandomValues?.(bytes);
+    if (!bytes.some(Boolean)) for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+  // 服务端 stage → 中文文案。以前除 file/insufficient 外直接把原始 stage 显示给
+  // 用户（进度行上出现英文 "started"），既难看也说明不了在做什么。
+  const STAGE_TEXT = {
+    started: "正在分析问题与检索意图",
+    working: "",
+    sampling: "正在采样证据窗口",
+    synthesize: "正在合成答案",
+  };
 
   async function loadSessions() {
     if (disposed) return;
@@ -128,22 +143,14 @@ export function useChatPane() {
     }
   }
 
+  // 新会话同样是惰性的：清空视图并给一个本地 id，第一次成功提问后服务端才落库。
+  // 否则点一下「新会话」就在列表里多一个空会话。
   async function newSession() {
     if (disposed) return;
     switchView();
     clearConversation();
-    const op = operation();
-    viewRequest = op;
-    try {
-      const id = await createSession(op);
-      if (!valid(op)) return;
-      current.value = id;
-      void loadSessions();
-    } catch (e) {
-      if (valid(op)) showError(e);
-    } finally {
-      if (viewRequest === op) viewRequest = null;
-    }
+    current.value = newClientSessionID();
+    void loadSessions();
   }
 
   async function delSession(id, e) {
@@ -211,9 +218,17 @@ export function useChatPane() {
         }));
       } else if (event === "status" && m.stage === "file") {
         meta.value = "已采样 " + (m.file || "") + "（" + (m.score ?? 0) + " 分）";
+        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
+      } else if (event === "status" && m.stage === "working") {
+        // 心跳：只推进计时，不冲掉当前阶段文案
+        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
       } else if (event === "status" && m.stage !== "started") {
         if (m.stage === "insufficient-evidence") op.insufficient = true;
-        meta.value = m.stage === "insufficient-evidence" ? "证据不足，正在整理检索结果" : m.stage;
+        const text = STAGE_TEXT[m.stage] || m.stage;
+        if (text) meta.value = text;
+        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
+      } else if (event === "status" && m.stage === "started") {
+        meta.value = STAGE_TEXT.started;
       } else if (event === "done") {
         finished = true;
         stats.value = {
@@ -224,6 +239,9 @@ export function useChatPane() {
           cluster_id: m.cluster_id || "", stop_reason: m.stop_reason || "",
           insufficient: !!op.insufficient,
         };
+        // 服务端明确说了这一轮没写进会话：必须让用户看见，而不是下次点开才发现
+        // 历史里少了这一问。
+        if (m.session_error) error.value = "答案已生成，但这一轮未写入会话历史：" + m.session_error;
       }
     }
     try {
@@ -261,7 +279,7 @@ export function useChatPane() {
     const op = operation();
     active = op;
     loading.value = true;
-    sources.value = []; meta.value = "检索中……"; stats.value = null; error.value = "";
+    sources.value = []; meta.value = "正在分析问题与检索意图"; elapsed.value = 0; stats.value = null; error.value = "";
     try {
       // eb-chatbot 已经写入用户消息；首页/示例按钮则没有。只去重末条同文 user。
       const last = messages.value[messages.value.length - 1];
@@ -269,11 +287,9 @@ export function useChatPane() {
       op.message = createAssistantMessage();
       appendThinkContent(op.message.id, "检索私域语料并评分证据窗口……");
       scroll();
-      if (!current.value) {
-        const id = await createSession(op, text);
-        assertActive(op);
-        current.value = id;
-      }
+      // 会话 id 本地生成：服务端在第一次成功落库时 ensure 建会话。这样中断的
+      // 提问不会留下谁也打不开的空会话。
+      if (!current.value) current.value = newClientSessionID();
       const resp = await api.searchStream({ query: text, session: current.value, prior: true, ns: op.ns || undefined }, op.controller.signal);
       assertActive(op);
       await readAnswer(op, resp);
@@ -316,7 +332,7 @@ export function useChatPane() {
 
   return {
     sessions, sessionsBusy, current, loading, sources, meta, error, stats, box,
-    messages, onSend, stop, loadSessions, openSession, newSession, delSession, resetForNs,
+    messages, onSend, stop, loadSessions, openSession, newSession, delSession, resetForNs, elapsed,
     pane, nsSel,
   };
 }

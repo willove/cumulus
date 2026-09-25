@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -106,4 +107,63 @@ func applyLLMAliases() {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// writeEnvValues updates KEY=VALUE lines in a suite .env, preserving comments,
+// blank lines and the original order; keys that are absent are appended. The same
+// skeleton Sirchmunk uses (settings.py _update_env_file), with one deliberate
+// difference: this writer refuses a non-regular file, because offline gates run
+// with CLUS_ENV=/dev/null and a save must never turn that device into a config
+// file — or worse, silently rewrite whatever the variable points at.
+func writeEnvValues(path string, values map[string]string) error {
+	if err := checkEnvPath(path); err != nil {
+		return err
+	}
+	if info, err := os.Stat(path); err == nil && !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file; refusing to write configuration there", path)
+	}
+	var lines []string
+	if raw, err := os.ReadFile(path); err == nil {
+		lines = strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	// Iterate the file once, remembering which keys were replaced, so an existing
+	// key keeps its position and its inline comment shape.
+	written := map[string]bool{}
+	for i, line := range lines {
+		for key, value := range values {
+			if written[key] {
+				continue
+			}
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || !strings.HasPrefix(trimmed, key+"=") {
+				continue
+			}
+			lines[i] = key + "=" + value
+			written[key] = true
+		}
+	}
+	// Deterministic append order keeps the diff readable across saves.
+	appended := make([]string, 0, len(values))
+	for key := range values {
+		if !written[key] {
+			appended = append(appended, key)
+		}
+	}
+	sort.Strings(appended)
+	for _, key := range appended {
+		lines = append(lines, key+"="+values[key])
+	}
+	out := strings.Join(lines, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	// This file holds API keys: force 0600 even when it already existed, because
+	// os.WriteFile's perm only applies at creation and an operator's 0644 .env
+	// would otherwise keep a freshly written secret world-readable.
+	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }

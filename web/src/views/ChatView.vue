@@ -38,7 +38,7 @@
         <eb-button type="primary" @click="pane = 'documents'">添加文档</eb-button>
       </div>
       <template v-else>
-        <div v-if="loading && meta" class="search-progress" role="status"><span class="status-dot ready"></span>{{ meta }}</div>
+        <div v-if="loading && meta" class="search-progress" role="status"><span class="status-dot ready"></span>{{ meta }}<span v-if="elapsed > 1" class="tiny"> · 已 {{ elapsed }} 秒</span></div>
         <div class="conversation-stream">
           <eb-chatbot v-model="messages" :loading="loading" height="100%" :show-tip="false"
                       :allow-attachments="false" :allow-drop="false" :show-avatar="false" :show-time="false"
@@ -84,7 +84,7 @@ import { documents, documentsBusy, documentsError, hasBucket, libraryLabel, load
 import SourcePreview from "./SourcePreview.vue";
 
 defineEmits(["create-library"]);
-const { sessions, sessionsBusy, current, loading, sources, meta, stats, error, messages, onSend, stop, openSession, newSession, delSession } = useChatPane();
+const { sessions, sessionsBusy, current, loading, sources, meta, elapsed, stats, error, messages, onSend, stop, openSession, newSession, delSession } = useChatPane();
 const historyOpen = ref(false);
 const previewSource = ref("");
 const samples = ["有哪些关键要求？", "有哪些例外情形？", "总结文档中的注意事项"];

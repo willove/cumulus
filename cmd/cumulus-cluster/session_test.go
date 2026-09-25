@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 )
 
@@ -189,5 +190,46 @@ func TestSessionReadOutcomes(t *testing.T) {
 				t.Errorf("writes = %d, want %d", len(puts), wantWrites)
 			}
 		})
+	}
+}
+
+// A finished turn must survive the caller walking away. The search writes its turn
+// through r.Context(), so a user who navigated to another pane mid-search (or an
+// aborted SSE stream) cancelled that context and the KV put failed — the answer was
+// delivered but the session stayed behind as an empty shell nobody could open.
+// appendTurnDurable detaches the write; this test pins both halves: the detached
+// write lands with a cancelled parent, and the raw context still fails (which is
+// exactly what made the bug possible).
+func TestSessionDurableAppendSurvivesCancelledRequest(t *testing.T) {
+	// A real engine, not the in-package fake: the whole point is that the engine
+	// honours context cancellation, and a test double that ignored ctx would make
+	// the control half of this test vacuous.
+	c, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	st := sessionStore{c: c, ns: "alpha"}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel() // the client is already gone
+
+	d, err := st.appendTurnDurable(gone, "kept", "题", "题", "答")
+	if err != nil {
+		t.Fatalf("detached append must still land: %v", err)
+	}
+	if len(d.Messages) != 2 || d.Messages[0].Content != "题" || d.Messages[1].Content != "答" {
+		t.Fatalf("turn not recorded: %+v", d.Messages)
+	}
+	if _, err := st.load(context.Background(), "kept"); err != nil {
+		t.Fatalf("turn must be readable afterwards: %v", err)
+	}
+
+	// Control: the same write through the request context is what failed before,
+	// so the fix cannot silently degrade back into the old behaviour.
+	if _, err := st.appendTurn(gone, "dropped", "题", "题", "答"); err == nil {
+		t.Fatal("a cancelled request context must not be able to persist a turn")
+	}
+	if _, err := st.load(context.Background(), "dropped"); err == nil {
+		t.Fatal("the control session must not exist")
 	}
 }

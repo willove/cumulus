@@ -435,7 +435,7 @@ func main() {
 			fatal(err)
 		}
 		if sess != nil {
-			if _, aerr := sess.appendTurn(ctx, *sessionID, *q, *q, res.Answer.Summary); aerr != nil {
+			if _, aerr := sess.appendTurnDurable(ctx, *sessionID, *q, *q, res.Answer.Summary); aerr != nil {
 				fmt.Fprintf(os.Stderr, "session append: %v\n", aerr)
 			} else {
 				res.Session = *sessionID

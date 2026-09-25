@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -137,5 +138,46 @@ func TestEndpointStillWiresWithoutOfflinePin(t *testing.T) {
 	t.Setenv("CLUS_OFFLINE", "")
 	if ps := newProdStack(); ps.chat == nil {
 		t.Fatal("without CLUS_OFFLINE a configured endpoint must wire the chat client")
+	}
+}
+
+// Configuration written from the workbench must survive as a normal .env: the
+// operator's comments and ordering are theirs, unknown keys append, and a device
+// path is refused outright (offline gates run with CLUS_ENV=/dev/null and a save
+// must not turn that into a regular file).
+func TestWriteEnvValuesPreservesTheOperatorFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	original := "# 端点配置（注释必须保留）\nLLM_BASE_URL=https://old.example/v1\n\n# 下面是模型\nLLM_MODEL_NAME=old-model\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnvValues(path, map[string]string{"LLM_MODEL_NAME": "new-model", "AIGATE_EMBED_MODEL": "emb-1"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, want := range []string{"# 端点配置（注释必须保留）", "# 下面是模型", "LLM_BASE_URL=https://old.example/v1", "LLM_MODEL_NAME=new-model", "AIGATE_EMBED_MODEL=emb-1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "old-model") {
+		t.Fatalf("old value survived:\n%s", got)
+	}
+	// 权限：这份文件装密钥
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("env file must stay 0600: %v %v", info.Mode(), err)
+	}
+	// 设备路径必须被拒绝，而不是被写成普通文件
+	if err := writeEnvValues("/dev/null", map[string]string{"LLM_MODEL_NAME": "x"}); err == nil {
+		t.Fatal("writing configuration to a device must be refused")
+	}
+	// 注意用字面量的 ..：filepath.Join 会先把 .. 规整掉，那样测不到守卫。
+	if err := writeEnvValues("../"+filepath.Base(dir)+"/.env", nil); err == nil {
+		t.Fatal("traversal must be refused")
 	}
 }

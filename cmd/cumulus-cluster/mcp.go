@@ -236,7 +236,7 @@ func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 			return mcpErrJSON(err.Error()), true
 		}
 		if sess != nil {
-			if _, aerr := sess.appendTurn(ctx, argStr("session"), query, query, res.Answer.Summary); aerr == nil {
+			if _, aerr := sess.appendTurnDurable(ctx, argStr("session"), query, query, res.Answer.Summary); aerr == nil {
 				res.Session = argStr("session")
 			}
 		}

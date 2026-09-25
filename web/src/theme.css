@@ -1,4 +1,23 @@
 :root {
   --cul-sans: var(--eb-font-family);
   --cul-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* evoke-charts 读的是 --ev-* 令牌，business-ui 定义的是 --eb-*，两套前缀不同且
+     charts 不会自己桥接。不补这几行，图表会静默回落到它自己的内置色板——画得出来，
+     但不跟随主题与暗色，视觉上和 business-ui 的卡片对不上。左边是 charts 实际读取的
+     名字（evoke-charts/src 里 grep 得到），右边是 business-ui 的同名令牌（深色下
+     这些 --eb-* 自身会变，所以这里只需一层间接，暗色自动跟随）。 */
+  --ev-color-primary: var(--eb-color-primary);
+  --ev-color-primary-rgb: var(--eb-color-primary-rgb);
+  --ev-color-series-1: var(--eb-color-primary);
+  --ev-bg-color: var(--eb-bg-color);
+  --ev-bg-color-overlay: var(--eb-bg-color-overlay);
+  --ev-text-color-primary: var(--eb-text-color-primary);
+  --ev-text-color-secondary: var(--eb-text-color-secondary);
+  --ev-text-color-danger: var(--eb-text-color-danger);
+  --ev-border-color: var(--eb-border-color);
+  --ev-border-color-light: var(--eb-border-color-light);
+  --ev-border-color-lighter: var(--eb-border-color-lighter);
+  --ev-border-color-dark: var(--eb-border-color-dark);
+  --ev-font-family: var(--eb-font-family);
 }

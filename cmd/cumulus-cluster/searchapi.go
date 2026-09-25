@@ -435,8 +435,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 					return
 				}
 				if sess != nil {
-					if _, aerr := sess.appendTurn(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary); aerr == nil {
+					if _, aerr := sess.appendTurnDurable(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary); aerr == nil {
 						res.Session = in.Session
+					} else {
+						// A failed session write must be visible, not silent: the
+						// query itself succeeded and the caller has no other signal.
+						log.Printf("[search] session %s: turn not persisted: %v", in.Session, aerr)
 					}
 				}
 				// Before writing the response: the early return below must not
@@ -525,14 +529,18 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		flusher.Flush()
 	}
+	started := time.Now()
 	emit("status", map[string]any{"stage": "started"})
 
 	// 心跳：长检索期间保活连接；停止与 handler 返回同步，杜绝迟到写。
+	// 它同时是「还活着」的唯一证据——一次 DEEP 检索要串行调用十几次模型（实测
+	// 冷启 30s 量级），只发 `: ping` 注释时前端无从区分「在干活」与「卡死了」，
+	// 用户看到的就是长时间没响应。所以心跳升级为带 elapsed_ms 的 status 事件。
 	heartbeat := make(chan struct{})
 	hbDone := make(chan struct{})
 	go func() {
 		defer close(hbDone)
-		t := time.NewTicker(5 * time.Second)
+		t := time.NewTicker(3 * time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -545,13 +553,14 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 				fmt.Fprint(w, ": ping\n\n")
 				flusher.Flush()
 				mu.Unlock()
+				emit("status", map[string]any{"stage": "working", "elapsed_ms": time.Since(started).Milliseconds()})
 			}
 		}
 	}()
 	defer func() { close(heartbeat); <-hbDone }()
 
 	ss.dE.OnFile = func(key string, best float64, windows int) {
-		emit("status", map[string]any{"stage": "file", "file": key, "score": best})
+		emit("status", map[string]any{"stage": "file", "file": key, "score": best, "elapsed_ms": time.Since(started).Milliseconds()})
 	}
 
 	res, err := runSearch(r.Context(), ss, query)
@@ -575,8 +584,13 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		"stop_reason": res.StopReason,
 	}
 	if sess != nil {
-		if _, aerr := sess.appendTurn(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
+		if _, aerr := sess.appendTurnDurable(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
 			done["session"] = sessionID
+		} else {
+			// The stream already delivered the answer, so the only honest place
+			// left to report a lost turn is the terminal event.
+			done["session_error"] = evalSafeError(aerr)
+			log.Printf("[search] session %s: turn not persisted: %v", sessionID, aerr)
 		}
 	}
 	emit("done", done)

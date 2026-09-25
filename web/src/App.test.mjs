@@ -126,7 +126,9 @@ function chatBackend(override = () => {}) {
     if (/^\/v1\/sessions(?:\?|$)/.test(url)) return json([...sessions.values()]);
     if (url.startsWith("/v1/sessions/")) return json(sessions.get(decodeURIComponent(url.split("/").pop().split("?")[0])));
     if (url === "/v1/search/stream") {
-      assert.ok(sessions.has(body.session), "search must use a created session");
+      // 后端在第一次成功落库时 ensure 建会话；前端不再预建，所以这里物化即可，
+      // 且 id 由前端生成后应保持稳定（同一轮追问必须复用同一 id）。
+      if (!sessions.has(body.session)) sessions.set(body.session, { id: body.session, messages: [], ns: body.ns });
       sessions.get(body.session).messages.push({ role: "user", content: body.query }, { role: "assistant", content: "answer" });
       return answer();
     }
@@ -136,11 +138,14 @@ function chatBackend(override = () => {}) {
 }
 
 // 原有 13 个用例的业务覆盖保留，并显式检查首问、namespace 及非成功状态。
-test("send creates one session, preserves two rounds and avoids chatbot user duplication", async () => {
+test("send uses one lazily-materialized session, preserves two rounds and avoids chatbot user duplication", async () => {
   const server = chatBackend();
   const state = app(server.fetch);
   await state.onSend("question");
-  assert.equal(state.current.value, "s1");
+  // 会话 id 前端生成（12 hex），服务端在首轮落库时才建；预建会留下打不开的空壳
+  assert.match(state.current.value, /^[0-9a-f]{12}$/);
+  assert.equal(server.calls.filter((c) => c.url === "/v1/sessions" && c.options.method === "POST").length, 0, "must not pre-create a session");
+  assert.deepEqual([...server.sessions.keys()], [state.current.value], "the turn materializes the session");
   assert.deepEqual(plain(state.messages.value.map((m) => [m.role, m.content])), [["user", "question"], ["assistant", "answer"]]);
   assert.equal(state.messages.value[1].status, "done");
   assert.ok(state.messages.value[1].thinkContent);
@@ -150,10 +155,11 @@ test("send creates one session, preserves two rounds and avoids chatbot user dup
   await state.onSend("follow-up");
   assert.equal(state.messages.value.length, 4);
   assert.equal(state.messages.value[2].id, "from-chatbot");
-  assert.equal(server.calls.filter((c) => c.url === "/v1/sessions" && c.options.method === "POST").length, 1);
-  assert.deepEqual(server.calls.filter((c) => c.url === "/v1/search/stream").map((c) => [c.body.session, c.body.query, c.body.prior]),
-    [["s1", "question", true], ["s1", "follow-up", true]]);
-  await state.openSession({ id: "s1" });
+  assert.deepEqual(server.calls.filter((c) => c.url === "/v1/search/stream").map((c) => [c.body.query, c.body.prior]),
+    [["question", true], ["follow-up", true]]);
+  const firstID = server.calls.find((c) => c.url === "/v1/search/stream").body.session;
+  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").every((c) => c.body.session === firstID), true, "both rounds reuse one session");
+  await state.openSession({ id: firstID });
   assert.equal(state.messages.value.length, 4, "both rounds can be reopened from server history");
   assert.equal(state.error.value, "");
   assert.equal(state.loading.value, false);
@@ -186,6 +192,82 @@ test("the namespace selector scopes every face and explicit withNS uses its argu
   assert.match(state.error.value, /知识库/);
 });
 
+test("settings form never holds the stored key and submits only changed fields", async () => {
+  const calls = [];
+  const state = app(async (url, options) => {
+    calls.push({ url, body: options?.body ? JSON.parse(options.body) : null, method: options?.method || "GET" });
+    if (url === "/v1/model") return json({ installed: true, dir: "/d", dims: 384, files: [] });
+    if (url === "/v1/config" && (!options || options.method !== "POST")) {
+      return json({ base_url: "https://api.example.com/v1", chat_model: "m1", embed_model: "", api_key_set: true, api_key_len: 42, reasoning_split: false, offline: false });
+    }
+    if (url === "/v1/config") return json({ saved: ["LLM_MODEL_NAME", "AIGATE_CHAT_MODEL"], env_file: "/repo/.env", hot_applied: true });
+    return json({});
+  });
+  await state.mount("settings");
+  // 已设置的密钥绝不下发到前端状态里
+  assert.equal(state.settingsForm.value.api_key, "");
+  assert.equal(state.settingsForm.value.base_url, "https://api.example.com/v1");
+
+  // 什么都没改 → 不发请求，只提示
+  await state.saveConfig();
+  assert.equal(calls.filter((c) => c.url === "/v1/config" && c.method === "POST").length, 0);
+  assert.match(state.settingsMsg.value, /没有改动/);
+
+  // 只改 chat 模型 + 填新密钥 → 只提交这两个字段
+  state.settingsForm.value.chat_model = "m2";
+  state.settingsForm.value.api_key = "sk-new";
+  await state.saveConfig();
+  const save = calls.find((c) => c.url === "/v1/config" && c.method === "POST");
+  assert.deepEqual(plain(save.body), { chat_model: "m2", api_key: "sk-new" });
+  // 保存成功后密钥不留在表单里
+  assert.equal(state.settingsForm.value.api_key, "");
+  assert.match(state.settingsMsg.value, /已保存 2 项/);
+});
+
+test("weight verification is reported as structure, and a failure keeps the reason", async () => {
+  let fail = false;
+  const state = app(async (url) => {
+    if (url === "/v1/model") return json({ installed: true, dir: "/d", dims: 384, files: [] });
+    if (url === "/v1/config") return json({ offline: false, api_key_set: false });
+    if (url === "/v1/model/verify") {
+      if (fail) return json({ error: "model: weights absent at /d — run `cumulus-cluster model install`" }, 502);
+      return json({ ok: true, dims: 384, ms: 197, norm: 1.0000000998071195, probe: [0.100397445, -0.022973191, -0.00033277128, -0.090989165] });
+    }
+    return json({});
+  });
+  await state.mount("settings");
+  await state.verifyWeights();
+  assert.equal(state.settingsVerify.value.ok, true);
+  assert.equal(state.settingsVerify.value.dims, 384);
+  assert.equal(state.settingsVerify.value.norm > 0.99, true);
+  assert.equal(state.settingsVerify.value.probe.length, 4);
+  // 页顶那条一次性提示不再是唯一载体
+  assert.equal(state.settingsMsg.value, "");
+
+  fail = true;
+  await state.verifyWeights();
+  assert.equal(state.settingsVerify.value.ok, false);
+  assert.match(state.settingsVerify.value.error, /weights absent|model install/);
+});
+
+test("connection test surfaces the provider answer and its own failure", async () => {
+  let ok = true;
+  const state = app(async (url) => {
+    if (url === "/v1/model") return json({ installed: true, dir: "/d", dims: 384, files: [] });
+    if (url === "/v1/config") return json({ api_key_set: true, api_key_len: 5, offline: false });
+    if (url === "/v1/config/test") return ok ? json({ ok: true, model: "m", latency_ms: 812, tokens: 31, answer: "可用" }) : json({ ok: false, error: "llm: status 401" }, 502);
+    return json({});
+  });
+  await state.mount("settings");
+  await state.testConnection();
+  assert.equal(state.settingsTest.value.ok, true);
+  assert.equal(state.settingsTest.value.tokens, 31);
+  ok = false;
+  await state.testConnection();
+  assert.equal(state.settingsTest.value.ok, false);
+  assert.match(state.settingsTest.value.error, /401/);
+});
+
 test("the settings pane loads weight status and endpoint config", async () => {
   const urls = [];
   const state = app(async (url) => {
@@ -212,7 +294,10 @@ test("installWeights starts the download and verify runs the weights", async () 
   assert.ok(calls.some((c) => c.url === "/v1/model" && c.method === "POST"));
   assert.match(state.settingsMsg.value, /下载中/);
   await state.verifyWeights();
-  assert.match(state.settingsMsg.value, /验证通过：384 维 · 812ms/);
+  // 验证结果不再只是一行提示：结构化报告 + 页顶提示清空
+  assert.equal(state.settingsVerify.value.ok, true);
+  assert.equal(state.settingsVerify.value.ms, 812);
+  assert.equal(state.settingsMsg.value, "");
   assert.equal(state.fmtMB(470641600), "470.6 MB");
 });
 
@@ -357,18 +442,17 @@ test("blank sends are local and repeated text after an assistant is a new user t
 });
 
 for (const [label, response, expected] of [
-  ["JSON error", () => json({ error: "session rejected", hint: "select bucket" }, 400), /session rejected.*select bucket/],
-  ["invalid JSON", () => new Response("not JSON"), /JSON/],
-  ["missing id", () => json({}), /session id/],
+  ["HTTP error", () => json({ error: "search rejected", hint: "select bucket" }, 400), /search rejected.*select bucket/],
+  ["non-stream body", () => new Response("not JSON"), /截断|done/],
 ]) {
-  test(`first-question session creation failure: ${label}`, async () => {
+  test(`a failed first question leaves no empty session shell: ${label}`, async () => {
     const calls = [];
     const state = app(async (url) => { calls.push(url); return response(); });
     await state.onSend("first question");
-    assert.deepEqual(calls, ["/v1/sessions"]);
-    assert.equal(state.current.value, "");
+    // 只打检索面：不再有预建会话这一步，所以失败后列表里不会多出空会话——
+    // 这正是「历史会话点进去打不开」的成因。
+    assert.deepEqual(calls, ["/v1/search/stream"]);
     assert.equal(state.messages.value[0].role, "user");
-    assert.equal(state.messages.value[0].content, "first question");
     assert.equal(state.messages.value[1].status, "error");
     assert.match(state.error.value, expected);
     assert.equal(state.loading.value, false);
@@ -378,7 +462,34 @@ for (const [label, response, expected] of [
   });
 }
 
-for (const method of ["loadSessions", "openSession", "newSession", "delSession"]) {
+test("an aborted first question keeps a reusable id and leaves nothing behind", async () => {
+  const state = app(async (url, options) => {
+    if (url === "/v1/search/stream") return new Promise((resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    });
+    return json([]);
+  });
+  const inflight = state.onSend("first question");
+  state.stop();
+  await inflight;
+  assert.match(state.current.value, /^[0-9a-f]{12}$/, "the id stays usable for the retry");
+  assert.match(state.error.value, /已取消/);
+  assert.equal(state.loading.value, false);
+});
+
+test("newSession is lazy: it swaps in a fresh local id without creating an empty session", async () => {
+  const calls = [];
+  const state = app(async (url) => { calls.push(url); return json([]); });
+  state.current.value = "old";
+  state.messages.value = [{ role: "user", content: "old" }];
+  await state.newSession();
+  assert.deepEqual(calls.filter((u) => u.startsWith("/v1/sessions/")), [], "no session is created up front");
+  assert.match(state.current.value, /^[0-9a-f]{12}$/);
+  assert.notEqual(state.current.value, "old");
+  assert.equal(state.messages.value.length, 0);
+});
+
+for (const method of ["loadSessions", "openSession", "delSession"]) {
   test(`${method} checks HTTP/JSON status and exposes session busy`, async () => {
     const gate = deferred();
     const state = app(async () => gate.promise);
@@ -389,7 +500,7 @@ for (const method of ["loadSessions", "openSession", "newSession", "delSession"]
     await promise;
     assert.equal(state.sessionsBusy.value, false);
     assert.match(state.error.value, /denied.*retry later/);
-    assert.equal(state.current.value, method === "openSession" || method === "newSession" ? "" : "old");
+    assert.equal(state.current.value, method === "openSession" ? "" : "old");
   });
 }
 
@@ -500,11 +611,11 @@ test("stop aborts a pending SSE read and retains partial text as cancelled", asy
   assert.equal(state.completed.length, 0);
 });
 
-test("cancelled first-session creation cannot overwrite a newer send", async () => {
+test("cancelled first send cannot overwrite a newer send", async () => {
   const gate = deferred();
   let firstSignal;
   const server = chatBackend((url, options, body) => {
-    if (url === "/v1/sessions" && body?.title === "old") { firstSignal = options.signal; return gate.promise; }
+    if (url === "/v1/search/stream" && body?.query === "old") { firstSignal = options.signal; return gate.promise; }
   });
   const state = app(server.fetch);
   const old = state.onSend("old");
@@ -513,12 +624,11 @@ test("cancelled first-session creation cannot overwrite a newer send", async () 
   assert.equal(firstSignal.aborted, true);
   assert.equal(state.sessionsBusy.value, false);
   await state.onSend("new");
-  gate.resolve(json({ id: "late-session" }));
+  gate.resolve(answer("late"));
   await old;
-  assert.equal(state.current.value, "s1");
-  assert.equal(state.messages.value[1].status, "cancelled");
+  assert.match(state.messages.value[1].status, /cancelled/);
   assert.equal(state.messages.value[3].status, "done");
-  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").length, 1);
+  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").length, 2);
   assert.equal(state.error.value, "");
 });
 
