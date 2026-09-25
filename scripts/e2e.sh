@@ -1234,6 +1234,46 @@ for fmt in ['json', 'jsonl', 'csv']:
         assert runs[0]['frozen']['config_sha'] in text
         if fmt == 'csv':
             assert len(list(csv.reader(io.StringIO(text)))) == 2
+# 长段落参考答案不是错误，但必须警示：规则臂是子串匹配，整段引用会恒 0
+passage = json.dumps({'id': 'long', 'query': 'Pool maximum connections?', 'answer': '法' * 300, 'gold_sources': ['pool']})
+warned = call('/v1/eval/datasets/validate?ns=eval-gate', {'name': 'Passage', 'content': passage})
+assert warned['valid'] and len(warned['warnings']) == 1, warned
+assert 'passage' in warned['warnings'][0]['message'] and warned['warnings'][0]['line'] == 1, warned['warnings']
+assert call('/v1/eval/datasets/validate?ns=eval-gate', {'name': 'Short', 'content': content})['warnings'] == []
+# limit 取冻结题序的前 N 题，不是整库
+subset = call('/v1/eval/runs?ns=eval-gate', {'dataset_id': dataset['id'], 'name': 'Subset', 'request_id': str(uuid.uuid4()), 'config': dict(cap['defaults'], limit=1)})
+assert subset['total'] == 1, subset
+# L1 预筛：离线本地哈希向量，索引由运行自己补建
+l1 = call('/v1/eval/runs?ns=eval-gate', {'dataset_id': dataset['id'], 'name': 'L1', 'request_id': str(uuid.uuid4()), 'config': dict(cap['defaults'], l1pre=True)})
+for tagged in (subset, l1):
+    deadline = time.monotonic() + 20
+    while tagged['state'] in ['queued', 'running', 'cancelling']:
+        assert time.monotonic() < deadline, tagged
+        time.sleep(.03)
+        tagged = call('/v1/eval/runs/' + tagged['id'] + '?ns=eval-gate')
+    assert tagged['state'] == 'completed' and tagged['failed'] == 0, tagged
+assert call('/v1/eval/runs/' + subset['id'] + '/items?ns=eval-gate')['items'][0]['rule_match'], 'subset run lost its score'
+# 跨库：另一个注册库既读不到本库的题集/运行，也不能拿本库题集发起运行
+call('/v1/buckets', {'name': 'eval-gate-other'})
+assert call('/v1/eval/datasets?ns=eval-gate-other')['datasets'] == []
+for route in ['datasets/' + dataset['id'], 'runs/' + runs[0]['id'], 'runs/' + runs[0]['id'] + '/items']:
+    try:
+        call('/v1/eval/' + route + '?ns=eval-gate-other')
+        raise AssertionError('cross-namespace read succeeded: ' + route)
+    except urllib.error.HTTPError as error:
+        assert error.code == 404, (route, error.code)
+try:
+    call('/v1/eval/runs?ns=eval-gate-other', {'dataset_id': dataset['id'], 'name': 'Cross', 'request_id': str(uuid.uuid4()), 'config': cap['defaults']})
+    raise AssertionError('a foreign dataset started a run')
+except urllib.error.HTTPError as error:
+    assert error.code == 404, error.code
+# 只读路由拒绝写入方法
+guard = urllib.request.Request(base + '/v1/eval/runs/' + runs[0]['id'] + '?ns=eval-gate', data=b'{}', headers={'Content-Type': 'application/json'}, method='POST')
+try:
+    urllib.request.urlopen(guard, timeout=20)
+    raise AssertionError('POST accepted on the read-only run route')
+except urllib.error.HTTPError as error:
+    assert error.code == 405 and 'GET' in error.headers.get('Allow', ''), error.code
 assert call('/v1/sources?ns=eval-gate') == before, 'evaluation mutated business sources'
 with open(sys.argv[2], 'w') as fh:
     json.dump({'completed': runs[0]['id'], 'dataset': dataset['id']}, fh)
@@ -1266,7 +1306,24 @@ while time.monotonic() < deadline:
         break
     time.sleep(.05)
 assert state == 'running', state
+# 有界队列：1 个在跑 + queue_limit 个排队，再多一个就是 409
+pending = []
+for i in range(cap['queue_limit']):
+    pending.append(call('/v1/eval/runs?ns=eval-gate', {'dataset_id': big['id'], 'name': 'Pending %d' % i, 'request_id': str(uuid.uuid4()), 'config': cap['defaults']}))
+assert call('/v1/eval/runs/' + active['id'] + '?ns=eval-gate')['state'] == 'running', 'blocker finished before the queue could fill'
+try:
+    call('/v1/eval/runs?ns=eval-gate', {'dataset_id': big['id'], 'name': 'Overflow', 'request_id': str(uuid.uuid4()), 'config': cap['defaults']})
+    raise AssertionError('the queue accepted more than queue_limit pending runs')
+except urllib.error.HTTPError as error:
+    assert error.code == 409, error.code
+    assert 'queue' in json.loads(error.read().decode())['error'], 'the 409 must explain the queue'
+# 取消一个仍在排队的运行：立刻终结，且不占用工作线程
+cancelled_queued = call('/v1/eval/runs/' + pending[0]['id'] + '/cancel?ns=eval-gate', {})
+assert cancelled_queued['state'] == 'cancelled', cancelled_queued
+assert call('/v1/eval/runs/' + pending[0]['id'] + '/cancel?ns=eval-gate', {})['state'] == 'cancelled'
 ids['inFlight'] = active['id']
+ids['cancelledQueued'] = pending[0]['id']
+ids['pending'] = [run['id'] for run in pending[1:]]
 json.dump(ids, open(sys.argv[2], 'w'))
 print('inflight evaluation started')
 PY
@@ -1300,6 +1357,10 @@ assert ids['completed'] in listed and ids['inFlight'] in listed, sorted(listed)
 inflight = listed[ids['inFlight']]
 assert inflight['state'] == 'interrupted', inflight
 assert 'start a new run' in inflight['error'], inflight
+# 用户取消过的运行不得被重启改写成 interrupted；从没跑过的排队运行才是 interrupted
+assert listed[ids['cancelledQueued']]['state'] == 'cancelled', listed[ids['cancelledQueued']]
+for pid in ids['pending']:
+    assert listed[pid]['state'] == 'interrupted', listed[pid]
 try:
     call('/v1/eval/runs/' + ids['inFlight'] + '/retry?ns=eval-gate', {})
     raise AssertionError('cold retry of a lost experiment was accepted')

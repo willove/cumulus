@@ -16,6 +16,7 @@
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
 make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 169 断言）
+make browser-check         # 浏览器联调门（可选：自起离线 serve，打生产内嵌 /ui/）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb，离线门，隔离见 scripts/offline-gate.sh）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
@@ -85,7 +86,12 @@ GET  /v1/eval/compare?ns=LIB&left=A&right=B        # 不可比时只给理由，
 - **持久化与中断语义**：运行状态与逐题结果**同一个 KV 值原子落盘**——进度不可能领先于未持久化的结果。进程被 SIGKILL 后，已完成的实验原样还在；当时在飞的运行只报 `interrupted`（**绝不冷启动重放**，那是没被同意的二次计费）；重试要求热态仍在，否则提示「start a new run」。
 - **计费诚实**：`mode=live` 才会调模型；判官与闭卷基线各自计费，工作台在提交前要求勾选**费用确认**（未勾选按钮保持禁用）。Token 记账取自上游 `usage.total_tokens`；上游不报 usage 即判为成本未知并停止后续模型调用（传输层每次请求前复核预算闸门，在飞请求可能小幅超额）。
 - **分数口径**：规则匹配（非 EM）· 证据命中（金标解析为**快照内的精确 id**，陈旧修订与同名 business key 都不给分）· 引用可解析（全部引用回溯成功才算）· 判官正确率（分母 `judge_n`，未判分显示 **N/A 而不是 0**）· 闭卷基线对照。延迟与 token 含重试历史。
-- **验证**：门 BB 段覆盖校验/不可变版本/幂等/导出/对比/取消/有界队列/SIGKILL 重启后的持久化与 interrupted 语义；`make e2e` 之外，真实接口与浏览器联调（真实 Badger 目录 + 生产 `serve` 内嵌 `/ui/` + 一次真实模型运行）脚本在 `var/`（本地产物，不入库）。
+- **协议边界（照实）**：规则臂是**短参考答案**的子串/数值边界匹配。把 LENS 式整段引用（整篇法条）当 `answer`，规则列会**恒 0**——那是协议不匹配，不是检索失败。校验器对超过 200 字的参考答案给出**一次聚合警告**（工作台直接在向导里显示，数据集仍可保存），把误读挡在运行之前；段落级质量（EM / Ev.Rec / McNemar）仍走 CLI `eval-run` / `scripts/realeval.sh` 的 LENS 协议，两套口径不要混说。
+- **验证（三层）**：
+  1. **门 BB（`make e2e`，离线确定性）**：校验/不可变版本/幂等/导出/对比/`limit` 取子集/L1 预筛/跨库 404/方法门/有界队列 409/取消（运行中与排队中，后者重启后**不得**被改写成 interrupted）/SIGKILL 重启后的持久化与 interrupted 语义/冷重试拒绝。
+  2. **浏览器联调门（`make browser-check`）**：自起一个离线 `serve`，在真浏览器里打**生产内嵌 `/ui/`**（不是 vite dev）走完向导→运行→进度→冻结逐题证据→导出→刷新持久化→对比→深色移动端，任一条浏览器错误即失败；截图落在 `var/browser-eval-check/`。刻意打生产包，是因为内嵌 `dist` 曾经落后于 `web/src`，只有打生产包才看得见。
+  3. **真实模型付费面（`make browser-live EVAL_BASE=... EVAL_NS=...`）**：只读一次已完成的 `mode=live` 运行，核对判官结论/理由、闭卷基线、真实 token 计数是否上屏，并确认费用确认闸门在勾选前不可提交；**不提交任何运行、不产生费用**。
+- **可选门的依赖边界（照实）**：浏览器门需要 `node` 与 `@playwright/test`，本仓**不**把它写进 `web/package.json`（否则每次 `npm ci` 都要下浏览器）。驱动从 `PLAYWRIGHT_ROOT`（显式指定则只用它）或默认候选（本仓、同级 evoke-ui 检出、`$PWD`）借用；缺席时**显式 SKIP 并以退出码 2 结束**，不会伪装成通过。
 
 ## 存储：cumulite 嵌入式库
 

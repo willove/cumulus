@@ -50,6 +50,37 @@ func TestV2DatasetValidation(t *testing.T) {
 		})
 	}
 }
+
+// A passage reference is not an error — the judge arm and the CLI protocol are the
+// passage-level instruments — but it must be flagged: scoring it with the substring
+// rule arm reports 0 for every item, which reads as a retrieval failure.
+func TestV2LongPassageReferenceWarnsWithoutBlocking(t *testing.T) {
+	corpus := v2Corpus()
+	if short := ValidateDataset(v2Content(2), corpus); !short.Valid || len(short.Warnings) != 0 {
+		t.Fatalf("short references must warn about nothing: %+v", short.Warnings)
+	}
+	passage := strings.Repeat("法", MaxShortReference) + "文"
+	content := fmt.Sprintf(`{"id":"passage","query":"q","answer":%q,"gold_sources":["pool"]}`, passage) + "\n" + v2Content(1)
+	v := ValidateDataset(content, corpus)
+	if !v.Valid {
+		t.Fatalf("a passage reference must still validate: %+v", v.Errors)
+	}
+	if len(v.Warnings) != 1 || v.Warnings[0].Line != 1 {
+		t.Fatalf("expected one aggregated warning on line 1: %+v", v.Warnings)
+	}
+	if !strings.Contains(v.Warnings[0].Message, "1 items") || !strings.Contains(v.Warnings[0].Message, "passage") {
+		t.Fatalf("warning must say how many items and why: %+v", v.Warnings[0])
+	}
+	// 500 long items must stay one warning, not 500 lines in the wizard.
+	many := strings.Builder{}
+	for i := 0; i < MaxItems; i++ {
+		fmt.Fprintf(&many, `{"id":"p%d","query":"q","answer":%q,"gold_sources":["pool"]}`+"\n", i, passage)
+	}
+	if v := ValidateDataset(many.String(), corpus); len(v.Warnings) != 1 || !strings.Contains(v.Warnings[0].Message, "500 items") {
+		t.Fatalf("warnings must aggregate: %+v", v.Warnings)
+	}
+}
+
 func TestV2SummarySeparateScoresAndCosts(t *testing.T) {
 	yes, no := true, false
 	items := []ItemResult{

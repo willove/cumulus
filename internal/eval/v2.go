@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/willove/cumulus/internal/source"
 )
@@ -16,6 +17,15 @@ const Protocol = "eval-v2"
 const MaxItems = 500
 const MaxBytes = 2 << 20
 const MaxSnapshotBytes = 16 << 20
+
+// MaxShortReference is the longest reference the rule arm can plausibly match.
+// Correct() is a substring / numeric-boundary matcher, so a LENS-style passage
+// reference (a whole article) can never appear inside a synthesized answer:
+// scoring it would report 0 for every item, which reads as a retrieval failure
+// but is really a protocol mismatch. Such a dataset still validates — the judge
+// arm and the CLI eval-run protocol are the passage-level instruments — but it
+// carries a warning so nobody misreads the rule column.
+const MaxShortReference = 200
 
 type Config struct {
 	Mode        string `json:"mode"`
@@ -81,6 +91,7 @@ func ValidateDataset(content string, corpus []source.Source) Validation {
 	}
 	seen := map[string]bool{}
 	lines := 0
+	longest, longestLine, longCount := 0, 0, 0
 	for n, line := range strings.Split(content, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -113,10 +124,21 @@ func ValidateDataset(content string, corpus []source.Source) Validation {
 		if it.Gold == nil {
 			it.Gold = []string{}
 		}
+		if runes := utf8.RuneCountInString(strings.TrimSpace(it.Answer)); runes > MaxShortReference {
+			longCount++
+			if runes > longest {
+				longest, longestLine = runes, n+1
+			}
+		}
 		v.Items = append(v.Items, it)
 	}
 	if len(v.Items) == 0 {
 		add(0, "dataset contains no items")
+	}
+	// One aggregated warning: 500 passage items must not produce 500 lines in the
+	// wizard. The rule column would read 0 on every one of them.
+	if longCount > 0 {
+		v.Warnings = append(v.Warnings, Issue{longestLine, fmt.Sprintf("answer is a passage (%d items, longest %d characters): the rule arm matches a short reference by substring, so a passage reference never matches; use a short reference, or read the judge arm / CLI eval-run for passage-level metrics", longCount, longest)})
 	}
 	v.Valid = len(v.Errors) == 0
 	return v

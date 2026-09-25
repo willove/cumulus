@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: all fmt check test build e2e clean help
+.PHONY: all fmt check test build e2e browser-check browser-live clean help
 
 all: check build
 
@@ -21,9 +21,17 @@ test:
 build:
 	go build -o bin/cumulus-cluster ./cmd/cumulus-cluster
 
-## e2e: 门 A–T——真 cumulite 嵌入式库（无服务端进程）
+## e2e: 门 A–BB——真 cumulite 嵌入式库（无服务端进程）
 e2e:
 	bash scripts/e2e.sh
+
+## browser-check: 浏览器联调门——自起离线 serve，打生产内嵌 /ui/（可选：需 node + @playwright/test）
+browser-check:
+	bash scripts/browser-eval-check.sh
+
+## browser-live: 真实模型付费面检查——只读一次已完成的 live 运行，不提交、不产生费用
+browser-live:
+	EVAL_BASE="$(EVAL_BASE)" EVAL_NS="$(EVAL_NS)" node scripts/browser/eval-live-surfaces.mjs
 
 ## clean: 清理构建产物
 clean:
