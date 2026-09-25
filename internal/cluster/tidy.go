@@ -255,13 +255,24 @@ func TidyWithCo(ctx context.Context, st Store, emb Embedder, theta float64, dryR
 		}
 		foldInto(&winner, &loser)
 		if emb != nil {
-			if qe, eerr := QuerySetEmbed(ctx, emb, winner.Queries); eerr == nil {
+			// Re-measure ONLY when the embedder agrees with the vectors the
+			// cluster already carries. A tidy run under a different embedder
+			// than the one that built the cluster (operator cron without
+			// CLUS_EMBED=minilm, say) used to overwrite 384-d semantic vectors
+			// with 64-d hash ones; Cosine across mismatched dims returns 0, so
+			// semantic reuse silently collapsed to lexical — persisted, too.
+			// On a mismatch the merged-in loser keys just go unembedded: reuse
+			// degrades for those keys, but nothing is corrupted.
+			if qe, eerr := QuerySetEmbed(ctx, emb, winner.Queries); eerr == nil &&
+				(len(winner.Embed) == 0 || len(qe) == len(winner.Embed)) {
 				winner.Embed = qe
-			}
-			// 2.5: segment embeddings follow the merged key set.
-			if texts := winner.LevelKeyTexts(); len(texts) > 0 {
-				if vs, verr := emb.Embed(ctx, texts); verr == nil && len(vs) == len(texts) {
-					winner.AttachKeyEmbeds(vs)
+				// 2.5: segment embeddings follow the merged key set — under the
+				// same accepted embedder, so they stay in the vector family the
+				// cluster was built with.
+				if texts := winner.LevelKeyTexts(); len(texts) > 0 {
+					if vs, verr := emb.Embed(ctx, texts); verr == nil && len(vs) == len(texts) {
+						winner.AttachKeyEmbeds(vs)
+					}
 				}
 			}
 		}

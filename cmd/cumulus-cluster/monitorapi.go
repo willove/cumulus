@@ -22,19 +22,19 @@ func registerMonitorFace(mux *http.ServeMux, tr *monitor.Tracker, dataDir, serve
 				writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET only"})
 				return
 			}
-			if know != nil {
-				// Refresh on every read: the cluster population changes with
-				// every search, and a stale count is worse than none.
-				// ?ns= selects the bucket; it defaults to the serve-level one,
-				// which is otherwise the only namespace the monitor would show.
-				reqNS := r.URL.Query().Get("ns")
-				if err := ns.Validate(reqNS); err != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-					return
-				}
-				tr.WithKnowledge(know(r.Context(), firstNonEmpty(reqNS, serveNS)))
+			reqNS := r.URL.Query().Get("ns")
+			if err := ns.Validate(reqNS); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
 			}
-			writeJSON(w, http.StatusOK, pick(snapshot(r.Context(), tr, dataDir)))
+			s := snapshot(r.Context(), tr, dataDir)
+			// Knowledge belongs to this request's namespace, never to the
+			// shared tracker: interleaved A/B reads must not swap populations.
+			s.Knowledge = nil
+			if know != nil {
+				s.Knowledge = know(r.Context(), firstNonEmpty(reqNS, serveNS))
+			}
+			writeJSON(w, http.StatusOK, pick(s))
 		})
 	}
 	block("overview", func(s monitor.Snapshot) any { return s })

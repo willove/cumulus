@@ -25,24 +25,29 @@ import (
 
 // Query is one finished retrieval, as recorded by the search face.
 type Query struct {
-	At         time.Time
-	Namespace  string // bucket
-	Mode       string // FAST | DEEP | FILENAME_ONLY | CHAT | DOC_SUMMARY
-	Escalated  bool
-	Reused     bool // cluster reuse hit (the "越问越快" path)
-	Confidence float64
-	Coverage   float64
-	Samples    int
-	Loops      int
-	Widened    int
-	LLMCalls   int
-	Tokens     int64
-	LatencyMS  int64
-	LatencyUS  int64  // preferred: microsecond precision
-	Embedder   string // which embedder actually served, e.g. minilm-384
-	SelfCorr   bool   // bounded self-correction ran
-	Refused    bool   // synthesis refused / insufficient evidence
-	Error      string
+	At         time.Time `json:"at"`
+	Namespace  string    `json:"namespace"` // bucket
+	Mode       string    `json:"mode"`      // FAST | DEEP | FILENAME_ONLY | CHAT | DOC_SUMMARY
+	Escalated  bool      `json:"escalated"`
+	Reused     bool      `json:"reused"` // cluster reuse hit (the "越问越快" path)
+	Confidence float64   `json:"confidence"`
+	Coverage   float64   `json:"coverage"`
+	Samples    int       `json:"samples"`
+	Loops      int       `json:"loops"`
+	Widened    int       `json:"widened"`
+	LLMCalls   int       `json:"llm_calls"`
+	Tokens     int64     `json:"tokens"`
+	LatencyMS  int64     `json:"latency_ms"`
+	LatencyUS  int64     `json:"latency_us"`     // preferred: microsecond precision
+	Embedder   string    `json:"embedder"`       // which embedder actually served, e.g. minilm-384
+	SelfCorr   bool      `json:"self_corrected"` // bounded self-correction ran
+	Refused    bool      `json:"refused"`        // synthesis refused / insufficient evidence
+	// StopReason is why the DEEP loop ended: sufficient | utility | budget;
+	// "" when no loop ran or candidates ran out. Its distribution is the raw
+	// material for tuning the escalation/budget knobs — without it, tuning
+	// runs on anecdotes (the "96s for a guaranteed refusal" kind).
+	StopReason string `json:"stop_reason,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Tracker accumulates query records. It is safe for concurrent use: serve's
@@ -219,11 +224,17 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 	nsAgg := map[string]*NSStat{}
 	nsLat := map[string][]int64{}
 	for _, q := range t.queries {
-		out.Retrieval.ByMode[q.Mode]++
+		failed := q.Error != ""
+		if q.Mode != "" {
+			out.Retrieval.ByMode[q.Mode]++
+		}
 		if q.Reused {
 			out.Retrieval.ReuseHits++
 			warm = append(warm, q.latencyUS())
-		} else {
+		} else if !failed {
+			// A failed attempt's latency is a partial measurement, not a
+			// retrieval time — counting it dragged the cold p50 down, exactly
+			// once errors started being recorded at all.
 			cold = append(cold, q.latencyUS())
 		}
 		if q.Escalated {
@@ -235,11 +246,12 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 		if q.Refused {
 			out.Retrieval.Refused++
 		}
-		if q.Error != "" {
+		if failed {
 			out.Retrieval.Errors++
+		} else {
+			confSum += q.Confidence
+			covSum += q.Coverage
 		}
-		confSum += q.Confidence
-		covSum += q.Coverage
 		if q.Embedder != "" {
 			out.Retrieval.Embedder = q.Embedder
 		}
@@ -252,13 +264,18 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 		if q.Reused {
 			st.ReuseHits++
 		}
-		nsLat[q.Namespace] = append(nsLat[q.Namespace], q.latencyUS())
+		if !failed {
+			nsLat[q.Namespace] = append(nsLat[q.Namespace], q.latencyUS())
+		}
 	}
 	n := float64(len(t.queries))
+	scored := n - float64(out.Retrieval.Errors)
 	if n > 0 {
 		out.Retrieval.ReuseRate = float64(out.Retrieval.ReuseHits) / n
-		out.Retrieval.AvgConf = confSum / n
-		out.Retrieval.AvgCov = covSum / n
+		if scored > 0 {
+			out.Retrieval.AvgConf = confSum / scored
+			out.Retrieval.AvgCov = covSum / scored
+		}
 		out.LLM.TokensPerQ = float64(t.llmTok) / n
 	}
 	elapsed := time.Since(t.started).Minutes()
@@ -271,6 +288,9 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 	out.Retrieval.ColdP50US = p50(cold)
 	out.Retrieval.WarmP50MS = out.Retrieval.WarmP50US / 1000
 	out.Retrieval.ColdP50MS = out.Retrieval.ColdP50US / 1000
+	// Recent and Namespaces must stay NON-NIL: a nil slice marshals as JSON
+	// null, and the UI's v-for / .length over null is a TypeError.
+	out.Namespaces = make([]NSStat, 0, len(nsAgg))
 	for ns, st := range nsAgg {
 		st.AvgP50US = p50(nsLat[ns])
 		out.Namespaces = append(out.Namespaces, *st)
@@ -281,11 +301,13 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 		}
 		return out.Namespaces[i].Namespace < out.Namespaces[j].Namespace
 	})
-	// Recent, newest last (a UI renders a timeline).
+	// Recent, newest last (a UI renders a timeline). Non-nil so the JSON is an
+	// empty array rather than null (see the note on Namespaces above).
+	out.Recent = make([]Query, 0, 20)
 	if len(t.queries) > 20 {
-		out.Recent = append([]Query(nil), t.queries[len(t.queries)-20:]...)
+		out.Recent = append(out.Recent, t.queries[len(t.queries)-20:]...)
 	} else {
-		out.Recent = append([]Query(nil), t.queries...)
+		out.Recent = append(out.Recent, t.queries...)
 	}
 	return out
 }

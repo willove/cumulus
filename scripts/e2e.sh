@@ -26,6 +26,31 @@ SERVE_PID=""
 PASS=0
 FAIL=0
 check() { if [ "$2" -eq 0 ]; then PASS=$((PASS + 1)); printf '  ok: %s\n' "$1"; else FAIL=$((FAIL + 1)); printf '  FAIL: %s\n' "$1"; fi; }
+# Stop a serve process and WAIT until it has released the Badger directory lock.
+# A bare `kill` races the next gate: SIGTERM starts a graceful shutdown, so the
+# following CLI command could open the same store while the old process still
+# held it and die on "Cannot acquire directory lock" (intermittently failed
+# gate T). Bounded: SIGKILL after 10 s so a wedged server cannot hang the gate.
+# Every serve gate must own its port. If something already answers /health, the
+# readiness loop below would succeed against a FOREIGN store and the gate would
+# assert on data it never created (or, worse, kill -9 a process it does not own).
+own_port() {
+	if curl -fsS "http://127.0.0.1:$1/health" >/dev/null 2>&1; then
+		echo "clus-e2e: FAIL port $1 is already serving; refusing to gate against a foreign store" >&2
+		exit 1
+	fi
+}
+stop_serve() {
+	local pid="$1"
+	[ -n "${pid:-}" ] || return 0
+	kill "$pid" 2>/dev/null
+	for _ in $(seq 1 100); do
+		kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 0; }
+		sleep 0.1
+	done
+	kill -9 "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+}
 cleanup() {
 	if [ -n "$SERVE_PID" ] && [ "$SERVE_PID" -eq "$SERVE_PID" ] 2>/dev/null; then kill "$SERVE_PID" 2>/dev/null; fi
 	rm -rf "$WORK"
@@ -318,6 +343,7 @@ assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant
 print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
 
 SPORT="${E2E_SERVE_PORT:-8599}"
+own_port "$SPORT"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
 SERVE_PID=$!
 SRV=0
@@ -326,15 +352,13 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$SRV" = "1" ] ; check "cumulus-cluster serve serves /health" $?
+curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/buckets" -d '{"name":"httpface","note":"P1/P2 HTTP face gate"}' >/dev/null
 HTTP_SRC="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/sources" -d '{"title":"HTTP 条目","key":"http1","body":"通过 HTTP 摄取的内容：连接池最大 32。","ns":"httpface"}')"
 echo "$HTTP_SRC" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] in ("created","updated","unchanged"), r' ; check "POST /v1/ingest/sources upserts a source" $?
 HTTP_JOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/ingest/jobs" -d "{\"dir\":\"$WORK/docs\",\"job\":\"servjob\",\"recursive\":false,\"ns\":\"httpface\"}")"
 echo "$HTTP_JOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "POST /v1/ingest/jobs accepts an async job" $?
 
 # --- Gate P: search HTTP face (P1) -------------------------------------------
-# The search face now REQUIRES a named bucket (no silent fallback to the
-# default library). Register one for the default-library gates below.
-curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/buckets" -d '{"name":"httpface","note":"P1/P2 HTTP face gate"}' >/dev/null
 PQ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -d '{"query":"HTTP 摄取的内容里连接池最大是多少","ns":"httpface"}')"
 echo "$PQ" | python3 -c '
 import json,sys
@@ -367,8 +391,8 @@ echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
 echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
 UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/cumulus-cluster/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
-echo "$UIA" | grep -q "知识簇浏览" ; check "web UI carries the cluster browse panel (UI v1)" $?
-echo "$UIA" | grep -q "命名空间" ; check "web UI carries the namespace selector (B1)" $?
+echo "$UIA" | grep -q "簇到证据窗口的星图" ; check "web UI carries the cluster browse panel (UI v3)" $?
+echo "$UIA" | grep -q "当前知识库" ; check "web UI carries the namespace selector (B1)" $?
 SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
 echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?
 SLIST="$(curl -fsS "http://127.0.0.1:$SPORT/v1/sessions")"
@@ -380,7 +404,7 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$JDONE" = "1" ] ; check "GET /v1/ingest/jobs/{id} tracks the run to done" $?
-kill "$SERVE_PID" 2>/dev/null
+stop_serve "$SERVE_PID"
 CITES="$($A cites list)"
 echo "$CITES" | python3 -c '
 import json,sys
@@ -703,6 +727,7 @@ $A session show "$NSSID" >/dev/null 2>&1 && NSCROSS=1
 
 # HTTP face: per-request "ns" overrides the serve-level namespace (P3)。
 SPORT2="${E2E_SERVE_PORT2:-8600}"
+own_port "$SPORT2"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT2" >"$WORK/serve2.log" 2>&1 &
 SERVE2_PID=$!
 SRV2=0
@@ -725,7 +750,7 @@ NSBAD2="$(curl -s -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"机
 echo "$NSBAD2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert "bucket" in r.get("error",""), r' ; check "ns: an unregistered bucket is refused with a pointer to the registry" $?
 NSBADCODE="$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SPORT2/v1/search" -d '{"query":"x","ns":"bad:ns"}')"
 [ "$NSBADCODE" = "400" ] ; check "ns: HTTP /v1/search refuses an illegal namespace with 400" $?
-kill "$SERVE2_PID" 2>/dev/null
+stop_serve "$SERVE2_PID"
 
 # --- Gate T: cluster tidy (P6) — cross-topic near-duplicate fold -----------
 # The write path only merges within a topic key (FindByTopic scope), so two
@@ -802,6 +827,7 @@ DAFTER="$($A cluster list | python3 -c 'import json,sys; print(len(json.load(sys
 # The web workbench's cluster page reads these; list is ns-scoped like every
 # other face, detail carries the cluster's cite edges in one response.
 SPORT3="${E2E_SERVE_PORT3:-8601}"
+own_port "$SPORT3"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT3" >"$WORK/serve3.log" 2>&1 &
 SERVE3_PID=$!
 SRV3=0
@@ -880,7 +906,7 @@ assert len(lines)==1, ("a notification must not produce a response line", lines)
 r=json.loads(lines[0])
 assert r["id"]==7 and r["result"]=={}, r
 print("ok")' ; check "mcp: the stdio proxy forwards requests and drops notifications" $?
-kill "$SERVE3_PID" 2>/dev/null
+stop_serve "$SERVE3_PID"
 
 # --- Gate W: P9 candidate discovery → candidate ingest ----------------------
 # scan (no store) lists what WOULD be ingested; ingest-files -candidates runs
@@ -936,6 +962,7 @@ echo "$SOFT" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get
 # CLUS_MODEL_DIR at an empty dir; the 485MB download itself is unit-gated
 # against a fake source (install_test.go) and never run from e2e.
 SPORT4="${E2E_SERVE_PORT4:-8602}"
+own_port "$SPORT4"
 CLUS_MODEL_DIR="$WORK/no-model" "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT4" >"$WORK/serve4.log" 2>&1 &
 SERVE4_PID=$!
 SRV4=0
@@ -982,6 +1009,7 @@ assert r["skipped"].get("ext",0)>=1, r["skipped"]
 assert all(c.get("size",0)>0 and "age_days" in c for c in r["candidates"]), r["candidates"][:1]
 print("ok")' ; check "scan: POST /v1/scan lists candidates with rule metadata" $?
 SCANPATHS="$(echo "$SCANR" | python3 -c 'import json,sys; print(json.dumps([c["path"] for c in json.load(sys.stdin)["candidates"]]))')"
+curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/buckets" -d '{"name":"scanface","note":"scan->ingest gate"}' >/dev/null
 SCANJOB="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/ingest/jobs" -d "{\"candidates\":$SCANPATHS,\"job\":\"scanjob\",\"ns\":\"scanface\"}")"
 echo "$SCANJOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["state"]=="queued" and r.get("total",0)>=2, r' ; check "scan→ingest: the candidate list feeds the same job state machine" $?
 SDONE=0
@@ -991,7 +1019,6 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$SDONE" = "1" ] ; check "scan→ingest: the candidate job tracks to done" $?
-curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/buckets" -d '{"name":"scanface","note":"scan->ingest gate"}' >/dev/null
 SANS="$(curl -fsS -X POST "http://127.0.0.1:$SPORT4/v1/search" -d '{"query":"扫描手册里连接池最大是多少","ns":"scanface"}')"
 echo "$SANS" | python3 -c '
 import json,sys
@@ -999,7 +1026,7 @@ r=json.load(sys.stdin)
 blob="".join(s.get("content","") for s in (r.get("answer") or {}).get("samples") or [])
 assert "200" in blob, blob[:120]
 print("ok")' ; check "scan→ingest: a scanned candidate answers from the corpus" $?
-kill "$SERVE4_PID" 2>/dev/null
+stop_serve "$SERVE4_PID"
 
 # --- Gate AC: adapt face (heterogeneous corpora) ------------------------------
 # 探测容器+字段 → 带映射摄取 → 同一 Job 状态机。夹具就地构造：一个 jsonl、一个
@@ -1009,6 +1036,7 @@ printf '{"title":"适配器手册","content":"连接池最大 256，超时 45 �
 printf 'text_id,text\n1,红棉优级小粒老黄冰糖1.2kg大罐\n2,异形魔方顺滑风火轮移棱\n' > "$AD/titles.csv"
 printf '[{"chapter":"章一","paragraphs":["第一段文字。","第二段文字。"]}]\n' > "$AD/book.json"
 SPORT6="${E2E_SERVE_PORT6:-8604}"
+own_port "$SPORT6"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT6" >"$WORK/serve6.log" 2>&1 &
 SERVE6_PID=$!
 SRV6=0
@@ -1067,13 +1095,14 @@ r=json.load(sys.stdin); a=r.get("answer") or {}
 blob="".join(s.get("content","") for s in a.get("samples") or [])
 assert "黄冰糖" in blob, blob[:160]
 print("ok")' ; check "adapt: an adapted csv row answers from the corpus" $?
-kill "$SERVE6_PID" 2>/dev/null
+stop_serve "$SERVE6_PID"
 
 # --- Gate BB: eval scoreboard face (B3) ---------------------------------------
 # eval-run (Gate O, CLI) persists its aggregate into clus_evals; the
 # workbench 评测 pane reads it back here. Read-only face — triggering a run
 # stays on the CLI (items file + LLM budget).
 SPORT5="${E2E_SERVE_PORT5:-8603}"
+own_port "$SPORT5"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT5" >"$WORK/serve5.log" 2>&1 &
 SERVE5_PID=$!
 SRV5=0
@@ -1113,10 +1142,184 @@ assert "reuse_theta" in ct and "embed_seat" in ct, ct
 print("ok")' ; check "scoreboard: the detail carries taxonomy/modes/cost lines" $?
 EB404="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SPORT5/v1/evals/run:missing")"
 [ "$EB404" = "404" ] ; check "scoreboard: an unknown run id answers 404" $?
+python3 - "$SPORT5" <<'PY'
+import json, sys, time, urllib.request, urllib.error
+base = 'http://127.0.0.1:' + sys.argv[1]
+def call(route, body=None, content_type='application/json'):
+    request = urllib.request.Request(base + route, data=body, headers={'Content-Type': content_type})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return response.status, json.load(response)
+call('/v1/buckets', json.dumps({'name': 'upload-gate'}).encode())
+boundary = 'cumulus-upload-e2e'
+payload = b''
+for name, text in [('selected/a/manual.txt', '连接池最大 128，超时 30 秒。'), ('selected/b/manual.txt', '备份每天凌晨执行。')]:
+    payload += ('--' + boundary + '\r\nContent-Disposition: form-data; name="files"; filename="' + name + '"\r\n\r\n' + text + '\r\n').encode()
+payload += ('--' + boundary + '--\r\n').encode()
+content_type = 'multipart/form-data; boundary=' + boundary
+try:
+    call('/v1/ingest/upload', payload, content_type)
+    raise AssertionError('unnamed bucket accepted')
+except urllib.error.HTTPError as error:
+    assert error.code == 400
+previous = None
+for attempt in range(2):
+    status, queued = call('/v1/ingest/upload?ns=upload-gate', payload, content_type)
+    assert status == 202 and queued['total'] == 2, queued
+    deadline = time.monotonic() + 10
+    while True:
+        _, job = call('/v1/ingest/jobs/' + queued['job'] + '?ns=upload-gate')
+        assert job['state'] != 'failed', job
+        if job['state'] == 'done':
+            break
+        assert time.monotonic() < deadline, job
+        time.sleep(0.05)
+    assert job['done'] == job['records'] == 2, job
+    _, sources = call('/v1/sources?ns=upload-gate')
+    identities = sorted(source['id'] for source in sources['sources'])
+    assert len(identities) == 2 and (previous is None or identities == previous), sources
+    previous = identities
+_, result = call('/v1/search', json.dumps({'ns': 'upload-gate', 'query': '连接池最大是多少'}).encode())
+assert result['citations']['refs'], result
+print('upload end-to-end passed')
+PY
+check "upload: explicit bucket, nested identities, repeat import and searchable evidence" $?
+
+# GUI evaluations use a frozen isolated corpus, not a CLI subprocess.
+python3 - "$SPORT5" "$WORK/eval-ids.json" <<'PY'
+import csv, io, json, sys, time, urllib.request, urllib.error, uuid
+base = 'http://127.0.0.1:' + sys.argv[1]
+def call(route, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + route, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+try:
+    call('/v1/eval/capabilities')
+    raise AssertionError('evaluation accepted an implicit bucket')
+except urllib.error.HTTPError as error:
+    assert error.code == 400
+call('/v1/buckets', {'name': 'eval-gate'})
+call('/v1/ingest/sources', {'ns': 'eval-gate', 'title': 'Pool', 'key': 'pool', 'body': 'Pool maximum connections is 128. Timeout is 30 seconds.'})
+cap = call('/v1/eval/capabilities?ns=eval-gate')
+assert cap['protocol'] == 'eval-v2' and not cap['live_available'], cap
+before = call('/v1/sources?ns=eval-gate')
+content = json.dumps({'id': 'q1', 'query': 'Pool maximum connections?', 'answer': '128', 'gold_sources': ['pool']})
+validation = call('/v1/eval/datasets/validate?ns=eval-gate', {'name': 'Pool', 'content': content})
+assert validation['valid'] and validation['sha'], validation
+assert call('/v1/eval/datasets?ns=eval-gate')['datasets'] == []
+assert not call('/v1/eval/datasets/validate?ns=eval-gate', {'content': content + '\n' + content})['valid']
+dataset = call('/v1/eval/datasets?ns=eval-gate', {'name': 'Pool', 'content': content})
+runs = []
+for prior in [True, False]:
+    config = dict(cap['defaults'], prior=prior)
+    request = {'dataset_id': dataset['id'], 'name': 'Offline e2e', 'request_id': str(uuid.uuid4()), 'config': config}
+    run = call('/v1/eval/runs?ns=eval-gate', request)
+    assert call('/v1/eval/runs?ns=eval-gate', request)['id'] == run['id']
+    deadline = time.monotonic() + 15
+    while run['state'] in ['queued', 'running', 'cancelling']:
+        assert time.monotonic() < deadline, run
+        time.sleep(.03)
+        run = call('/v1/eval/runs/' + run['id'] + '?ns=eval-gate')
+    assert run['state'] == 'completed' and run['done'] == run['total'] == 1, run
+    assert run['summary']['closed_book_match'] is None and run['summary']['judge_correct'] is None, run
+    items = call('/v1/eval/runs/' + run['id'] + '/items?ns=eval-gate')['items']
+    assert items[0]['answer'] and items[0]['citations'], items
+    runs.append(run)
+compare = call('/v1/eval/compare?ns=eval-gate&left=' + runs[0]['id'] + '&right=' + runs[1]['id'])
+assert compare['comparable'] and len(compare['items']) == 1, compare
+for fmt in ['json', 'jsonl', 'csv']:
+    with urllib.request.urlopen(base + '/v1/eval/runs/' + runs[0]['id'] + '/export?ns=eval-gate&format=' + fmt) as response:
+        assert 'attachment' in response.headers['Content-Disposition']
+        text = response.read().decode()
+        assert runs[0]['frozen']['config_sha'] in text
+        if fmt == 'csv':
+            assert len(list(csv.reader(io.StringIO(text)))) == 2
+assert call('/v1/sources?ns=eval-gate') == before, 'evaluation mutated business sources'
+with open(sys.argv[2], 'w') as fh:
+    json.dump({'completed': runs[0]['id'], 'dataset': dataset['id']}, fh)
+print('GUI evaluation end-to-end passed')
+PY
+check "eval-v2: validation, isolated offline runs, idempotency, exports and comparison" $?
+
+# Persistence is the load-bearing claim of a background run: a finished
+# experiment must outlive the process, and a run that was in flight when the
+# process died must be reported interrupted instead of being silently replayed
+# (nobody consented to paying for it twice). SIGKILL, not a graceful stop.
+python3 - "$SPORT5" "$WORK/eval-ids.json" <<'PY'
+import json, sys, time, urllib.request, uuid
+base = 'http://127.0.0.1:' + sys.argv[1]
+def call(route, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + route, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+ids = json.load(open(sys.argv[2]))
+rows = '\n'.join(json.dumps({'id': 'q%d' % i, 'query': 'Pool maximum connections?', 'answer': '128', 'gold_sources': ['pool']}) for i in range(300))
+big = call('/v1/eval/datasets?ns=eval-gate', {'name': 'Long', 'content': rows})
+assert big['count'] == 300, big
+cap = call('/v1/eval/capabilities?ns=eval-gate')
+active = call('/v1/eval/runs?ns=eval-gate', {'dataset_id': big['id'], 'name': 'Inflight', 'request_id': str(uuid.uuid4()), 'config': cap['defaults']})
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    state = call('/v1/eval/runs/' + active['id'] + '?ns=eval-gate')['state']
+    if state == 'running':
+        break
+    time.sleep(.05)
+assert state == 'running', state
+ids['inFlight'] = active['id']
+json.dump(ids, open(sys.argv[2], 'w'))
+print('inflight evaluation started')
+PY
+check "eval-v2: a long run reaches running before the process is killed" $?
+kill -9 "$SERVE5_PID" 2>/dev/null
+wait "$SERVE5_PID" 2>/dev/null
+own_port "$SPORT5"
+"$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT5" >"$WORK/serve5b.log" 2>&1 &
+SERVE5_PID=$!
+SRV5B=0
+for _ in $(seq 1 50); do
+	curl -fsS "http://127.0.0.1:$SPORT5/health" >/dev/null 2>&1 && { SRV5B=1; break; }
+	sleep 0.2
+done
+[ "$SRV5B" = "1" ] ; check "eval-v2: serve restarts on the store left behind by SIGKILL" $?
+python3 - "$SPORT5" "$WORK/eval-ids.json" <<'PY'
+import json, sys, time, urllib.request, urllib.error, uuid
+base = 'http://127.0.0.1:' + sys.argv[1]
+ids = json.load(open(sys.argv[2]))
+def call(route, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(base + route, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+completed = call('/v1/eval/runs/' + ids['completed'] + '?ns=eval-gate')
+assert completed['state'] == 'completed' and completed['done'] == 1, completed
+persisted = call('/v1/eval/runs/' + ids['completed'] + '/items?ns=eval-gate')['items']
+assert persisted[0]['citations'] and persisted[0]['answer'], persisted
+listed = {run['id']: run for run in call('/v1/eval/runs?ns=eval-gate')['runs']}
+assert ids['completed'] in listed and ids['inFlight'] in listed, sorted(listed)
+inflight = listed[ids['inFlight']]
+assert inflight['state'] == 'interrupted', inflight
+assert 'start a new run' in inflight['error'], inflight
+try:
+    call('/v1/eval/runs/' + ids['inFlight'] + '/retry?ns=eval-gate', {})
+    raise AssertionError('cold retry of a lost experiment was accepted')
+except urllib.error.HTTPError as error:
+    assert error.code == 409, error.code
+fresh = call('/v1/eval/runs?ns=eval-gate', {'dataset_id': ids['dataset'], 'name': 'After restart', 'request_id': str(uuid.uuid4()), 'config': call('/v1/eval/capabilities?ns=eval-gate')['defaults']})
+assert fresh['id'] not in listed, fresh
+deadline = time.monotonic() + 15
+while fresh['state'] in ['queued', 'running', 'cancelling']:
+    assert time.monotonic() < deadline, fresh
+    time.sleep(.03)
+    fresh = call('/v1/eval/runs/' + fresh['id'] + '?ns=eval-gate')
+assert fresh['state'] == 'completed' and fresh['done'] == 1, fresh
+print('restart persistence passed')
+PY
+check "eval-v2: finished runs survive SIGKILL, in-flight runs become interrupted, cold retry is refused" $?
+
 # The store directory is exclusive, so the CLI half of this gate can only run
 # once serve is down.
-kill "$SERVE5_PID" 2>/dev/null
-sleep 0.3
+stop_serve "$SERVE5_PID"
 # The binding must DIFFERENTIATE configs: two runs with a different chat model
 # must not share a config hash (they used to — the fingerprint was 4 booleans,
 # so a model swap looked like a no-op on the scoreboard).

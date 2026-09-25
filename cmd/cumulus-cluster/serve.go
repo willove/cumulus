@@ -9,13 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/bucket"
+	"github.com/willove/cumulus/internal/eval"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
@@ -56,19 +56,26 @@ func newNSEnsurer(c cumulite.Port, st *ingest.Store, serveNS, sourcesColl string
 // declare ensures the suite collections for one namespace, once per process.
 func (n *nsEnsurer) declare(ctx context.Context, nsForReq string) error {
 	n.mu.Lock()
-	first := !n.ensured[nsForReq]
-	n.ensured[nsForReq] = true
-	n.mu.Unlock()
-	if !first {
+	if n.ensured[nsForReq] {
+		n.mu.Unlock()
 		return nil
 	}
+	n.mu.Unlock()
 	stForReq, _, err := storeForNS(n.c, n.st, n.serveNS, nsForReq, n.sourcesColl)
 	if err != nil {
 		return err
 	}
 	if _, err := stForReq.Ensure(ctx, suiteExtra(nsForReq)...); err != nil {
+		// Marker stays UNSET on failure: the next request retries. Marking
+		// before Ensure (the old shape) meant one transient failure — a
+		// cancelled ctx, a blip — permanently cached a declare that never
+		// happened, and every later write to that ns died on the engine's
+		// fail-closed "collection not found" until restart.
 		return err
 	}
+	n.mu.Lock()
+	n.ensured[nsForReq] = true
+	n.mu.Unlock()
 	return nil
 }
 
@@ -91,7 +98,7 @@ type sourceIn struct {
 	Lang  string         `json:"lang"`
 	Body  string         `json:"body"`
 	Meta  map[string]any `json:"meta"`
-	NS    string         `json:"ns"` // per-request namespace; empty = serve's -ns
+	NS    string         `json:"ns"` // explicitly selected, registered bucket
 }
 
 type jobIn struct {
@@ -99,14 +106,14 @@ type jobIn struct {
 	Job        string   `json:"job"`
 	Recursive  bool     `json:"recursive"`
 	Candidates []string `json:"candidates"` // explicit file list (P9 scan output); wins over Dir
-	NS         string   `json:"ns"`         // per-request namespace; empty = serve's -ns
+	NS         string   `json:"ns"`         // explicitly selected, registered bucket
 }
 
 // runServe exposes the HTTP faces: ingest (/health, POST /v1/ingest/sources,
 // POST /v1/ingest/jobs, GET /v1/ingest/jobs/{id}), search (POST
 // /v1/search, POST /v1/search/stream), sessions, clusters, MCP
-// (POST /mcp) and the workbench (/ui/). serveNS is the default namespace for
-// every face; request bodies may override it per call.
+// (POST /mcp) and the workbench (/ui/). HTTP ingest/search require an explicit
+// registered bucket; legacy read/MCP/session faces may fall back to serveNS.
 func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, serveNS string, verbose bool, storeDirArg string) {
 	mux := http.NewServeMux()
 
@@ -137,14 +144,16 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	registerScanFace(mux, serveNS)
 	registerAdaptFace(mux, c, st, sourcesColl, serveNS, ensure, buckets)
 	registerEvalFace(mux, c, serveNS)
+	evalService := eval.NewService(ctx, c, newEvalExecutor, evalFingerprint)
+	defer evalService.Close()
+	registerEvalV2Face(mux, c, buckets, evalService, serveNS, sourcesColl)
 	registerModelFace(mux)
 	logModelReminder()
 	registerWebFace(mux)
 
-	// scopedStore returns the default store, or a per-request store when the
-	// body asks for a different namespace than the server's own, with that
-	// namespace's collections declared on first sighting (idempotent).
-	scopedStore := ensure.store
+	registerIngestFace(mux, ensure, buckets)
+	registerBucketFace(mux, buckets, serveNS)
+	registerSourcesFace(mux, ensure.store)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())
@@ -155,6 +164,38 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "store": h})
 	})
 
+	// Timeouts: ReadHeaderTimeout guards slowloris headers. ReadTimeout and
+	// WriteTimeout are deliberately NOT set — a DEEP search legitimately runs
+	// for minutes and an SSE stream is open-ended, so a blanket write deadline
+	// would kill the very requests this face exists to serve. IdleTimeout
+	// still reaps dead keep-alive connections.
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Printf("cumulus-cluster serve on %s", listen)
+	// Graceful shutdown on ctx cancellation: in-flight SSE searches finish,
+	// the port is released instead of being killed mid-write.
+	go func() {
+		<-ctx.Done()
+		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shut); err != nil && err != context.DeadlineExceeded {
+			log.Printf("serve shutdown: %v", err)
+		}
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fatal(err)
+	}
+}
+
+// registerIngestFace shares the HTTP bucket gate with adapt/search. GET job
+// status remains readable for legacy default and unregistered namespaces.
+func registerIngestFace(mux *http.ServeMux, ensure *nsEnsurer, buckets *bucket.Store) {
+	scopedStore := ensure.store
+	registerUploadFace(mux, ensure, buckets)
 	mux.HandleFunc("/v1/ingest/sources", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
@@ -163,6 +204,9 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		var in sourceIn
 		if err := decode(r, &in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if !requireHTTPBucket(w, r, buckets, in.NS) {
 			return
 		}
 		rst, err := scopedStore(r.Context(), in.NS)
@@ -212,6 +256,9 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 				return
 			}
+			if !requireHTTPBucket(w, r, buckets, in.NS) {
+				return
+			}
 			if in.Job == "" {
 				in.Job = "http-" + fmt.Sprint(time.Now().UnixMilli())
 			}
@@ -220,60 +267,34 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 				writeStoreErr(w, err)
 				return
 			}
-			// P9: an explicit candidate list replaces the walk — the
-			// pipeline (state machine, cursor, upserts) is the same.
-			if len(in.Candidates) > 0 {
-				if err := rst.PutJobDoc(r.Context(), in.Job, ingest.JobDoc{
-					State: "queued", Phase: "extracting", Total: len(in.Candidates),
-				}); err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			files := in.Candidates
+			run := func(ctx context.Context) (int, error) {
+				return rst.IngestCandidates(ctx, files, in.Job)
+			}
+			if len(files) == 0 {
+				if in.Dir == "" {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir or candidates required"})
 					return
 				}
-				go func() {
-					bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-					defer cancel()
-					if _, err := rst.IngestCandidates(bg, in.Candidates, in.Job); err != nil {
-						_ = rst.PutJobDoc(bg, in.Job, ingest.JobDoc{
-							State: "failed", Phase: "upserting", Error: err.Error(),
-						})
-					}
-				}()
-				writeJSON(w, http.StatusAccepted, map[string]any{
-					"job": in.Job, "state": "queued", "total": len(in.Candidates),
-				})
-				return
-			}
-			if in.Dir == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir or candidates required"})
-				return
-			}
-			if !dirExists(in.Dir) {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir not found"})
-				return
-			}
-			total, err := countIngestable(in.Dir, in.Recursive)
-			if err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			if err := rst.PutJobDoc(r.Context(), in.Job, ingest.JobDoc{
-				State: "queued", Phase: "extracting", Total: total,
-			}); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
-			}
-			// Async run: the goroutine owns the state machine from here.
-			go func() {
-				bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				defer cancel()
-				if _, err := rst.IngestFiles(bg, in.Dir, in.Recursive, in.Job); err != nil {
-					_ = rst.PutJobDoc(bg, in.Job, ingest.JobDoc{
-						State: "failed", Phase: "upserting", Error: err.Error(),
-					})
+				if !dirExists(in.Dir) {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": "dir not found"})
+					return
 				}
-			}()
+				files, err = ingest.WalkIngestable(in.Dir, in.Recursive)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+					return
+				}
+				run = func(ctx context.Context) (int, error) {
+					return rst.IngestFileList(ctx, in.Dir, files, in.Job)
+				}
+			}
+			if err := queueFileJob(r.Context(), rst, in.Job, len(files), run, nil); err != nil {
+				writeStoreErr(w, err)
+				return
+			}
 			writeJSON(w, http.StatusAccepted, map[string]any{
-				"job": in.Job, "state": "queued", "total": total,
+				"job": in.Job, "state": "queued", "total": len(files),
 			})
 		case http.MethodGet:
 			// GET /v1/ingest/jobs/{id}: routed here via the trailing segment.
@@ -302,35 +323,8 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST/GET only"})
 		}
 	})
-	registerBucketFace(mux, buckets, serveNS)
 	mux.HandleFunc("/v1/ingest/jobs", jobsHandler)
 	mux.HandleFunc("/v1/ingest/jobs/", jobsHandler) // GET /v1/ingest/jobs/{id}
-
-	// Timeouts: ReadHeaderTimeout guards slowloris headers. ReadTimeout and
-	// WriteTimeout are deliberately NOT set — a DEEP search legitimately runs
-	// for minutes and an SSE stream is open-ended, so a blanket write deadline
-	// would kill the very requests this face exists to serve. IdleTimeout
-	// still reaps dead keep-alive connections.
-	srv := &http.Server{
-		Addr:              listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-	log.Printf("cumulus-cluster serve on %s", listen)
-	// Graceful shutdown on ctx cancellation: in-flight SSE searches finish,
-	// the port is released instead of being killed mid-write.
-	go func() {
-		<-ctx.Done()
-		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shut); err != nil && err != context.DeadlineExceeded {
-			log.Printf("serve shutdown: %v", err)
-		}
-	}()
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fatal(err)
-	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -367,26 +361,41 @@ func dirExists(dir string) bool {
 	return err == nil && st.IsDir()
 }
 
-// countIngestable mirrors the walk in ingest.walkIngestable so the queued job
-// reports the real Total. It drifted once before (four extensions here, six in
-// the walk) and the UI progress lied.
+// countIngestable uses the same discovery rules as processing.
 func countIngestable(dir string, recursive bool) (int, error) {
-	n := 0
-	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	files, err := ingest.WalkIngestable(dir, recursive)
+	return len(files), err
+}
+
+// queueFileJob transfers cleanup ownership only after the queued state is saved.
+func queueFileJob(ctx context.Context, st *ingest.Store, job string, total int, run func(context.Context) (int, error), cleanup func()) error {
+	if err := st.PutJobDoc(ctx, job, ingest.JobDoc{State: "queued", Phase: "extracting", Total: total}); err != nil {
+		return err
+	}
+	go func() {
+		if cleanup != nil {
+			defer cleanup()
 		}
-		if d.IsDir() {
-			if p != dir && !recursive {
-				return filepath.SkipDir
-			}
-			return nil
+		bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		runFileJob(bg, st, job, run)
+	}()
+	return nil
+}
+
+func runFileJob(ctx context.Context, st *ingest.Store, job string, run func(context.Context) (int, error)) {
+	if _, err := run(ctx); err != nil {
+		fw, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		// Preserve the pipeline's counters when recording an async failure.
+		doc, readErr := st.GetJobDoc(fw, job)
+		if readErr != nil {
+			log.Printf("ingest job %s terminal read: %v (ingest: %v)", job, readErr, err)
+			return
 		}
-		switch strings.ToLower(filepath.Ext(p)) {
-		case ".md", ".txt", ".html", ".htm", ".docx", ".pdf":
-			n++
+		doc.State, doc.Error = "failed", err.Error()
+		if writeErr := st.PutJobDoc(fw, job, doc); writeErr != nil {
+			log.Printf("ingest job %s terminal write: %v", job, writeErr)
 		}
-		return nil
-	})
-	return n, err
+	}
 }

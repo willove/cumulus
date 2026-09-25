@@ -399,7 +399,10 @@ func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn
 // Token accounting is split: search spend is sealed before any judge call so
 // judge/closed-book tokens never inflate the search budget (3.2).
 // keyByID maps internal IDs → business keys for Ev.Rec and admission checks.
-func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, it eval.Item) evalResult {
+// evalSearchOne is the shared in-process per-item search and accounting
+// mechanism for CLI and GUI. The legacy wrapper below deliberately keeps the
+// historical judge-OR-rule scoring; eval-v2 scores its raw result separately.
+func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, list []source.Source, keyByID map[string]string, it eval.Item) (evalResult, deep.Result) {
 	rec := evalResult{ID: it.ID}
 	var tokBefore int64
 	rejBefore := 0
@@ -469,6 +472,11 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 		rec.SearchTokens = chat.TotalTokens() - tokBefore
 		rec.Tokens = rec.SearchTokens
 	}
+	return rec, res
+}
+
+func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, it eval.Item) evalResult {
+	rec, res := evalSearchOne(ctx, dE, chat, list, keyByID, it)
 	if judgeOn && chat != nil {
 		j0 := chat.TotalTokens()
 		if ok, why, jerr := judgeAnswer(ctx, chat, it.Query, it.Answer, res.Answer.Summary); jerr != nil {

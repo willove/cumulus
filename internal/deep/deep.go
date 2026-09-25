@@ -165,6 +165,14 @@ type Result struct {
 	AbstainP float64 `json:"abstain_p,omitempty"`
 	// AbstainAction is "" | "deep" | "refuse" — what the head recommended.
 	AbstainAction string `json:"abstain_action,omitempty"`
+	// StopReason reports why the DEEP admission loop stopped: "sufficient"
+	// (coverage complete at/over the score bar), "utility" (per-round
+	// pessimistic exit — p_fail high and not improving across rounds, opt-in
+	// via CLUS_EARLY_ABSTAIN; skips self-correction and widening too),
+	// "budget" (MaxLoops or TokenBudget cap), "" (candidates exhausted, or no
+	// loop ran — FAST-tier answers and pre-DEEP early refuses, which
+	// AbstainEarly/AbstainAction already describe).
+	StopReason string `json:"stop_reason,omitempty"`
 	// AbstainEarly marks a pre-DEEP refusal (FAST had zero usable evidence
 	// and p_fail cleared EarlyAbove): DEEP was skipped to save budget.
 	AbstainEarly bool `json:"abstain_early,omitempty"`
@@ -507,11 +515,12 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	// 文档族亲缘: the FAST answer's source votes for its family — answers
 	// cluster within a family (11/13 failures were same-family near-misses).
 	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, deepCorpus)
-	deepAns, cover, loops, wid, sc, admitted, cited, err := e.runDeep(ctx, query, deepCorpus, affinity)
+	deepAns, cover, loops, wid, sc, admitted, cited, stopReason, err := e.runDeep(ctx, query, deepCorpus, affinity)
 	if err != nil {
 		return Result{}, err
 	}
 	res.Loops = loops
+	res.StopReason = stopReason
 	res.Answer = deepAns
 	res.Cover = cover
 	res.SelfCorrected = sc
@@ -834,7 +843,7 @@ func (e *Engine) budgetHit() bool {
 	return true
 }
 
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, error) {
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
 	if affinity == nil {
 		affinity = map[string]bool{}
 	}
@@ -884,6 +893,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	var bestSrc source.Source
 	bestScore := -1.0
 	rep := report(kept)
+	// Stop-reason accounting: whichever break fires first names the exit,
+	// "" means the candidates ran out (or the ctx died) with budget to spare.
+	// prevP/noImprove drive the per-round pessimistic exit below.
+	reason := ""
+	prevP := 0.0
+	noImprove := 0
 	for _, s := range ranked {
 		if cancelled(ctx) {
 			break
@@ -895,6 +910,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// coverage is enough — sampling further admitted files wastes budget
 		// and latency (真机: 85s/13944 tokens 空转在已答问题上).
 		if rep.Complete && bestScore >= 8 {
+			reason = "sufficient"
 			if e.Verbose != nil {
 				e.Verbose("early stop: covered, best=%.1f, files=%d", bestScore, loops)
 			}
@@ -902,12 +918,14 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		}
 		loops++
 		if loops > MaxLoops {
+			reason = "budget"
 			break
 		}
 		tried[s.ID] = true
 		// Independent token stop (LENS Def 3): check BEFORE scoring this
 		// file so an exhausted budget never starts another oracle batch.
 		if e.budgetHit() {
+			reason = "budget"
 			if e.Verbose != nil {
 				e.Verbose("token budget hit after %d files", loops)
 			}
@@ -941,13 +959,53 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestSrc = s
 		}
 		rep = report(kept)
+		// Per-round pessimistic exit (u_d, Jev-Mem §3.3 的单出口在零 LLM 头上的
+		// 对应物). Opt-in on the SAME knob as the FAST-boundary early refuse
+		// (CLUS_EARLY_ABSTAIN): after ≥2 scored files, p_fail at/over the line
+		// on consecutive NON-improving rounds ⇒ more admission buys nothing —
+		// stop, and skip self-correction/widening below the same way. The
+		// post-search gates still own the final refuse decision.
+		if e.Abstain != nil && e.Abstain.EarlyAbove > 0 && loops >= 2 {
+			mean := 0.0
+			for _, sm := range kept {
+				mean += sm.Score
+			}
+			if len(kept) > 0 {
+				mean /= float64(len(kept))
+			}
+			conf := mcs.Confidence(mean, mcs.Coverage(query, kept))
+			// Skipped mirrors the FAST-boundary feature honestly: mid-loop,
+			// "skipped" means no usable window YET. Without it the head's
+			// strongest failure signal (+1.80) never fires and this exit is
+			// dead code.
+			p := e.Abstain.PFail(abstain.FromAnswer(query, len(ranked), len(kept),
+				bestScore, len(rep.Missing), conf, len(kept) == 0, false))
+			switch {
+			case p < e.Abstain.EarlyAbove:
+				noImprove = 0
+			case p >= prevP:
+				noImprove++
+			default:
+				noImprove = 0
+			}
+			prevP = p
+			if noImprove >= 2 {
+				reason = "utility"
+				if e.Verbose != nil {
+					e.Verbose("utility stop: p_fail=%.2f flat for %d rounds, files=%d", p, noImprove, loops)
+				}
+				break
+			}
+		}
 	}
 
 	// Self-correction (D4): own budget, independent of admission MaxLoops.
 	// Prefer files admission never reached, then re-sample tried ones with
-	// the missing-fact queries.
+	// the missing-fact queries. A utility stop skips it by design: the loop
+	// just decided more retrieval buys nothing (opt-in trade, see the
+	// per-round exit above).
 	selfCorrected := false
-	if !rep.Complete && CorrectBudget > 0 && !e.budgetHit() {
+	if reason != "utility" && !rep.Complete && CorrectBudget > 0 && !e.budgetHit() {
 		selfCorrected = true
 		var order []source.Source
 		for _, s := range sources {
@@ -1049,7 +1107,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// wrong-doc windows "complete". The budget term uses the REAL loop count
 	// (passing 0 made the predicate collapse to !Complete, so the "budget
 	// aware" gate never saw the budget).
-	if (facts.NeedContinue(rep, loops, MaxLoops+CorrectBudget+WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
+	if reason != "utility" && (facts.NeedContinue(rep, loops, MaxLoops+CorrectBudget+WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -1096,7 +1154,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
 			Summary: "深度检索仍证据不足",
-		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), nil
+		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 	}
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
@@ -1167,7 +1225,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 	}
-	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), nil
+	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 }
 
 // render prefers the production Synthesizer (synthesize_roi) and degrades to

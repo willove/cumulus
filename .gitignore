@@ -16,3 +16,5 @@ var/
 # plan, LENS/ir-rag research notes, sources/ archives): never committed,
 # never pushed. Moved here 2026-09-24 from db-works/docs/suites/ask/.
 /docs/
+
+.omo/

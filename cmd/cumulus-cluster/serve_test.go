@@ -3,12 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/adapt"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/monitor"
@@ -16,10 +24,10 @@ import (
 	"github.com/willove/cumulus/internal/source"
 )
 
-// serve 的摄取面跑在「未声明集合即 fail-close」的引擎上：启动即声明默认域、
-// 按请求 ns 首见懒声明（scopedStore 的组合）——否则工作台摄取面板在一个新库上
-// 第一杯就以 raw "collection not found" 收场。进程内真引擎把这两步钉死。
-func TestServeEnsuresNamespacesBeforeFirstWrite(t *testing.T) {
+// Namespace declaration is still available to legacy CLI callers without a
+// registered bucket. The HTTP write gate is tested separately below; changing
+// the HTTP contract must not restrict the internal store/CLI ingest rules.
+func TestLegacyStoreEnsuresNamespacesBeforeFirstWrite(t *testing.T) {
 	t.Setenv("AIGATE_BASE_URL", "") // offline: no network in tests
 	ctx := context.Background()
 
@@ -142,5 +150,267 @@ func TestSearchRequiresRegisteredBucket(t *testing.T) {
 	// 5) Re-listing the bucket shows the corpus/cluster counters.
 	if b.Sources <= 0 || b.Clusters <= 0 {
 		t.Fatalf("bucket counters must be refreshed: %+v", b)
+	}
+}
+
+func serveJSON(t *testing.T, h http.Handler, method, path string, body any) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(method, path, strings.NewReader(string(raw))))
+	if !strings.HasPrefix(w.Header().Get("Content-Type"), "application/json") {
+		t.Fatalf("%s %s: expected JSON, got %d %s", method, path, w.Code, w.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%s %s: %v; %s", method, path, err, w.Body.String())
+	}
+	return w, out
+}
+
+func waitHTTPJob(t *testing.T, h http.Handler, path string) map[string]any {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		w, out := serveJSON(t, h, http.MethodGet, path, nil)
+		if w.Code != http.StatusOK || out["state"] == "failed" {
+			t.Fatalf("job polling: %d %v", w.Code, out)
+		}
+		if out["state"] == "done" {
+			return out
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("job did not complete: %v", out)
+		case <-tick.C:
+		}
+	}
+}
+
+// Exercise production handlers on a fresh store, including both job input
+// forms. Merely ensuring a namespace must never register it implicitly.
+func TestHTTPIngestRequiresRegisteredBucket(t *testing.T) {
+	t.Setenv("CLUS_OFFLINE", "1")
+	t.Setenv("CLUS_EMBED", "")
+	t.Setenv("AIGATE_BASE_URL", "")
+	for _, serveNS := range []string{"", "serve"} {
+		for _, kind := range []string{"source", "directory", "candidates", "adapt"} {
+			t.Run(serveNS+"/"+kind, func(t *testing.T) {
+				ctx := context.Background()
+				engine, err := cumulite.Open("", cumulite.WithInMemory())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer engine.Close()
+				sourcesColl := ns.Coll(serveNS, "clus_sources")
+				base := ingest.New(engine, sourcesColl, ns.Coll(serveNS, "clus_evidence"), ns.Coll(serveNS, "clus_clusters"), serveNS)
+				ens := newNSEnsurer(engine, base, serveNS, sourcesColl)
+				buckets := bucket.New(engine)
+				mux := http.NewServeMux()
+				registerIngestFace(mux, ens, buckets)
+				registerAdaptFace(mux, engine, base, sourcesColl, serveNS, ens, buckets)
+				registerSearchFace(mux, engine, base, sourcesColl, serveNS, false, ens, buckets, monitor.New())
+				registerBucketFace(mux, buckets, serveNS)
+				registerSourcesFace(mux, ens.store)
+
+				w, _ := serveJSON(t, mux, http.MethodGet, "/v1/buckets", nil)
+				if w.Code != http.StatusOK {
+					t.Fatal(w.Body.String())
+				}
+				if serveNS != "" {
+					// Even a registered serve default is not an explicit selection.
+					if _, err := buckets.Create(ctx, serveNS, "", ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dir := t.TempDir()
+				file := filepath.Join(dir, "manual.txt")
+				if err := os.WriteFile(file, []byte("连接池最大 128，超时 30 秒。"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				path := "/v1/ingest/jobs"
+				in := map[string]any{"job": "first"}
+				switch kind {
+				case "source":
+					path = "/v1/ingest/sources"
+					in["title"], in["body"] = "手册", "连接池最大 128，超时 30 秒。"
+				case "directory":
+					in["dir"] = dir
+				case "candidates":
+					in["candidates"] = []string{file}
+				case "adapt":
+					path = "/v1/adapt/ingest"
+					in["paths"] = []string{file}
+				}
+				for _, name := range []string{"(omitted)", "", "newbucket", "bad:ns"} {
+					in["ns"] = name
+					if name == "(omitted)" {
+						delete(in, "ns")
+					}
+					w, out := serveJSON(t, mux, http.MethodPost, path, in)
+					if w.Code != http.StatusBadRequest || out["error"] == nil || out["hint"] == nil {
+						t.Fatalf("ingest ns=%q: %d %v", name, w.Code, out)
+					}
+					for _, searchPath := range []string{"/v1/search", "/v1/search/stream"} {
+						w, out = serveJSON(t, mux, http.MethodPost, searchPath, map[string]any{"ns": name, "query": "连接池最大是多少"})
+						if w.Code != http.StatusBadRequest || out["error"] == nil || out["hint"] == nil {
+							t.Fatalf("search ns=%q: %d %v", name, w.Code, out)
+						}
+					}
+				}
+				if len(ens.ensured) != 0 {
+					t.Fatalf("rejected write declared namespaces: %v", ens.ensured)
+				}
+				if _, err := engine.KVGet(ctx, ns.KV("newbucket", "clus:job:first")); !contract.IsNotFound(err) {
+					t.Fatalf("rejected request created a job: %v", err)
+				}
+				// Read-only lists keep the legacy empty/unregistered behavior.
+				for _, suffix := range []string{"", "?ns=legacy"} {
+					w, out := serveJSON(t, mux, http.MethodGet, "/v1/sources"+suffix, nil)
+					if w.Code != http.StatusOK || len(out["sources"].([]any)) != 0 {
+						t.Fatalf("empty list: %d %v", w.Code, out)
+					}
+				}
+				w, out := serveJSON(t, mux, http.MethodPost, "/v1/buckets", map[string]any{"name": "newbucket"})
+				if w.Code != http.StatusCreated {
+					t.Fatalf("register: %d %v", w.Code, out)
+				}
+				in["ns"] = "newbucket"
+				w, out = serveJSON(t, mux, http.MethodPost, path, in)
+				if kind == "source" {
+					if w.Code != http.StatusCreated {
+						t.Fatalf("source: %d %v", w.Code, out)
+					}
+				} else {
+					if w.Code != http.StatusAccepted {
+						t.Fatalf("queue: %d %v", w.Code, out)
+					}
+					job := waitHTTPJob(t, mux, "/v1/ingest/jobs/first?ns=newbucket")
+					if job["done"] != float64(1) || job["total"] != float64(1) {
+						t.Fatalf("progress: %v", job)
+					}
+				}
+				w, out = serveJSON(t, mux, http.MethodGet, "/v1/sources?ns=newbucket", nil)
+				if w.Code != http.StatusOK || len(out["sources"].([]any)) != 1 {
+					t.Fatalf("ingested sources: %d %v", w.Code, out)
+				}
+				w, out = serveJSON(t, mux, http.MethodPost, "/v1/search", map[string]any{"ns": "newbucket", "query": "连接池最大是多少"})
+				if w.Code != http.StatusOK || out["cluster_id"] == nil || out["cluster_id"] == "" {
+					t.Fatalf("registered search: %d %v", w.Code, out)
+				}
+				w, out = serveJSON(t, mux, http.MethodGet, "/v1/sources", nil)
+				if w.Code != http.StatusOK || len(out["sources"].([]any)) != 0 {
+					t.Fatalf("default namespace contaminated: %d %v", w.Code, out)
+				}
+			})
+		}
+	}
+}
+
+func TestJobReadErrorsAndLegacyNamespaces(t *testing.T) {
+	storeErr := errors.New("storage unavailable")
+	for _, namespace := range []string{"", "unregistered"} {
+		for _, tc := range []struct {
+			name string
+			raw  string
+			err  error
+			code int
+		}{
+			{"missing", "", contract.ErrNotFound, http.StatusNotFound},
+			{"wrapped missing", "", fmt.Errorf("kv: %w", contract.ErrNotFound), http.StatusNotFound},
+			{"storage error", "", storeErr, http.StatusInternalServerError},
+			{"cancelled", "", context.Canceled, http.StatusInternalServerError},
+			{"empty value", "", nil, http.StatusInternalServerError},
+			{"corrupt", "not json", nil, http.StatusInternalServerError},
+			{"legacy job", `{"state":"done","done":2}`, nil, http.StatusOK},
+		} {
+			t.Run(namespace+"/"+tc.name, func(t *testing.T) {
+				p := newTestPort()
+				p.seed(ns.KV(namespace, "clus:job:test"), tc.raw)
+				p.OnKVGet = func(string) error { return tc.err }
+				st := ingest.New(p, "", "", "", namespace)
+				ens := newNSEnsurer(p, st, namespace, ns.Coll(namespace, "clus_sources"))
+				ens.ensured[namespace] = true
+				mux := http.NewServeMux()
+				registerIngestFace(mux, ens, bucket.New(p))
+				w, out := serveJSON(t, mux, http.MethodGet, "/v1/ingest/jobs/test?ns="+namespace, nil)
+				if w.Code != tc.code {
+					t.Fatalf("job: %d %v, want %d", w.Code, out, tc.code)
+				}
+				if tc.code == http.StatusOK && out["job"] != "test" {
+					t.Fatalf("legacy job id not filled: %v", out)
+				}
+				if tc.err != nil && !contract.IsNotFound(tc.err) {
+					if _, err := st.GetJobDoc(context.Background(), "test"); !errors.Is(err, tc.err) {
+						t.Fatalf("store error lost: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Unlike testPort, this port rejects operations on a cancelled context, just
+// like production storage. No file needs opening to hit the timeout path.
+type cancelledAdaptPort struct{ *testPort }
+
+func (p cancelledAdaptPort) KVGet(ctx context.Context, key string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return p.testPort.KVGet(ctx, key)
+}
+
+func (p cancelledAdaptPort) KVPut(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return p.testPort.KVPut(ctx, key, value, ttl)
+}
+
+func (p cancelledAdaptPort) EnsureCollection(ctx context.Context, _ string) error {
+	return ctx.Err()
+}
+
+func TestAdaptCancelledJobPreservesTerminalProgress(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprint("deadline=", expired), func(t *testing.T) {
+			p := cancelledAdaptPort{newTestPort()}
+			st := ingest.New(p, "", "", "", "tenant")
+			progress := ingest.JobDoc{
+				State: "running", Phase: "upserting", Total: 5, Done: 3,
+				Failed: 1, Records: 42, Skipped: 1,
+				SkipReasons: map[string]int{"unreadable": 1},
+				SkipErrors:  map[string]string{"missing.txt": "not found"},
+			}
+			if err := st.PutJobDoc(context.Background(), "timeout", progress); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if expired {
+				ctx, cancel = context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+			}
+			runAdaptJob(ctx, st, []string{"unused.txt"}, adapt.Fields{}, "timeout")
+			got, err := st.GetJobDoc(context.Background(), "timeout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got.Error, ctx.Err().Error()) {
+				t.Fatalf("terminal error lost cancellation cause: %q", got.Error)
+			}
+			progress.Job, progress.State, progress.Error = "timeout", "failed", got.Error
+			progress.Updated = got.Updated
+			if !reflect.DeepEqual(got, progress) || got.Updated == "" {
+				t.Fatalf("terminal progress: got %+v, want %+v", got, progress)
+			}
+		})
 	}
 }

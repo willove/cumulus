@@ -1,0 +1,107 @@
+package ingest
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/willove/cumulus/internal/adapt"
+)
+
+// IngestAdapted's skip ledger must add up: Skipped is the SUM over reasons
+// (it used to read skip["file"] — a key nothing writes on this path — so the
+// job said Skipped=0 forever while SkipReasons held the real counts), and
+// SkipErrors is keyed by the path AS LISTED (base names collide across
+// directories, and the loser's reason silently vanished).
+func TestIngestAdaptedSkipAccounting(t *testing.T) {
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	good1 := filepath.Join(dir, "a.jsonl")
+	good2 := filepath.Join(dir, "b.jsonl")
+	if err := os.WriteFile(good1, []byte("{\"body\": \"连接池最大 128。\"}\n{\"body\": \"超时 30 秒。\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(good2, []byte("{\"body\": \"端口是 8480。\"}\n{\"body\": \"备份每天 02:00。\"}\n{\"body\": \"灰度窗口 10%。\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A malformed JSONL: record decode fails, so adaptation fails and the
+	// file is skipped with a reason, not fatal.
+	badJSONL := filepath.Join(dir, "c.jsonl")
+	if err := os.WriteFile(badJSONL, []byte("{\"body\": \"broken\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "gone.md") // never created
+
+	n, err := st.IngestAdapted(ctx, []string{good1, badJSONL, missing, good2}, adapt.Fields{}, "jacc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("records stored = %d, want 5", n)
+	}
+	doc, err := st.GetJobDoc(ctx, "jacc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.State != "done" {
+		t.Fatalf("state = %q (%+v)", doc.State, doc)
+	}
+	if doc.Skipped != 2 {
+		t.Fatalf("Skipped = %d, want 2 (sum over reasons)", doc.Skipped)
+	}
+	if doc.SkipReasons["adapt_failed"] != 1 || doc.SkipReasons["unreadable"] != 1 {
+		t.Fatalf("SkipReasons = %+v", doc.SkipReasons)
+	}
+	if len(doc.SkipErrors) != 2 {
+		t.Fatalf("SkipErrors = %+v, want one entry per skipped file", doc.SkipErrors)
+	}
+	for _, p := range []string{badJSONL, missing} {
+		if _, ok := doc.SkipErrors[p]; !ok {
+			t.Fatalf("SkipErrors must key by the listed path; %q missing from %+v", p, doc.SkipErrors)
+		}
+	}
+	if doc.Records != 5 || doc.Done != 4 || doc.Total != 4 {
+		t.Fatalf("counters = %+v (Records=docs, Done/Total=files)", doc)
+	}
+}
+
+// Records is a DOCUMENT count for THIS run: the resumed FILE offset (the
+// cursor start) must not be added into it — a job resumed at file index 1
+// used to report records+1.
+func TestIngestAdaptedRecordsIsThisRunOnly(t *testing.T) {
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	good1 := filepath.Join(dir, "a.jsonl")
+	good2 := filepath.Join(dir, "b.jsonl")
+	if err := os.WriteFile(good1, []byte("{\"body\": \"连接池最大 128。\"}\n{\"body\": \"超时 30 秒。\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(good2, []byte("{\"body\": \"端口是 8480。\"}\n{\"body\": \"备份每天 02:00。\"}\n{\"body\": \"灰度窗口 10%。\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a resume that already covered file 0: the cursor parks at 1.
+	cursorKey := st.jobs + "jr" + jobCursorSuffix
+	if err := st.c.KVPut(ctx, cursorKey, []byte("1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	n, err := st.IngestAdapted(ctx, []string{good1, good2}, adapt.Fields{}, "jr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("records stored this run = %d, want 3", n)
+	}
+	doc, err := st.GetJobDoc(ctx, "jr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.Records != 3 {
+		t.Fatalf("Records = %d, want 3 (no file-offset inflation)", doc.Records)
+	}
+	if doc.Done != 2 {
+		t.Fatalf("Done = %d, want 2 (file 0 counts through the cursor)", doc.Done)
+	}
+}

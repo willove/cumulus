@@ -1,0 +1,4 @@
+:root {
+  --cul-sans: var(--eb-font-family);
+  --cul-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}

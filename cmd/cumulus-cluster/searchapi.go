@@ -28,6 +28,7 @@ import (
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
@@ -94,7 +95,12 @@ type searchStack struct {
 // newSearchStack wires the production stack (aigate when configured, offline
 // stubs otherwise) with the ranked admission and widening callbacks.
 func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions) (*searchStack, error) {
-	stack := newProdStack()
+	return newSearchStackWith(ctx, c, st, sourcesColl, opt, newProdStack())
+}
+
+// Explicit collaborator injection lets isolated evaluations force offline
+// execution without mutating process-wide environment or other requests.
+func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions, stack prodStack) (*searchStack, error) {
 	// Strict embedder gate: with -l1pre the corpus-vector seat must be the
 	// one the operator asked for — a silent hash fallback (CLUS_MINILM_REQUIRE=1)
 	// fails the request instead of quietly degrading the L1 path.
@@ -236,7 +242,7 @@ type searchIn struct {
 	Session string   `json:"session"` // KV 会话：折叠近几轮进改写，回答回写会话
 	Prior   bool     `json:"prior"`
 	L1Pre   bool     `json:"l1pre"`
-	NS      string   `json:"ns"` // per-request namespace override (empty = serve's -ns)
+	NS      string   `json:"ns"` // explicitly selected, registered bucket
 }
 
 // narrowL1Pre narrows candidates via body_embed KNN (D7: a missing index
@@ -373,19 +379,9 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "query required"})
 				return
 			}
-			if err := ns.Validate(in.NS); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			// A retrieval must NAME a bucket. Falling back to the serve-level
-			// namespace is exactly the contamination the bucket mechanism
-			// exists to prevent: the query would read whatever happened to be
-			// ingested into the default library, across topics, silently.
-			if err := buckets.Require(r.Context(), in.NS); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{
-					"error": err.Error(),
-					"hint":  `POST {"ns":"<bucket>"} — see GET /v1/buckets`,
-				})
+			// No implicit fallback: ingest and retrieval must select the same
+			// explicitly registered bucket.
+			if !requireHTTPBucket(w, r, buckets, in.NS) {
 				return
 			}
 			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
@@ -414,6 +410,9 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			}
 			ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
 			if err != nil {
+				// Stack failures (e.g. required weights missing) are failed
+				// queries too. No embedder actually served this request.
+				trackQuery(tracker, in.NS, deep.Result{}, "", err.Error())
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
@@ -427,6 +426,11 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			if !stream {
 				res, err := runSearch(r.Context(), ss, in.Query)
 				if err != nil {
+					// The failure is itself a data point: the tracker's contract
+					// ("a failed query must be visible as an error, not silently
+					// absent") was broken exactly here — every 500 left no trace
+					// and the monitor's error count could never leave zero.
+					trackQuery(tracker, in.NS, deep.Result{}, embedderLabel(ss), err.Error())
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 					return
 				}
@@ -438,12 +442,17 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
 				bumpBucket(r.Context(), buckets, in.NS, ss)
-				trackQuery(tracker, in.NS, res, "", "")
+				trackQuery(tracker, in.NS, res, embedderLabel(ss), "")
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
 			bumpBucket(r.Context(), buckets, in.NS, ss)
-			trackQuery(tracker, in.NS, sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1"), embedderLabel(), "")
+			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1")
+			errMsg := ""
+			if serr != nil {
+				errMsg = serr.Error()
+			}
+			trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg)
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
@@ -479,14 +488,18 @@ func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMs
 		Loops: res.Loops, Widened: res.Widened, LLMCalls: a.LLMCalls,
 		Tokens: res.Tokens, LatencyMS: res.LatencyMS, LatencyUS: res.LatencyUS, Embedder: embedder,
 		SelfCorr: res.SelfCorrected, Refused: a.Refused, Error: errMsg,
+		StopReason: res.StopReason,
 	})
 }
 
 // sseSearch streams one search as SSE events mapped onto the evoke-chat
 // engine: status → loading/progress, content → appendContent, citations →
 // ChatSources, done → completeMessage. A 5s heartbeat keeps proxies and
-// browsers from timing out during long DEEP searches.
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) deep.Result {
+// browsers from timing out during long DEEP searches. The error return lets
+// the caller record the failed attempt in the monitor — returning a zero
+// Result alone made every stream failure look like a successful zero-value
+// query and poisoned the averages.
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) (deep.Result, error) {
 	if verbose {
 		vlog := func(f string, a ...any) {
 			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
@@ -497,7 +510,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "streaming unsupported"})
-		return deep.Result{}
+		return deep.Result{}, fmt.Errorf("streaming unsupported")
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -544,7 +557,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	res, err := runSearch(r.Context(), ss, query)
 	if err != nil {
 		emit("error", map[string]any{"error": err.Error()})
-		return deep.Result{}
+		return deep.Result{}, err
 	}
 	ans := res.Answer
 	if ans.Skipped {
@@ -559,6 +572,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		"coverage": ans.Coverage, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS, "widened": res.Widened,
+		"stop_reason": res.StopReason,
 	}
 	if sess != nil {
 		if _, aerr := sess.appendTurn(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
@@ -566,11 +580,32 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		}
 	}
 	emit("done", done)
-	return res
+	return res, nil
 }
 
-// embedderLabel names the embedder that actually served the last query, so the
-// monitor does not have to guess. It is advisory: an empty label means "unknown".
-func embedderLabel() string {
-	return ""
+// embedderLabel names the embedder wired into the stack that served the query,
+// matching the names the boot log prints. It used to return "" unconditionally,
+// so the monitor's embedder headline and every per-query cell stayed blank no
+// matter what actually served. Advisory: "" means "nothing wired".
+func embedderLabel(ss *searchStack) string {
+	if ss == nil || ss.kbE == nil {
+		return ""
+	}
+	return embedderName(ss.kbE.Embedder)
+}
+
+func embedderName(emb cluster.Embedder) string {
+	if emb == nil {
+		return ""
+	}
+	switch emb := emb.(type) {
+	case *minilm.Embedder:
+		return "minilm-l12-384"
+	case cluster.Local:
+		return fmt.Sprintf("local-hash-%d", emb.N)
+	case *llm.AigateEmbedder:
+		return fmt.Sprintf("aigate-%d", emb.Dims())
+	default:
+		return fmt.Sprintf("embed-%d", emb.Dims())
+	}
 }

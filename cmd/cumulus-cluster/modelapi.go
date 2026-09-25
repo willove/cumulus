@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -136,14 +135,25 @@ func registerModelFace(mux *http.ServeMux) {
 			return
 		}
 		key := os.Getenv("AIGATE_API_KEY")
+		// Resolve through the production wiring, without calling a model or
+		// installing weights. Configured values alone hide offline overrides,
+		// MiniLM fallback and AIGATE_REASONING_SPLIT=0/1.
+		ps := newProdStack()
+		effectiveEmbedder, embedErr := embedderName(ps.emb), ""
+		if ps.embErr != nil {
+			effectiveEmbedder, embedErr = "", ps.embErr.Error()
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_url":        os.Getenv("AIGATE_BASE_URL"),
-			"chat_model":      os.Getenv("AIGATE_CHAT_MODEL"),
-			"embed_model":     os.Getenv("AIGATE_EMBED_MODEL"),
-			"api_key_set":     key != "",
-			"api_key_len":     len(key),
-			"reasoning_split": strings.Contains(strings.ToLower(os.Getenv("AIGATE_BASE_URL")), "minimaxi.com"),
-			"minilm_required": minilm.Required(),
+			"base_url":           os.Getenv("AIGATE_BASE_URL"),
+			"chat_model":         os.Getenv("AIGATE_CHAT_MODEL"),
+			"embed_model":        os.Getenv("AIGATE_EMBED_MODEL"),
+			"api_key_set":        key != "",
+			"api_key_len":        len(key),
+			"reasoning_split":    ps.chat != nil && ps.chat.ReasoningSplit,
+			"minilm_required":    minilm.Required(),
+			"offline":            ps.chat == nil,
+			"effective_embedder": effectiveEmbedder,
+			"embedder_error":     embedErr,
 		})
 	})
 }

@@ -10,9 +10,28 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/willove/cumulus/internal/bucket"
+	"github.com/willove/cumulus/internal/ns"
 )
+
+// requireHTTPBucket gates HTTP writes and searches, not legacy CLI ingest or
+// read-only listings. Never substitute the serve namespace for an omitted ns.
+func requireHTTPBucket(w http.ResponseWriter, r *http.Request, buckets *bucket.Store, name string) bool {
+	err := ns.Validate(name)
+	if err == nil {
+		err = buckets.Require(r.Context(), name)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": err.Error(),
+			"hint":  `Select a bucket from GET /v1/buckets (create one with POST /v1/buckets), then send {"ns":"<bucket>"}`,
+		})
+		return false
+	}
+	return true
+}
 
 func registerBucketFace(mux *http.ServeMux, buckets *bucket.Store, serveNS string) {
 	mux.HandleFunc("/v1/buckets", func(w http.ResponseWriter, r *http.Request) {
@@ -49,9 +68,17 @@ func registerBucketFace(mux *http.ServeMux, buckets *bucket.Store, serveNS strin
 		}
 	})
 	mux.HandleFunc("/v1/buckets/", func(w http.ResponseWriter, r *http.Request) {
-		name := trimSlash(r.URL.Path)
+		// The name is the path MINUS the mount point. It used to be the whole
+		// path ("/v1/buckets/law"), so ns validation saw the slashes, failed,
+		// and both GET and DELETE returned 500 unconditionally — no test or UI
+		// walked this route, which is how it shipped broken.
+		name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/buckets"), "/")
 		if name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bucket name required"})
+			return
+		}
+		if strings.Contains(name, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid bucket name: " + name})
 			return
 		}
 		switch r.Method {

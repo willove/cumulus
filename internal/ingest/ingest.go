@@ -917,6 +917,10 @@ type JobDoc struct {
 	// skipped 账可查).
 	Skipped     int            `json:"skipped,omitempty"`
 	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
+	// SkipErrors is the per-file reason a file was skipped. A count alone says
+	// "one file failed" without saying why, which is exactly when the operator
+	// needs it.
+	SkipErrors map[string]string `json:"skip_errors,omitempty"`
 	// Records is the DOCUMENT count carried by the files counted in Done.
 	// Done/Total stay in FILES so a progress bar never lies about units.
 	Records int    `json:"records,omitempty"`
@@ -938,8 +942,11 @@ func (s *Store) PutJobDoc(ctx context.Context, job string, d JobDoc) error {
 // GetJobDoc reads the job state; a missing job reports state "".
 func (s *Store) GetJobDoc(ctx context.Context, job string) (JobDoc, error) {
 	raw, err := s.c.KVGet(ctx, s.jobs+job)
-	if err != nil || len(raw) == 0 {
-		return JobDoc{Job: job}, nil
+	if err != nil {
+		if contract.IsNotFound(err) {
+			return JobDoc{Job: job}, nil
+		}
+		return JobDoc{}, err
 	}
 	var d JobDoc
 	if err := json.Unmarshal(raw, &d); err != nil {
@@ -951,21 +958,20 @@ func (s *Store) GetJobDoc(ctx context.Context, job string) (JobDoc, error) {
 	return d, nil
 }
 
-// IngestFiles walks a directory and upserts .md/.txt/.html files as sources
-// (Path A minus extraction workers). Resumable under the job key — same cursor
-// semantics as IngestJSONL — with a live job doc per file.
-// walkIngestable collects the pipeline's extractable files under dir (same
-// extension set the scan face reports), sorted for a stable cursor.
-func walkIngestable(dir string, recursive bool) ([]string, error) {
+// WalkIngestable supplies one stable file snapshot for queue totals and processing.
+func WalkIngestable(dir string, recursive bool) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if p != dir && !recursive {
+			if p != dir && (!recursive || strings.HasPrefix(d.Name(), ".")) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
 			return nil
 		}
 		name := d.Name()
@@ -989,11 +995,21 @@ func walkIngestable(dir string, recursive bool) ([]string, error) {
 }
 
 func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, jobKey string) (int, error) {
-	files, err := walkIngestable(dir, recursive)
+	files, err := WalkIngestable(dir, recursive)
 	if err != nil {
 		return 0, err
 	}
-	return s.ingestFileList(ctx, dir, files, jobKey)
+	return s.IngestFileList(ctx, dir, files, jobKey)
+}
+
+// IngestFileList retains the discovery root when deriving document identities.
+func (s *Store) IngestFileList(ctx context.Context, root string, paths []string, jobKey string) (int, error) {
+	return s.ingestFileList(ctx, root, paths, jobKey, false)
+}
+
+// IngestUploaded keeps source identities and URIs independent of temporary staging paths.
+func (s *Store) IngestUploaded(ctx context.Context, root string, paths []string, jobKey string) (int, error) {
+	return s.ingestFileList(ctx, root, paths, jobKey, true)
 }
 
 // IngestCandidates ingests an explicit file list (a trimmed scan report or a
@@ -1022,8 +1038,27 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 		}
 	}
 	skip := map[string]int{}
+	skipErr := map[string]string{}
 	doneFiles := 0 // files fully processed (the unit Total counts)
 	records := 0   // documents stored (reported separately)
+	// skipTotal is the Skipped headline: the SUM over reasons. It used to read
+	// skip["file"] — a key nobody writes on this path (reasons here are
+	// "unreadable"/"adapt_failed"), so the job reported Skipped=0 forever while
+	// SkipReasons held the real counts.
+	skipTotal := func() int {
+		t := 0
+		for _, v := range skip {
+			t += v
+		}
+		return t
+	}
+	// Declare this namespace's collections first. The engine fail-closes
+	// writes to undeclared collections, so a freshly created bucket pointed at
+	// a corpus would otherwise fail with a raw "collection not found" — the
+	// operator would have to know to run `ensure` by hand.
+	if _, eerr := s.Ensure(ctx); eerr != nil {
+		return 0, eerr
+	}
 	// One revision index for the whole job. The alternative — rebuilding it per
 	// batch — still rescanned the collection every 512 records and kept a
 	// quadratic term (107k records did not finish inside 10 minutes).
@@ -1037,9 +1072,12 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			// Done is FILES, matching Total — it used to be record counts
 			// against a file total, so a 16k-record run reported
 			// done=16384 total=3 and never looked finished.
-			Done: start + doneFiles, Skipped: skip["file"],
-			SkipReasons: skip,
-			Records:     start + records,
+			Done: start + doneFiles, Skipped: skipTotal(),
+			SkipReasons: skip, SkipErrors: skipErr,
+			// Records counts DOCUMENTS this run stored — start is a FILE index
+			// from the resume cursor; adding it here mixed units and inflated
+			// the count by the resumed offset on every continued job.
+			Records: records,
 		})
 	}
 	progress("extracting")
@@ -1050,6 +1088,10 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			// Unreadable file: skip it and keep going (same rule as the plain
 			// file walk — one bad file must not strand a corpus).
 			skip["unreadable"]++
+			// Keyed by the path AS LISTED: base names collide across
+			// directories (a/doc.md vs b/doc.md), and the loser's reason —
+			// the thing the operator is here to read — silently disappears.
+			skipErr[path] = err.Error()
 			doneFiles++
 			if cerr := s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0); cerr != nil {
 				return records, cerr
@@ -1061,8 +1103,11 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 		fh.Close()
 		if aerr != nil {
 			// An unrecognized container or a malformed record is a skipped
-			// file with an auditable reason, not a failed job.
+			// file with an auditable reason — INCLUDING the reason itself. A
+			// bare count says "one file failed" without saying why, which is
+			// exactly when the operator needs it.
 			skip["adapt_failed"]++
+			skipErr[path] = aerr.Error()
 		} else {
 			records += n
 		}
@@ -1074,8 +1119,8 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	}
 	if err := s.PutJobDoc(ctx, jobKey, JobDoc{
 		State: "done", Phase: "upserting", Total: len(files),
-		Done: start + doneFiles, Skipped: skip["file"], SkipReasons: skip,
-		Records: start + records,
+		Done: start + doneFiles, Skipped: skipTotal(), SkipReasons: skip,
+		SkipErrors: skipErr, Records: records,
 	}); err != nil {
 		return records, err
 	}
@@ -1160,7 +1205,7 @@ func (s *Store) IngestCandidates(ctx context.Context, paths []string, jobKey str
 	// the longest shared directory instead (which also makes scan→ingest
 	// produce the same identities as ingesting that directory directly), and
 	// fall back to the full path when the list shares no root.
-	return s.ingestFileList(ctx, commonRoot(sorted), sorted, jobKey)
+	return s.IngestFileList(ctx, commonRoot(sorted), sorted, jobKey)
 }
 
 // commonRoot is the longest directory shared by every path, or "" when they
@@ -1223,7 +1268,10 @@ func relKey(dir, p string) string {
 // unextractable file must not strand the rest of the directory, and a resumed
 // run must not re-fail on it forever (P9: skipped 账可查). Only a store-level
 // failure (the engine refusing the upsert) fails the job.
-func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string) (int, error) {
+func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string, uploaded bool) (ingested int, runErr error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if jobKey == "" {
 		jobKey = "files"
 	}
@@ -1235,39 +1283,55 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		}
 	}
 	skip := map[string]int{}
-	ingested, skipped := 0, 0
-	bump := func(reason string) {
+	skipErr := map[string]string{}
+	skipped := 0
+	phase := "extracting"
+	fileLabel := func(p string) string {
+		if uploaded {
+			return relKey(dir, p)
+		}
+		return p
+	}
+	bump := func(p, reason, detail string) {
 		skip[reason]++
+		skipErr[fileLabel(p)] = detail
 		skipped++
 	}
-	// Done counts files PROCESSED (stored + skipped) so progress reaches
-	// Total; Skipped is the subset deliberately not stored.
-	progress := func(phase string) {
-		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "running", Phase: phase, Total: len(files),
+	// A resumed file offset must not inflate this run's document count.
+	snapshot := func(state string) JobDoc {
+		return JobDoc{
+			State: state, Phase: phase, Total: len(files),
 			Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
-		})
+			SkipErrors: skipErr, Records: ingested,
+		}
 	}
-	fail := func(phase string, err error) error {
-		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
-			State: "failed", Phase: phase, Total: len(files),
-			Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
-			Error: err.Error(),
-		})
-		return err
+	// Persist the actual counters even when the ingestion context has expired.
+	defer func() {
+		if runErr != nil {
+			fw, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			doc := snapshot("failed")
+			doc.Error = runErr.Error()
+			_ = s.PutJobDoc(fw, jobKey, doc)
+		}
+	}()
+	progress := func(next string) {
+		phase = next
+		_ = s.PutJobDoc(ctx, jobKey, snapshot("running"))
 	}
-	// advance persists the cursor past file i so a resumed run never re-visits
-	// it — including files that were skipped.
 	advance := func(i int) error {
 		return s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0)
 	}
 	progress("extracting")
 	for i := start; i < len(files); i++ {
+		if err := ctx.Err(); err != nil {
+			return ingested, err
+		}
 		p := files[i]
+		progress("extracting")
 		raw, err := os.ReadFile(p)
 		if err != nil {
-			// Unreadable (permissions, vanished mid-run): record and move on.
-			bump("unreadable")
+			bump(p, "unreadable", err.Error())
 			if cerr := advance(i); cerr != nil {
 				return ingested, cerr
 			}
@@ -1287,8 +1351,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			typ = "docx"
 			docxText, derr := ExtractDOCX(raw)
 			if derr != nil {
-				// Unsupported/corrupt container: skip it, never poison the job.
-				bump("extract_failed")
+				bump(p, "extract_failed", derr.Error())
 				if cerr := advance(i); cerr != nil {
 					return ingested, cerr
 				}
@@ -1300,10 +1363,9 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			typ = "pdf"
 			text = ExtractPDF(raw)
 		}
-		if strings.TrimSpace(text) == "" {
-			// Encrypted/CID-font PDFs and markup with no text yield nothing.
-			// There is no L0 contract to store, so the file is skipped.
-			bump("empty")
+		text = source.Normalize(text)
+		if text == "" {
+			bump(p, "empty", "no text after extraction and normalization")
 			if cerr := advance(i); cerr != nil {
 				return ingested, cerr
 			}
@@ -1311,24 +1373,24 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			continue
 		}
 		rel := relKey(dir, p)
+		uri := "file://" + p
+		if uploaded {
+			uri = "upload://" + rel
+		}
 		progress("normalizing")
-		src := source.New(filepath.Base(p), typ, "file://"+p, filepath.ToSlash(rel), "zh", text, nil)
+		src := source.New(filepath.Base(p), typ, uri, rel, "zh", text, nil)
 		progress("upserting")
-		// The async job path stores whatever it extracted: the 256 KiB cap
-		// exists to keep a SYNCHRONOUS request from blocking, and SSOT §3.4.2
-		// sends over-cap bodies here precisely so they can be stored.
+		// Async extraction is not subject to the synchronous Put body cap.
 		if _, err := s.put(ctx, src, 0); err != nil {
-			return ingested, fail("upserting", fmt.Errorf("file %s: %w", p, err))
+			return ingested, fmt.Errorf("file %s: %w", fileLabel(p), err)
 		}
 		ingested++
 		if err := advance(i); err != nil {
 			return ingested, err
 		}
 	}
-	if err := s.PutJobDoc(ctx, jobKey, JobDoc{
-		State: "done", Phase: "upserting", Total: len(files),
-		Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
-	}); err != nil {
+	phase = "upserting"
+	if err := s.PutJobDoc(ctx, jobKey, snapshot("done")); err != nil {
 		return ingested, err
 	}
 	return ingested, nil

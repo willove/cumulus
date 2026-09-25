@@ -8,14 +8,14 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌全部落地**（门 A–BB，门限 118、现 153 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（门 A–BB，门限 118、现 169 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
-make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 153 断言）
+make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 169 断言）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb，离线门，隔离见 scripts/offline-gate.sh）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
 
@@ -52,13 +52,40 @@ $CLUS cites  list                     # 簇→源证据边（clus_cites）
 $CLUS session new | list | show <id> | rm <id>   # 会话（P2 KV）
 $CLUS eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS 式评测（R-E1，可续跑）
 $CLUS serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE)
-                                  #   + 会话 REST + 内嵌工作台 /ui/（会话/知识簇/目录摄取三面板）
+                                  #   + 会话 REST + 内嵌工作台 /ui/（会话/知识簇/目录摄取/评测四面板）
                                   #   + POST /mcp（MCP：search/list_clusters/get_cluster）
+                                  #   + /v1/eval/*（评测工作台：题集/运行/逐题证据/对比/导出，见下节）
                                   #   serve 启动即声明集合，新库无需先 ensure；持库期间 CLI 勿指同一目录
 $CLUS mcp                             # MCP stdio 代理 → serve 的 /mcp（CLUS_MCP_URL 或 -url 指向端点；
                                   #   代理不开库——Badger 目录排他锁，第二个进程不能再开同一目录）
 $CLUS eval-demo                       # 证据质量评测协议演示（B3，离线确定性）
 ```
+
+## 评测工作台（eval-v2）
+
+工作台「评测」面板可以**直接发起**评测，不再只能读 CLI 落下的记分牌。协议与 CLI 的 `eval-run` 并存：`eval-v2` 是 GUI 面，`ItemScore`/`RunDoc` 保留 CLI 的历史语义（判官结论不覆盖规则分）。
+
+```bash
+# 全部端点都要求显式 ns（注册过的库），否则 400——请求体里的 ns 是作用域不是授权
+GET  /v1/eval/capabilities?ns=LIB                  # 协议/模型/上限/默认配置/live_available/queue_limit
+POST /v1/eval/datasets/validate?ns=LIB             # 只校验不落盘（逐行诊断：重复题号/金标不解析…）
+POST /v1/eval/datasets?ns=LIB                      # 保存**不可变版本**（同内容两次保存 = 两个 id、同一 sha）
+GET  /v1/eval/datasets?ns=LIB | /datasets/{id}
+POST /v1/eval/runs?ns=LIB                          # 202 受理；request_id 重放返回同一实验
+GET  /v1/eval/runs?ns=LIB | /runs/{id} | /runs/{id}/items
+POST /v1/eval/runs/{id}/cancel | /runs/{id}/retry
+GET  /v1/eval/runs/{id}/export?format=json|jsonl|csv
+GET  /v1/eval/compare?ns=LIB&left=A&right=B        # 不可比时只给理由，不给差值
+```
+
+口径与硬约束（每条都有门断言）：
+
+- **冻结三指纹**：题集 `items_sha`、语料 `corpus_sha`、配置 `config_sha`（含生效模型与掩码后的端点主机名，不含密钥与路径）。运行期间改业务语料不影响已冻结实验；对比时三指纹不一致即判**不可比**，只列原因不列差值。
+- **后台隔离执行**：每次运行一个**内存引擎**，把冻结语料原样灌入后跑真实检索/合成路径；业务集合、`clus:lastcluster` 游标一律不写。单 worker 串行，队列上限见 `capabilities.queue_limit`（溢出 409），并发上限 1。
+- **持久化与中断语义**：运行状态与逐题结果**同一个 KV 值原子落盘**——进度不可能领先于未持久化的结果。进程被 SIGKILL 后，已完成的实验原样还在；当时在飞的运行只报 `interrupted`（**绝不冷启动重放**，那是没被同意的二次计费）；重试要求热态仍在，否则提示「start a new run」。
+- **计费诚实**：`mode=live` 才会调模型；判官与闭卷基线各自计费，工作台在提交前要求勾选**费用确认**（未勾选按钮保持禁用）。Token 记账取自上游 `usage.total_tokens`；上游不报 usage 即判为成本未知并停止后续模型调用（传输层每次请求前复核预算闸门，在飞请求可能小幅超额）。
+- **分数口径**：规则匹配（非 EM）· 证据命中（金标解析为**快照内的精确 id**，陈旧修订与同名 business key 都不给分）· 引用可解析（全部引用回溯成功才算）· 判官正确率（分母 `judge_n`，未判分显示 **N/A 而不是 0**）· 闭卷基线对照。延迟与 token 含重试历史。
+- **验证**：门 BB 段覆盖校验/不可变版本/幂等/导出/对比/取消/有界队列/SIGKILL 重启后的持久化与 interrupted 语义；`make e2e` 之外，真实接口与浏览器联调（真实 Badger 目录 + 生产 `serve` 内嵌 `/ui/` + 一次真实模型运行）脚本在 `var/`（本地产物，不入库）。
 
 ## 存储：cumulite 嵌入式库
 

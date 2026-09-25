@@ -216,7 +216,7 @@ func TestWidenExcludeOnlyTried(t *testing.T) {
 		return []source.Source{last}, nil
 	}
 
-	_, _, _, widened, _, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	_, _, _, widened, _, _, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestSelfCorrectAfterFullAdmissionBudget(t *testing.T) {
 	e.RankAdmission = func(_ context.Context, _ string, sources []source.Source, _ map[string]bool) ([]source.Source, error) {
 		return sources, nil
 	}
-	_, _, _, _, selfCorrected, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	_, _, _, _, selfCorrected, _, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

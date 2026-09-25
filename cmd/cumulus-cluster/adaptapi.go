@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,7 +24,6 @@ import (
 	"github.com/willove/cumulus/internal/adapt"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
-	"github.com/willove/cumulus/internal/ns"
 )
 
 // adaptProbeIn is the POST /v1/adapt/probe body.
@@ -90,16 +90,7 @@ func registerAdaptFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, so
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		if err := ns.Validate(in.NS); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-			return
-		}
-		// The write side enforces the same rule as the search side: a bucket
-		// must be NAMED and REGISTERED. An unregistered namespace on the write
-		// path would create a corpus nothing can ever select (the search face
-		// refuses unregistered names), i.e. silently unusable data.
-		if err := buckets.Require(r.Context(), in.NS); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		if !requireHTTPBucket(w, r, buckets, in.NS) {
 			return
 		}
 		files := append([]string(nil), in.Paths...)
@@ -145,12 +136,29 @@ func registerAdaptFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, so
 		go func() {
 			bg, cancel := contextWithTimeout(10 * time.Minute)
 			defer cancel()
-			if _, ierr := stForReq.IngestAdapted(bg, files, fields, job); ierr != nil {
-				_ = stForReq.PutJobDoc(bg, job, ingest.JobDoc{State: "failed", Error: ierr.Error()})
-			}
+			runAdaptJob(bg, stForReq, files, fields, job)
 		}()
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"job": job, "state": "queued", "total": len(files), "ns": in.NS,
 		})
 	})
+}
+
+func runAdaptJob(ctx context.Context, st *ingest.Store, files []string, fields adapt.Fields, job string) {
+	if _, err := st.IngestAdapted(ctx, files, fields, job); err != nil {
+		// A timeout must not prevent its own terminal write. Read the last
+		// checkpoint on the fresh context too, preserving file/record counts,
+		// phase and skip diagnostics instead of replacing them with zeroes.
+		fw, cancel := contextWithTimeout(30 * time.Second)
+		defer cancel()
+		d, readErr := st.GetJobDoc(fw, job)
+		if readErr != nil {
+			log.Printf("adapt job %s: read progress: %v", job, readErr)
+			d = ingest.JobDoc{Total: len(files)}
+		}
+		d.State, d.Error = "failed", err.Error()
+		if writeErr := st.PutJobDoc(fw, job, d); writeErr != nil {
+			log.Printf("adapt job %s: write terminal state: %v (ingest: %v)", job, writeErr, err)
+		}
+	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/monitor"
 )
 
 // The session KV keys are scoped through ns.KV — a tenant's session list
@@ -91,6 +93,86 @@ func TestSessionFaceConcurrentNamespaces(t *testing.T) {
 	_, puts, _, _ := p.calls()
 	if len(puts) != 1 || puts[0] != "ns:alpha:clus:session:shared" {
 		t.Fatalf("alpha POST wrote %v, want the alpha namespace key", puts)
+	}
+}
+
+func TestMonitorKnowledgeIsRequestLocal(t *testing.T) {
+	tr := monitor.New()
+	global := &monitor.Knowledge{Clusters: 99}
+	tr.WithKnowledge(global)
+	alphaRead := make(chan struct{})
+	releaseAlpha := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(releaseAlpha) }) }
+	defer unblock()
+	mux := http.NewServeMux()
+	registerMonitorFace(mux, tr, t.TempDir(), "beta", func(ctx context.Context, name string) *monitor.Knowledge {
+		switch name {
+		case "alpha":
+			close(alphaRead)
+			select {
+			case <-releaseAlpha:
+			case <-ctx.Done():
+			}
+			return &monitor.Knowledge{Clusters: 1}
+		case "beta":
+			return &monitor.Knowledge{Clusters: 2}
+		default:
+			return nil
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	alphaDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/monitor/overview?ns=alpha", nil).WithContext(ctx))
+		alphaDone <- w
+	}()
+	select {
+	case <-alphaRead:
+	case <-ctx.Done():
+		t.Fatal("alpha did not reach knowledge read")
+	}
+	w, beta := serveJSON(t, mux, http.MethodGet, "/v1/monitor/knowledge?ns=beta", nil)
+	if w.Code != http.StatusOK || beta["clusters"] != float64(2) {
+		t.Fatalf("beta knowledge: %d %v", w.Code, beta)
+	}
+	// This invariant also deterministically catches the old mutate-then-read
+	// implementation, even when the two snapshot calls happen not to overlap.
+	if tr.KnowledgeStats() != global {
+		t.Fatal("HTTP knowledge read mutated the shared tracker")
+	}
+	unblock()
+	select {
+	case w := <-alphaDone:
+		var s monitor.Snapshot
+		if err := json.Unmarshal(w.Body.Bytes(), &s); err != nil || w.Code != http.StatusOK || s.Knowledge == nil || s.Knowledge.Clusters != 1 {
+			t.Fatalf("alpha knowledge crossed namespaces: %s (%v)", w.Body.String(), err)
+		}
+	case <-ctx.Done():
+		t.Fatal("alpha did not complete")
+	}
+	for _, tc := range []struct {
+		path string
+		want int
+	}{
+		{"/v1/monitor/knowledge", 2},
+		{"/v1/monitor/knowledge?ns=missing", 0},
+	} {
+		w, out := serveJSON(t, mux, http.MethodGet, tc.path, nil)
+		if w.Code != http.StatusOK || (tc.want == 0 && out != nil) || (tc.want != 0 && out["clusters"] != float64(tc.want)) {
+			t.Fatalf("knowledge fallback: %d %v", w.Code, out)
+		}
+	}
+	for _, block := range []string{"overview", "knowledge", "system", "llm", "retrieval", "namespaces"} {
+		w, _ := serveJSON(t, mux, http.MethodGet, "/v1/monitor/"+block+"?ns=bad:ns", nil)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid namespace accepted for %s", block)
+		}
+	}
+	if tr.KnowledgeStats() != global {
+		t.Fatal("request knowledge persisted globally")
 	}
 }
 

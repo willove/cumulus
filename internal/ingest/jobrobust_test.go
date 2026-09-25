@@ -2,10 +2,14 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/source"
 )
 
@@ -59,6 +63,9 @@ func TestIngestFileListSkipsBadFilesAndAdvances(t *testing.T) {
 	if doc.SkipReasons["extract_failed"] != 1 || doc.SkipReasons["empty"] != 1 {
 		t.Fatalf("skip reasons not auditable: %v", doc.SkipReasons)
 	}
+	if doc.Records != 2 || len(doc.SkipErrors) != 2 || doc.SkipErrors[badDocx] == "" || doc.SkipErrors[badPDF] == "" {
+		t.Fatalf("records/per-file errors missing: %+v", doc)
+	}
 	// The cursor is past the skipped files: a resume is a no-op, not a re-fail.
 	n2, err := st.IngestFiles(context.Background(), dir, false, "j1")
 	if err != nil {
@@ -66,6 +73,65 @@ func TestIngestFileListSkipsBadFilesAndAdvances(t *testing.T) {
 	}
 	if n2 != 0 {
 		t.Fatalf("resume ingested=%d, want 0", n2)
+	}
+	doc, err = st.GetJobDoc(context.Background(), "j1")
+	if err != nil || doc.Records != 0 || doc.Done != 4 {
+		t.Fatalf("resume records count only this run: %+v %v", doc, err)
+	}
+}
+
+func TestPlainSkipErrorsKeepDistinctPaths(t *testing.T) {
+	st, _ := newTestStore(t)
+	root := t.TempDir()
+	paths := []string{filepath.Join(root, "a", "missing.txt"), filepath.Join(root, "b", "missing.txt")}
+	if _, err := st.IngestCandidates(context.Background(), paths, "missing"); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := st.GetJobDoc(context.Background(), "missing")
+	if err != nil || doc.Done != 2 || doc.Skipped != 2 || doc.SkipReasons["unreadable"] != 2 || len(doc.SkipErrors) != 2 {
+		t.Fatalf("skip accounting: %+v %v", doc, err)
+	}
+	for _, p := range paths {
+		if doc.SkipErrors[p] == "" {
+			t.Fatalf("missing full path error for %s: %+v", p, doc)
+		}
+	}
+}
+
+type cursorFailurePort struct {
+	cumulite.Port
+	cancel context.CancelFunc
+}
+
+func (p cursorFailurePort) KVPut(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	if strings.HasSuffix(key, jobCursorSuffix) && string(value) == "2" {
+		p.cancel()
+		return context.Canceled
+	}
+	return p.Port.KVPut(ctx, key, value, ttl)
+}
+
+func TestPlainTerminalFailureRetainsCurrentCounters(t *testing.T) {
+	st, engine := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	st.c = cursorFailurePort{Port: engine, cancel: cancel}
+	dir := t.TempDir()
+	for name, body := range map[string]string{"a.txt": "stored document", "b.txt": "\x00\r\n\t", "c.txt": "not reached"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := st.IngestFiles(ctx, dir, false, "failure")
+	if n != 1 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ingest: %d %v", n, err)
+	}
+	doc, err := st.GetJobDoc(context.Background(), "failure")
+	if err != nil || doc.State != "failed" || doc.Total != 3 || doc.Done != 2 || doc.Records != 1 || doc.Skipped != 1 || doc.Error != context.Canceled.Error() {
+		t.Fatalf("terminal accounting: %+v %v", doc, err)
+	}
+	if doc.SkipReasons["empty"] != 1 || doc.SkipErrors[filepath.Join(dir, "b.txt")] == "" {
+		t.Fatalf("terminal skip details: %+v", doc)
 	}
 }
 

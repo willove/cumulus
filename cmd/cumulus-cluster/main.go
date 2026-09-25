@@ -8,9 +8,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/willove/cumulite"
@@ -563,7 +565,13 @@ func main() {
 		fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 		url := fs.String("url", defaultMCPURL(), "serve 的 MCP 端点（含 /mcp）")
 		_ = fs.Parse(rest)
-		if err := runMCPProxy(ctx, *url, os.Stdin, os.Stdout, os.Stderr); err != nil {
+		// Long-running like serve: the whole-process CLI budget must not cap
+		// the proxy — under it, every in-flight JSON-RPC was cancelled and the
+		// proxy fatal'd when the timeout fired (an MCP client would see its
+		// server die mid-session after 60s/300s). Signals are the lifecycle.
+		pctx, pcancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer pcancel()
+		if err := runMCPProxy(pctx, *url, os.Stdin, os.Stdout, os.Stderr); err != nil {
 			fatal(err)
 		}
 	case "bucket":
@@ -573,7 +581,15 @@ func main() {
 		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
 		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also CLUS_VERBOSE=1)")
 		_ = fs.Parse(rest)
-		runServe(ctx, c, st, *listen, sources, namespace, *verbose, data)
+		// serve is long-running: the whole-process CLI budget above (60s, or
+		// 300s with an endpoint) must not cap it — runServe's graceful-shutdown
+		// goroutine waits on this ctx's Done, so under the budget the server
+		// silently self-Shutdown and the process exited 0 mid-serving. Its
+		// lifecycle is signals instead: Ctrl-C/SIGTERM take the graceful path
+		// (same reasoning as eval-run's Background ctx further down).
+		sctx, scancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer scancel()
+		runServe(sctx, c, st, *listen, sources, namespace, *verbose, data)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {

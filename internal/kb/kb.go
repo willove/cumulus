@@ -303,13 +303,22 @@ func (e *Engine) crossTopicNear(ctx context.Context, key string, qe []float64, q
 // lands in the [MergeTheta, ReuseTheta) band re-appended the same windows, so a
 // hot cluster's evidence list grew without bound and G-idem ("evidence 不重复
 // 追加") was violated.
-func mergeEvidence(have, add []mcs.Sample) []mcs.Sample {
+//
+// It also returns, per entry of add, the 1-based position that entry occupies
+// in the MERGED list — a duplicate lands on the existing entry's position.
+// The appended summary numbered its own evidence from 1, so citation
+// renumbering needs exactly this mapping: computing it as "have length + k + 1"
+// instead dangled every marker whose window the dedup went on to drop, and the
+// dangling marker was saved with the cluster — every later reuse resolved a
+// citation to nothing and eval's Grounded silently sank.
+func mergeEvidence(have, add []mcs.Sample) ([]mcs.Sample, []int) {
+	landing := make([]int, len(add))
 	if len(add) == 0 {
-		return have
+		return have, landing
 	}
-	seen := make(map[string]bool, len(have))
-	for _, sm := range have {
-		seen[evidenceKey(sm)] = true
+	seen := make(map[string]int, len(have)+len(add)) // key → 1-based merged position
+	for i, sm := range have {
+		seen[evidenceKey(sm)] = i + 1
 	}
 	// Copy, never append in place: the input slice belongs to the cluster we
 	// are about to overwrite, and appending into its spare capacity would
@@ -317,15 +326,17 @@ func mergeEvidence(have, add []mcs.Sample) []mcs.Sample {
 	// CumuStore instances process-wide).
 	out := make([]mcs.Sample, len(have), len(have)+len(add))
 	copy(out, have)
-	for _, sm := range add {
+	for i, sm := range add {
 		k := evidenceKey(sm)
-		if seen[k] {
+		if pos, dup := seen[k]; dup {
+			landing[i] = pos
 			continue
 		}
-		seen[k] = true
 		out = append(out, sm)
+		seen[k] = len(out)
+		landing[i] = len(out)
 	}
-	return out
+	return out, landing
 }
 
 func evidenceKey(sm mcs.Sample) string {
@@ -419,17 +430,19 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 			target.Confidence = ans.Confidence
 			target.Evidence = ans.Samples
 		} else {
-			// The appended summary numbers its own evidence from 1, and that
-			// list now starts after the cluster's own: shift every marker, or
-			// the appended text cites the survivor's evidence.
+			// The appended summary numbered its own evidence from 1; the merged
+			// list lands every window at its REAL position — a window the
+			// cluster already carries renumbers onto the existing entry, not
+			// onto an index the dedup is about to drop.
+			merged, landing := mergeEvidence(target.Evidence, ans.Samples)
 			remap := make(map[int]int, len(ans.Samples))
 			for k := range ans.Samples {
-				remap[k+1] = len(target.Evidence) + k + 1
+				remap[k+1] = landing[k]
 			}
 			target.Content += "\n---\n" + cluster.RenumberCitations(ans.Summary, remap)
 			target.Confidence = (target.Confidence + ans.Confidence) / 2
 			// G-idem: a repeated ask must not append the same window twice.
-			target.Evidence = mergeEvidence(target.Evidence, ans.Samples)
+			target.Evidence = merged
 		}
 		target.SourceID = ans.SourceID
 		if wasStale {
