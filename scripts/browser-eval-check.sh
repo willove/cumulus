@@ -28,6 +28,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 第一段：运行生命周期 UI 契约（静态托管已构建的 dist + 拦 /v1/**，不起服务端、不建库）。
+# 取消/重试/中断/费用确认这些状态在真环境里难以按需复现，用 mock 才能确定性断言；
+# 真端到端那一遍在下面。
+node scripts/browser/eval-run-states.mjs
+STATES=$?
+[ "$STATES" -eq 2 ] && exit 2
+[ "$STATES" -eq 0 ] || { echo "browser gate: run-state contract failed" >&2; exit 1; }
+
 go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || { echo "browser gate: build failed" >&2; exit 1; }
 
 # 端口必须是自己占住的：若已有服务在这个端口应答，健康检查会成功，整个门就会
