@@ -169,6 +169,63 @@ func v2Dataset(t *testing.T, s *Service, n int) Dataset {
 	}
 	return d
 }
+
+// The per-namespace record budget is a hard boundary: past it new work is refused,
+// so the operator needs a pruning path (documented in the README: kv ls/del on
+// ns:<ns>:clus:eval-v2:run:). Three properties must hold — an idempotent replay of
+// an existing request still resolves (the duplicate check runs before the budget
+// check), the datasets budget is separate from the runs budget, and budgets are
+// per namespace rather than global.
+func TestV2RecordBudgetsRefuseNewWorkWithoutBreakingReplay(t *testing.T) {
+	ctx := context.Background()
+	s, _ := v2Service(t, func(context.Context, Record) (Executor, error) {
+		return &v2FakeExecutor{fn: func(context.Context, Item, int64) ItemResult { return ItemResult{State: "completed"} }}, nil
+	})
+	d := v2Dataset(t, s, 1)
+	cfg := DefaultConfig()
+	name, request := "cap", NewID()
+	requestBytes, _ := json.Marshal([]any{d.ID, name, cfg})
+	replay := Record{Run: Run{ID: NewID(), Name: name, DatasetID: d.ID, Protocol: Protocol, State: "completed", Config: cfg}, RequestID: request, RequestSHA: HashBytes(requestBytes), Owner: s.owner}
+	if err := s.put(ctx, key("a", "run", replay.Run.ID), replay); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxRecords-1; i++ {
+		seed := Record{Run: Run{ID: NewID(), Protocol: Protocol, State: "completed", Config: cfg}}
+		if err := s.put(ctx, key("a", "run", seed.Run.ID), seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Idempotency must not depend on free space: the replay still resolves.
+	got, err := s.Start(ctx, "a", d.ID, name, request, cfg, v2Corpus())
+	if err != nil || got.ID != replay.Run.ID {
+		t.Fatalf("replay at the budget edge: %+v %v", got, err)
+	}
+	if _, err := s.Start(ctx, "a", d.ID, "overflow", NewID(), cfg, v2Corpus()); err == nil || !strings.Contains(err.Error(), "run storage limit") {
+		t.Fatalf("run budget not enforced: %v", err)
+	}
+	// The datasets budget is its own counter, not a share of the runs budget.
+	if _, _, err := s.SaveDataset(ctx, "a", "second", v2Content(1), v2Corpus()); err != nil {
+		t.Fatalf("dataset budget must be independent of runs: %v", err)
+	}
+	for i := 0; i < MaxRecords-1; i++ {
+		seed := Dataset{ID: NewID(), Name: "seed", SHA: "sha", Count: 1, CreatedAt: time.Now().UTC()}
+		if err := s.put(ctx, key("a", "dataset", seed.ID), seed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := s.SaveDataset(ctx, "a", "over", v2Content(1), v2Corpus()); err == nil || !strings.Contains(err.Error(), "dataset storage limit") {
+		t.Fatalf("dataset budget not enforced: %v", err)
+	}
+	// Another library has its own budget: the saturated one must not bleed over.
+	other, _, err := s.SaveDataset(ctx, "b", "other", v2Content(1), v2Corpus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Start(ctx, "b", other.ID, "other", NewID(), cfg, v2Corpus()); err != nil {
+		t.Fatalf("budgets are not per namespace: %v", err)
+	}
+}
+
 func v2Start(t *testing.T, s *Service, d Dataset, cfg Config) Run {
 	t.Helper()
 	r, err := s.Start(context.Background(), "a", d.ID, "test", NewID(), cfg, v2Corpus())
