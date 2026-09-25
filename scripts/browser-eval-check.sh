@@ -16,8 +16,12 @@ command -v node >/dev/null 2>&1 || {
 	echo "SKIP browser gate: node is not on PATH (needed to drive the browser check)" >&2
 	exit 2
 }
+# 与 e2e.sh / scenarios/run.sh 一致：依赖 PATH 上的 go，不写死本机路径。
+command -v go >/dev/null 2>&1 || {
+	echo "SKIP browser gate: go is not on PATH (needed to build the server under test)" >&2
+	exit 2
+}
 
-export PATH="/Users/willove/sdk/go1.27.0/bin:$PATH"
 WORK="$(mktemp -d)"
 PORT=""
 SERVE_PID=""
