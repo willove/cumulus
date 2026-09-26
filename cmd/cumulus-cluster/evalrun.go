@@ -259,7 +259,18 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		return err
 	}
 	{
-		r := aggregateResults(all, judgeOn && stack.chat != nil, resumed)
+		// The judged flag must describe the ROWS, not this invocation: a
+		// resume-only pass (-limit 0) recomputes nothing, so a flag-derived
+		// "judged" mislabels history produced under different flags.
+		// realeval.sh's report stage once ran without -judge -prior over
+		// judge-flipped rows, and the scorecard read judged:false /
+		// prior:false on numbers the judge had contributed to.
+		judgedRows := rowsJudged(all)
+		if resumed > 0 && judgedRows != (judgeOn && stack.chat != nil) {
+			fmt.Fprintf(os.Stderr, "eval-run: WARNING %d resumed row(s) carry judge provenance that differs from this run's -judge=%v — the aggregate labels judged=%v FROM THE ROWS; pass the flags the rows were produced with (realeval.sh: report mirrors step)\n",
+				resumed, judgeOn, judgedRows)
+		}
+		r := aggregateResults(all, judgedRows, resumed)
 		r.ConfigText = evalConfig(stack, prior, l1pre, judgeOn, namespace)
 		// A6: bind the scorecard to items + corpus (active sources) + config
 		// so an ablation row cannot silently change the sample set.
@@ -636,6 +647,19 @@ func readResults(path string) ([]evalResult, error) {
 		out = append(out, r)
 	}
 	return out, sc.Err()
+}
+
+// rowsJudged reports whether the stored results carry judge verdicts — the
+// only evidence of whether the judge contributed to an aggregate's numbers.
+// A resume pass recomputes nothing, so the invocation's -judge flag cannot
+// answer that question; the rows can.
+func rowsJudged(lines []evalResult) bool {
+	for _, r := range lines {
+		if r.Judge != "" || r.CBJudge != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func aggregateResults(lines []evalResult, judged bool, resumed int) evalReport {

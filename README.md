@@ -8,14 +8,14 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量一律经 aigate。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（门 A–BB，门限 118、现 169 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（门 A–BB，门限 118、现 171 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
-make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 169 断言）
+make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 171 断言）
 make browser-check         # 浏览器联调门（可选：自起离线 serve，打生产内嵌 /ui/）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb，离线门，隔离见 scripts/offline-gate.sh）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）

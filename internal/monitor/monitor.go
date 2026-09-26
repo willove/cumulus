@@ -53,7 +53,7 @@ type Query struct {
 	// question (and every compression-worth-it debate) is unanswerable
 	// without it. Empty when the stage hooks were not wired (gates).
 	Stages map[string]int64 `json:"stages,omitempty"`
-	Error      string `json:"error,omitempty"`
+	Error  string           `json:"error,omitempty"`
 }
 
 // Tracker accumulates query records. It is safe for concurrent use: serve's

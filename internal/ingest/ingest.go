@@ -672,8 +672,8 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error
 	// Shape 1: the cluster's own answer source.
 	for skip := 0; ; skip += 1000 {
 		res, err := s.c.Query(ctx, s.clusters, contract.Query{
-			Filter:     map[string]any{"source_id": docID},
-			Limit:      1000, Skip: skip,
+			Filter: map[string]any{"source_id": docID},
+			Limit:  1000, Skip: skip,
 			Projection: []string{"_id"},
 		})
 		if err != nil {

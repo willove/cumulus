@@ -74,9 +74,17 @@ step)
 report)
 	build_ask
 	# All items already recorded → resume-only pass; the aggregate is printed.
+	# The flags MUST mirror step's: the aggregate is stamped with THIS
+	# invocation's config fingerprint, so aggregating judge+prior rows under
+	# a no-judge/no-prior invocation mislabels the scorecard — the report
+	# once read judged:false / prior:false on judge-flipped numbers.
 	OUT="$STATE/results.jsonl"
-	if [ "${L1PRE:-0}" = "1" ]; then OUT="$STATE/results_l1.jsonl"; fi
+	EXTRA=""
+	if [ "${L1PRE:-0}" = "1" ]; then
+		OUT="$STATE/results_l1.jsonl"   # 对照组：body_embed KNN 收窄候选（CLUS_EMBED=minilm）
+		EXTRA="-l1pre"
+	fi
 	"$STATE/cumulus-cluster" -data "$STORE" eval-run -file "$STATE/items.jsonl" \
-		-out "$OUT" -limit 0
+		-out "$OUT" -judge -prior $EXTRA -limit 0
 	;;
 esac

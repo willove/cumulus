@@ -39,8 +39,13 @@ func LearnedCollections(namespace string) []string {
 	}
 }
 
-// sessionKVPrefix is the KV prefix chat sessions live under (session.go).
-func sessionKVPrefix(namespace string) string { return ns.KV(namespace, "sess:") }
+// sessionKVPrefix is the KV prefix chat sessions live under. It MUST reuse
+// session.go's sessionKeyPrefix rather than spell its own: the reset once
+// deleted under "sess:" while sessions were written under "clus:session:",
+// so "reset learned" never cleared a session and LearningState reported
+// Clean=true with sessions still in the store — the exact "the numbers
+// lie" failure this file exists to prevent.
+func sessionKVPrefix(namespace string) string { return ns.KV(namespace, sessionKeyPrefix) }
 
 // cursorKVKey is the ask-sequence cursor (kb.Cursor, searchapi wiring).
 func cursorKVKey(namespace string) string { return ns.KV(namespace, "clus:lastcluster") }

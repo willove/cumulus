@@ -93,7 +93,11 @@ ST1="$(echo "$P1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sta
 P2="$($A put -title "部署手册" -key handbook -body-file "$WORK/handbook.md")"
 ST2="$(echo "$P2" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 [ "$ST2" = "unchanged" ] ; check "same body put twice is unchanged (idempotent)" $?
-check "put succeeds with no embedder (L0 independent)" 0
+# (A third check used to sit here pinned to a literal 0 — "put succeeds with
+# no embedder". The claim it made is already asserted for real two lines
+# above: the first put's status=created with its real $?. A hardcoded 0
+# passes whether or not anything works, so it was removed rather than kept
+# as a decorative green.)
 
 SPAN_OK="$($A get "$ID1" | python3 -c '
 import json,sys
@@ -237,12 +241,11 @@ refs=(r.get("citations") or {}).get("refs") or []
 assert all(ref.get("source_id") for ref in refs), refs
 print("ok")
 ' ; check "every citation carries source_id (可点回原文)" $?
-# Conflict pair discoverability via CLI raw JSON after synthetic claim split
-python3 - <<'PY'
-# placeholder to keep e2e linear; conflict unit-tested in deep package
-print("ok")
-PY
-check "conflict detection covered by unit gate (deep.TestGateDConflictDiscoverable)" 0
+# Conflict pair discoverability via CLI raw JSON after synthetic claim split.
+# The claim is "covered by the unit gate", so the gate actually RUNS it —
+# a check pinned to a literal 0 would assert nothing and pass forever.
+go test ./internal/deep/ -run TestGateDConflictDiscoverable -count=1 >/dev/null 2>&1
+check "conflict detection covered by unit gate (deep.TestGateDConflictDiscoverable)" $?
 
 # --- Gate F: multi-hop coverage (LENS B1/B2) --------------------------------
 MH="$($A search -q "路由器基本配置步骤 和 交换机基本配置步骤" -raw)"

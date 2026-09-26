@@ -44,6 +44,31 @@ func TestPredictionOfCitations(t *testing.T) {
 	}
 }
 
+// The aggregate's judged flag must come from the stored rows, not from the
+// invocation's -judge flag: realeval.sh's report stage is resume-only
+// (-limit 0 recomputes nothing), and it once aggregated judge-flipped rows
+// under a no-judge invocation — the scorecard read judged:false while the
+// judge had contributed 12 of the 13 correct answers.
+func TestRowsJudgedFromStoredRows(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rows []evalResult
+		want bool
+	}{
+		{"no rows", nil, false},
+		{"rule-only run", []evalResult{{ID: "a"}, {ID: "b", Eval: eval.ItemScore{Correct: true}}}, false},
+		{"system-arm judge present", []evalResult{{ID: "a", Judge: "10 完全正确"}}, true},
+		{"closed-book judge only", []evalResult{{ID: "a", CBJudge: "8 基本正确"}}, true},
+		{"empty judge string is not a verdict", []evalResult{{ID: "a", Judge: ""}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rowsJudged(tc.rows); got != tc.want {
+				t.Fatalf("rowsJudged = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestAggregateResultsReport(t *testing.T) {
 	lines := []evalResult{
 		{ID: "a", Mode: "FAST", Eval: eval.ItemScore{Correct: true, Answered: true}, CB: eval.ItemScore{}},
