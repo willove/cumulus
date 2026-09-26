@@ -414,3 +414,88 @@ func TestAdaptCancelledJobPreservesTerminalProgress(t *testing.T) {
 		})
 	}
 }
+
+// bgJobs exists so shutdown can cancel and drain background jobs BEFORE the
+// engine closes: stop() must cancel a job mid-budget and not return while the
+// goroutine (or its terminal write) is still running.
+func TestBgJobsStopCancelsAndDrains(t *testing.T) {
+	b := newBgJobs()
+	entered := make(chan struct{})
+	released := make(chan struct{})
+	b.run(time.Hour, func(ctx context.Context) {
+		close(entered)
+		<-ctx.Done()
+		<-released // simulate the terminal-state write outliving the cancel
+	})
+	<-entered
+	stopped := make(chan struct{})
+	go func() {
+		b.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while the job goroutine was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(released)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not drain the job goroutine")
+	}
+	// A second stop (shutdown idempotence) must not hang or panic.
+	b.stop()
+}
+
+// The grace window must cover a full DEEP run (minutes), never regress below
+// the old 30s, and honour an explicit override.
+func TestShutdownGraceBounds(t *testing.T) {
+	t.Setenv("CLUS_SHUTDOWN_GRACE", "")
+	if d := shutdownGrace(); d < 5*time.Minute {
+		t.Fatalf("default grace %s < 5m", d)
+	}
+	t.Setenv("CLUS_SHUTDOWN_GRACE", "45")
+	if d := shutdownGrace(); d != 45*time.Second {
+		t.Fatalf("override grace = %s, want 45s", d)
+	}
+	t.Setenv("CLUS_SHUTDOWN_GRACE", "5")
+	if d := shutdownGrace(); d < 30*time.Second {
+		t.Fatalf("sub-30s override must floor at 30s, got %s", d)
+	}
+}
+
+// /v1/learning must count ONLY the request namespace's learning state. The
+// handler used to pass a bare "clus_evidence", which never matched a tenant's
+// ns-prefixed list entry — so the DEFAULT library's evidence was counted into
+// the tenant's report and a fresh namespace read as not-clean.
+func TestLearningFaceCountsOnlyTenantEvidence(t *testing.T) {
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	ctx := context.Background()
+	for _, coll := range []string{"clus_evidence", "tenant:clus_evidence"} {
+		if err := engine.EnsureCollection(ctx, coll); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.Insert(ctx, coll, []map[string]any{{"_id": "e1"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := ingest.New(engine, "clus_sources", "clus_evidence", "clus_clusters", "")
+	mux := http.NewServeMux()
+	registerClusterFace(mux, engine, st, "", "clus_evidence")
+	w, out := serveJSON(t, mux, http.MethodGet, "/v1/learning?ns=tenant", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("learning: %d %v", w.Code, out)
+	}
+	docs, _ := out["docs"].(map[string]any)
+	if n, _ := docs["tenant:clus_evidence"].(float64); n != 1 {
+		t.Fatalf("tenant evidence count = %v, want 1 (docs: %v)", docs["tenant:clus_evidence"], docs)
+	}
+	if n, ok := docs["clus_evidence"]; ok && n != float64(0) {
+		t.Fatalf("default library leaked into the tenant report: clus_evidence=%v", n)
+	}
+}

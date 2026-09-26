@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/willove/cumulite"
@@ -85,7 +86,7 @@ func affinityFirst(cands []source.Source, affinity map[string]bool, m int) []sou
 // (diagnosis: 反家庭暴力法's real articles lost to short unrelated ones);
 // the semantic neighbours recover the statutes the wording never touches
 // (Sirchmunk dir_scan 对齐).
-func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string) func(context.Context, string, []source.Source, map[string]bool) ([]source.Source, error) {
+func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string, usage *usageWeights) func(context.Context, string, []source.Source, map[string]bool) ([]source.Source, error) {
 	return func(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) ([]source.Source, error) {
 		// Sweep wide, then let affinityFirst cut the loop budget: the global
 		// top-6 rarely contains the right member of the right family, but the
@@ -108,10 +109,93 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl st
 				out = append(out, s)
 			}
 		}
+		// 使用权重提升：本会话刚引过/账本里这些词元反复命中的文档排到探索
+		// 最前（加速但不淹没：配额 4，稳定保序，同分不吃掉全局最优）。
+		uw := usage.get()
+		// 权重文档若没进宽扫（词面完全不匹配的问法），先注入再提升：
+		// 重排只能重排已存在的候选，会话/账本背书的文档必须在场。
+		out = injectWeighted(out, sources, uw)
+		out = usageFirst(out, uw, maxDeepLoops, usageCap())
+		if os.Getenv("CLUS_AFFINITY_DEBUG") == "1" {
+			names := make([]string, 0, 6)
+			for i, s := range out {
+				if i >= 6 {
+					break
+				}
+				mark := ""
+				if w, ok := uw[s.ID]; ok && w > 0 {
+					mark = fmt.Sprintf("(u%.2f)", w)
+				}
+				names = append(names, s.ID+mark)
+			}
+			fmt.Fprintf(os.Stderr, "[rankAdmission] %s → %v\n", query, names)
+		}
 		// 亲缘配额混合：同族最多 3（弱 FAST 答案会把亲缘带偏——真机:
 		// 「保护」一词命中妇女权益全家，反家暴法被挤出前 6），全局最优补足。
 		return mixedAffinity(out, affinity, maxDeepLoops, 3), nil
 	}
+}
+
+// injectWeighted appends usage-weighted documents missing from the sweep.
+// A follow-up phrased with zero lexical overlap ("那赔偿呢") produces a
+// keyword sweep that never mentions the remembered document — promotion
+// alone would then be a no-op, so the document joins the candidate list.
+func injectWeighted(cands []source.Source, all []source.Source, weights map[string]float64) []source.Source {
+	if len(weights) == 0 {
+		return cands
+	}
+	have := map[string]bool{}
+	for _, s := range cands {
+		have[s.ID] = true
+	}
+	var added []source.Source
+	for _, s := range all {
+		if have[s.ID] {
+			continue
+		}
+		if w, ok := weights[s.ID]; ok && w > 0 {
+			added = append(added, s)
+			have[s.ID] = true
+		}
+	}
+	return append(cands, added...)
+}
+
+// usageCap bounds how many session-weighted documents the DEEP admission may
+// promote ahead of the global best (2 by default, was 4 — same tiebreaker
+// logic as fast.usageShare). CLUS_USAGE_CAP tunes it.
+func usageCap() int {
+	if v := os.Getenv("CLUS_USAGE_CAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 2
+}
+
+// usageFirst stably promotes documents carrying query-conditioned usage
+// weight (session evidence stack ∪ affinity ledger) ahead of the rest,
+// capped so remembered documents accelerate the loop without flooding it.
+func usageFirst(cands []source.Source, weights map[string]float64, m, cap int) []source.Source {
+	if len(weights) == 0 || cap <= 0 {
+		if len(cands) > m {
+			return cands[:m]
+		}
+		return cands
+	}
+	var first, rest []source.Source
+	for _, s := range cands {
+		if w, ok := weights[s.ID]; ok && w > 0 && len(first) < cap {
+			first = append(first, s)
+			continue
+		}
+		rest = append(rest, s)
+	}
+	out := append(first, rest...)
+	if len(out) > m {
+		out = out[:m]
+	}
+	return out
 }
 
 // mixedAffinity cuts candidates to m: up to cap from the affinity families

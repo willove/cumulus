@@ -233,3 +233,26 @@ func TestSessionDurableAppendSurvivesCancelledRequest(t *testing.T) {
 		t.Fatal("the control session must not exist")
 	}
 }
+
+// statsFrom 必须吃下 serve 传来的 map[string]int64（曾因只断言
+// map[string]any 而静默丢掉整个 stages，刷新恢复后时间轴消失）。
+func TestStatsFromKeepsTypedStages(t *testing.T) {
+	st := statsFrom(map[string]any{
+		"mode": "DEEP", "conf": 0.9, "latency_ms": int64(17473),
+		"stages": map[string]int64{"analyze": 1144795, "deep_sample": 22181507},
+	})
+	if st == nil || len(st.Stages) != 2 {
+		t.Fatalf("stages = %v, want two entries", st.Stages)
+	}
+	if st.Stages["analyze"] != 1144795 {
+		t.Fatalf("analyze = %d, want 1144795", st.Stages["analyze"])
+	}
+	if st.LatencyMS != 17473 {
+		t.Fatalf("latency = %d, want 17473", st.LatencyMS)
+	}
+	// map[string]any（SSE done 反序列化形状）同样要吃下。
+	st2 := statsFrom(map[string]any{"stages": map[string]any{"synth": float64(900000)}})
+	if st2 == nil || st2.Stages["synth"] != 900000 {
+		t.Fatalf("any-map stages = %v", st2.Stages)
+	}
+}

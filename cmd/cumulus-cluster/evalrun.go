@@ -197,7 +197,9 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	}
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refiner)
 	// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
-	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl)
+	// 评测不带使用权重（空载体）：保证 scoreboard 与线上行为可比，账本加速
+	// 只在 serve 面生效。
+	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, &usageWeights{})
 
 	// Per-item budget: a batch of items must not share one global deadline —
 	// a few slow DEEP escalations would otherwise starve the tail items.

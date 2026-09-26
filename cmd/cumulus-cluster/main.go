@@ -18,6 +18,7 @@ import (
 	"github.com/willove/cumulite"
 
 	"github.com/willove/cumulus/internal/adapt"
+	"github.com/willove/cumulus/internal/affinity"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/eval"
@@ -140,6 +141,7 @@ func main() {
 	edgesColl := ns.Coll(namespace, "clus_weak_edges")
 	citesColl := ns.Coll(namespace, "clus_cites")
 	conflictsColl := ns.Coll(namespace, "clus_conflicts")
+	affinityColl := ns.Coll(namespace, "clus_affinity")
 	if len(rest) == 0 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -476,7 +478,7 @@ func main() {
 		fs := flag.NewFlagSet("ensure", flag.ExitOnError)
 		embed := fs.Bool("embed", false, "also backfill body_embed vectors (L1)")
 		_ = fs.Parse(rest)
-		colls, err := st.Ensure(ctx, edgesColl, citesColl, conflictsColl)
+		colls, err := st.Ensure(ctx, edgesColl, citesColl, conflictsColl, affinityColl)
 		if err != nil {
 			fatal(err)
 		}
@@ -589,7 +591,7 @@ func main() {
 		// (same reasoning as eval-run's Background ctx further down).
 		sctx, scancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer scancel()
-		runServe(sctx, c, st, *listen, sources, namespace, *verbose, data)
+		runServe(sctx, c, st, *listen, sources, evidence, namespace, *verbose, data)
 	case "cites":
 		sub := "list"
 		if len(rest) > 0 {
@@ -606,6 +608,64 @@ func main() {
 			fmt.Fprint(os.Stderr, usage)
 			os.Exit(2)
 		}
+	case "affinity":
+		// 诊断：查账本里某词元的文档权重（衰减后，按分排序）。
+		sub := "top"
+		if len(rest) > 0 {
+			sub = rest[0]
+		}
+		switch sub {
+		case "top":
+			if len(rest) < 2 {
+				fatal(fmt.Errorf("usage: affinity top TOKEN"))
+			}
+			store := affinity.NewCumuStore(c, ns.Coll(namespace, "clus_affinity"))
+			weights, err := store.Weights(ctx, affinity.TrimTokens([]string{rest[1]}, 0), time.Now())
+			if err != nil {
+				fatal(err)
+			}
+			type row struct {
+				SourceID string  `json:"source_id"`
+				Weight   float64 `json:"weight"`
+			}
+			rows := make([]row, 0, len(weights))
+			for id, w := range weights {
+				rows = append(rows, row{id, w})
+			}
+			sort.Slice(rows, func(i, j int) bool { return rows[i].Weight > rows[j].Weight })
+			if len(rows) > 20 {
+				rows = rows[:20]
+			}
+			printJSON(map[string]any{"token": rest[1], "docs": rows})
+		default:
+			fmt.Fprint(os.Stderr, usage)
+			os.Exit(2)
+		}
+	case "reset":
+		// 清空某命名空间的“学过的东西”（簇/证据/账本/边/会话），语料不动。
+		// 验证与测试的前置：没有这一步，旧簇会掩蔽新代码路径、账本累积会污染对照。
+		if len(rest) == 0 || rest[0] != "learned" {
+			fatal(fmt.Errorf("usage: reset learned [-ns NS] [-yes] [-dry-run]"))
+		}
+		fs := flag.NewFlagSet("reset learned", flag.ExitOnError)
+		yes := fs.Bool("yes", false, "confirm the reset (required)")
+		dry := fs.Bool("dry-run", false, "count only, delete nothing")
+		_ = fs.Parse(rest[1:])
+		if !*yes && !*dry {
+			fatal(fmt.Errorf("refusing to reset without -yes (or -dry-run to preview)"))
+		}
+		rep, rerr := ResetLearned(ctx, c, namespace, evidence, *dry)
+		if rerr != nil {
+			fatal(rerr)
+		}
+		printJSON(rep)
+	case "learning":
+		// 学习状态计数：验证“现在是干净的”或“这轮学到了什么”。
+		st, lerr := LearningState(ctx, c, namespace, evidence)
+		if lerr != nil {
+			fatal(lerr)
+		}
+		printJSON(st)
 	case "env":
 		// Resolved endpoint config, masked — the per-suite .env face.
 		base := os.Getenv("AIGATE_BASE_URL")
@@ -720,6 +780,12 @@ func main() {
 			edgeStore := graph.NewCumuStore(c, edgesColl)
 			if berr := graph.LinkBarrier(ctx, edgeStore, a.ID, b.ID, cf.Reason); berr != nil {
 				fatal(berr)
+			}
+			// The pair also carries the contested LIFECYCLE: tidy's fold
+			// protection and the monitor's lifecycle snapshot read that
+			// field, and the barrier edge alone left it forever unwritten.
+			if _, merr := cluster.MarkContested(ctx, cs, a.ID, b.ID); merr != nil {
+				fatal(merr)
 			}
 			printJSON(cf)
 		default:

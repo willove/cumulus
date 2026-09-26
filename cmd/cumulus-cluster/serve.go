@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ func suiteExtra(namespace string) []string {
 		ns.Coll(namespace, "clus_weak_edges"),
 		ns.Coll(namespace, "clus_cites"),
 		ns.Coll(namespace, "clus_conflicts"),
+		ns.Coll(namespace, "clus_affinity"),
 		ns.Coll(namespace, "clus_evals"),
 	}
 }
@@ -114,7 +116,7 @@ type jobIn struct {
 // /v1/search, POST /v1/search/stream), sessions, clusters, MCP
 // (POST /mcp) and the workbench (/ui/). HTTP ingest/search require an explicit
 // registered bucket; legacy read/MCP/session faces may fall back to serveNS.
-func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, serveNS string, verbose bool, storeDirArg string) {
+func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, sourcesColl, evidenceColl, serveNS string, verbose bool, storeDirArg string) {
 	mux := http.NewServeMux()
 
 	// Boot: declare the suite collections for the default namespace. The
@@ -139,7 +141,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		return clusterKnowledge(ctx, c, nsName)
 	})
 	registerSessionFace(mux, c, serveNS)
-	registerClusterFace(mux, c, serveNS)
+	registerClusterFace(mux, c, st, serveNS, evidenceColl)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
 	registerScanFace(mux, serveNS)
 	registerAdaptFace(mux, c, st, sourcesColl, serveNS, ensure, buckets)
@@ -176,20 +178,78 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("cumulus-cluster serve on %s", listen)
-	// Graceful shutdown on ctx cancellation: in-flight SSE searches finish,
-	// the port is released instead of being killed mid-write.
+	// Graceful shutdown on ctx cancellation: in-flight SSE searches finish
+	// inside the grace window, and background jobs are cancelled and drained
+	// BEFORE runServe returns — main's deferred engine.Close must never race a
+	// job mid-write (a write to a closed engine panics, and the job's own
+	// terminal-state write still needs the engine alive).
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
-		shut, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		grace := shutdownGrace()
+		shut, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
-		if err := srv.Shutdown(shut); err != nil && err != context.DeadlineExceeded {
-			log.Printf("serve shutdown: %v", err)
+		if err := srv.Shutdown(shut); err != nil {
+			log.Printf("serve shutdown after %s grace: %v (in-flight requests cut)", grace, err)
 		}
+		jobs.stop()
 	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
+	<-drained
 }
+
+// shutdownGrace is how long shutdown waits for in-flight requests. A DEEP
+// search legitimately runs minutes (the same file sets no WriteTimeout for
+// exactly that reason), so the old hardcoded 30s cut live answers mid-stream;
+// the default covers a full cold DEEP run, floored for smaller overrides.
+func shutdownGrace() time.Duration {
+	if v := os.Getenv("CLUS_SHUTDOWN_GRACE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 30 {
+			return time.Duration(f * float64(time.Second))
+		}
+	}
+	return 5 * time.Minute
+}
+
+// bgJobs tracks serve-owned background ingestion goroutines so shutdown can
+// cancel and drain them before the engine closes. Package-level because the
+// runners hang off four register faces that share no other common state.
+type bgJobs struct {
+	root   context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func newBgJobs() *bgJobs {
+	root, cancel := context.WithCancel(context.Background())
+	return &bgJobs{root: root, cancel: cancel}
+}
+
+// run executes fn on a context bounded by budget AND server shutdown — the
+// budget alone let a 10-minute corpus job keep writing while the engine was
+// already closing.
+func (b *bgJobs) run(budget time.Duration, fn func(context.Context)) {
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		bg, cancel := context.WithTimeout(b.root, budget)
+		defer cancel()
+		fn(bg)
+	}()
+}
+
+// stop cancels live job contexts and waits out their goroutines, including
+// the ≤30s terminal-state writes they do on a fresh context.
+func (b *bgJobs) stop() {
+	b.cancel()
+	b.wg.Wait()
+}
+
+// jobs is the serve-mode background-job tracker (see bgJobs).
+var jobs = newBgJobs()
 
 // registerIngestFace shares the HTTP bucket gate with adapt/search. GET job
 // status remains readable for legacy default and unregistered namespaces.
@@ -372,14 +432,12 @@ func queueFileJob(ctx context.Context, st *ingest.Store, job string, total int, 
 	if err := st.PutJobDoc(ctx, job, ingest.JobDoc{State: "queued", Phase: "extracting", Total: total}); err != nil {
 		return err
 	}
-	go func() {
+	jobs.run(10*time.Minute, func(bg context.Context) {
 		if cleanup != nil {
 			defer cleanup()
 		}
-		bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
 		runFileJob(bg, st, job, run)
-	}()
+	})
 	return nil
 }
 

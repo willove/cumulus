@@ -90,6 +90,36 @@ type searchStack struct {
 	c           cumulite.Port
 	sourcesColl string
 	opt         SearchOptions
+	// usage holds this request's query-conditioned document weights. The
+	// admission ranker closure reads it at call time (after the ledger and
+	// session stack have been folded in), so one stack build serves any query.
+	usage *usageWeights
+}
+
+// usageWeights is the per-request carrier the DEEP admission ranker and the
+// FAST cascade both consult.
+type usageWeights struct {
+	mu sync.Mutex
+	m  map[string]float64
+}
+
+func (u *usageWeights) set(m map[string]float64) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.m = m
+}
+
+func (u *usageWeights) get() map[string]float64 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.m) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(u.m))
+	for k, v := range u.m {
+		out[k] = v
+	}
+	return out
 }
 
 // newSearchStack wires the production stack (aigate when configured, offline
@@ -114,7 +144,7 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	}
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = opt.Prior
-	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
+	fe.Analyzer, fe.Synth, fe.Expander = degradeAnalyzer{inner: stack.analyzer}, stack.synth, stack.expander
 	// 1.6: the prior's history arm reads live clus_evidence (needs the active
 	// list first — one read per stack build, not per query).
 	if opt.Prior {
@@ -135,13 +165,42 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	kbE.MinHotness = opt.MinHot
 	kbE.MinConfidence = opt.MinConf
 	dE := deep.New(kbE, deep.NewCumuStore(c, ns.Coll(opt.Namespace, "clus_conflicts")))
+	// DEEP loop budgets: engine defaults, tightened per deployment. Measured
+	// queries spent ~14 rounds (6 admission + 4 widen + 3 correct); the cut
+	// targets rounds that re-score files earlier rounds already cleared.
+	// Unparseable/non-positive env values fall back to the engine default.
+	for _, kv := range []struct {
+		env  string
+		dest *int
+	}{
+		{"CLUS_DEEP_LOOPS", &dE.MaxLoops},
+		{"CLUS_DEEP_WIDEN", &dE.WidenBudget},
+		{"CLUS_DEEP_CORRECT", &dE.CorrectBudget},
+	} {
+		if v := os.Getenv(kv.env); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				*kv.dest = n
+			}
+		}
+	}
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
-	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl)
+	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}
+	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, ss.usage)
 	// Independent search token budget (3.2): judge never draws from this.
 	if stack.chat != nil {
-		dE.TokensUsed = stack.chat.TotalTokens
+		// Per-STACK budget: serve builds one stack per request, eval one
+		// per run, so the counter must be a delta from stack build. Reading
+		// the process-lifetime TotalTokens directly spent the budget
+		// cumulatively — on a long-lived serve DEEP was permanently starved
+		// once the first few queries crossed the line (the knob had only
+		// ever been exercised by eval, whose chat client starts at zero per
+		// run). Concurrent requests share the client, so a delta can include
+		// a neighbour's spend — that errs toward stopping earlier, the safe
+		// direction for a burn cap.
+		base := stack.chat.TotalTokens()
+		dE.TokensUsed = func() int64 { return stack.chat.TotalTokens() - base }
 		if v := os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 				dE.TokenBudget = n
@@ -165,7 +224,7 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		dE.History = opt.History
 		dE.HistoryRewriter = stack.rewriter
 	}
-	return &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt}, nil
+	return ss, nil
 }
 
 func refinerFor(chat *llm.ChatClient) *llm.AigateKeywordRefiner {
@@ -408,11 +467,42 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				}
 				opt.History = hist
 			}
+			// Per-stage latency telemetry: one recorder per request, fed by
+			// the FAST/DEEP stage hooks. Pure observability — nil-side
+			// behaviour (gates) is unchanged. When the SSE face is active the
+			// same hook also pushes a live "stage" status event, so the
+			// browser can render a progress timeline as the stages complete
+			// instead of one static line of text.
+			var stageMu sync.Mutex
+			stages := map[string]int64{}
+			// streamState carries the SSE face's live sinks (content deltas,
+			// stage events) to the engine hooks; both faces share the delta
+			// counter so "already on screen" is detectable on either.
+			var streamMu sync.Mutex
+			streamed := 0
+			streamSt := &streamState{mu: &streamMu, streamed: &streamed}
+			recStage := func(name string, d time.Duration) {
+				stageMu.Lock()
+				stages[name] = d.Microseconds()
+				stageMu.Unlock()
+				if streamSt.onStage != nil {
+					streamSt.onStage(name, d)
+				}
+			}
+			emitDelta := func(chunk string) {
+				streamMu.Lock()
+				streamed++
+				n := streamed
+				streamMu.Unlock()
+				if streamSt.emit != nil && n > 0 {
+					streamSt.emit("content", map[string]any{"text": chunk})
+				}
+			}
 			ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
 			if err != nil {
 				// Stack failures (e.g. required weights missing) are failed
 				// queries too. No embedder actually served this request.
-				trackQuery(tracker, in.NS, deep.Result{}, "", err.Error())
+				trackQuery(tracker, in.NS, deep.Result{}, "", err.Error(), nil)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
@@ -423,6 +513,22 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				ss.dE.Verbose = vlog
 				ss.fe.Verbose = vlog
 			}
+			ss.fe.Stages = recStage
+			ss.dE.Stages = recStage
+			// 使用先验：本问词元命中的账本权重 ∪ 本会话证据栈，装进 prior
+			// 的 history 臂。失败/关闭都是静默降级，不影响检索本身。
+			applyUsagePrior(r.Context(), c, in.NS, in.Query, in.Session, ss.fe, ss.dE, ss.usage)
+			// 会话采样上下文（词汇鸿沟回退）：本会话近几问原文。仅当主查询
+			// 在选定文档里采不到任何过线窗口时才生效——常见路径零影响。
+			if ctxText := sampleContextText(opt.History); ctxText != "" {
+				ss.fe.SampleContext = ctxText
+				ss.dE.SampleContext = ctxText
+			}
+			// Streaming synthesis: the SSE face consumes deltas live; the
+			// JSON face counts them (no transport) so it can fall back to
+			// the whole-summary response.
+			ss.fe.SynthDelta = emitDelta
+			ss.dE.SynthDelta = emitDelta
 			if !stream {
 				res, err := runSearch(r.Context(), ss, in.Query)
 				if err != nil {
@@ -430,12 +536,13 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 					// ("a failed query must be visible as an error, not silently
 					// absent") was broken exactly here — every 500 left no trace
 					// and the monitor's error count could never leave zero.
-					trackQuery(tracker, in.NS, deep.Result{}, embedderLabel(ss), err.Error())
+					trackQuery(tracker, in.NS, deep.Result{}, embedderLabel(ss), err.Error(), stages)
 					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 					return
 				}
 				if sess != nil {
-					if _, aerr := sess.appendTurnDurable(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary); aerr == nil {
+					extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))
+					if _, aerr := sess.appendTurnDurable(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary, extra); aerr == nil {
 						res.Session = in.Session
 					} else {
 						// A failed session write must be visible, not silent: the
@@ -443,24 +550,58 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 						log.Printf("[search] session %s: turn not persisted: %v", in.Session, aerr)
 					}
 				}
+				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Citations.Refs, res.Answer.SourceID, res.Answer.Confidence)
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
 				bumpBucket(r.Context(), buckets, in.NS, ss)
-				trackQuery(tracker, in.NS, res, embedderLabel(ss), "")
+				trackQuery(tracker, in.NS, res, embedderLabel(ss), "", stages)
 				writeJSON(w, http.StatusOK, res)
 				return
 			}
 			bumpBucket(r.Context(), buckets, in.NS, ss)
-			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1")
+			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt)
+			if serr == nil {
+				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Citations.Refs, sres.Answer.SourceID, sres.Answer.Confidence)
+			}
 			errMsg := ""
 			if serr != nil {
 				errMsg = serr.Error()
 			}
-			trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg)
+			trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg, stages)
 		}
 	}
 	mux.HandleFunc("/v1/search", handle(false))
 	mux.HandleFunc("/v1/search/stream", handle(true))
+}
+
+// turnExtrasFrom builds the persisted turn extras: the answer's evidence
+// refs and the run card (the SSE done payload doubles as the card's source,
+// so a refreshed session restores exactly what the user saw).
+func turnExtrasFrom(refs []deep.Ref, stats *sessionStats) *turnExtras {
+	if len(refs) == 0 && stats == nil {
+		return nil
+	}
+	e := &turnExtras{Stats: stats}
+	for _, r := range refs {
+		resolved := r.Resolved
+		e.Sources = append(e.Sources, sessionCite{
+			Index: r.Index, Title: r.Title, SourceID: r.SourceID,
+			Quote: r.Quote, Resolved: &resolved,
+		})
+	}
+	return e
+}
+
+// statsFromDone is the bridge from a finished run (deep.Result + the stage
+// map) to the persisted run card.
+func statsFromDone(res deep.Result, stages map[string]int64) *sessionStats {
+	return statsFrom(map[string]any{
+		"mode": res.Mode, "conf": res.Answer.Confidence, "coverage": res.Answer.Coverage,
+		"loops": res.Loops, "widened": res.Widened, "tokens": res.Tokens,
+		"latency_ms": res.LatencyMS, "reused": res.Reused,
+		"cluster_id": res.ClusterID, "stop_reason": res.StopReason,
+		"refused": res.Answer.Refused, "stages": stages,
+	})
 }
 
 // bumpBucket records a query against the bucket that served it. Best effort:
@@ -481,7 +622,7 @@ func bumpBucket(ctx context.Context, buckets *bucket.Store, name string, ss *sea
 
 // trackQuery folds one finished retrieval into the monitor. Best effort: the
 // tracker is telemetry, never a correctness source.
-func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMsg string) {
+func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMsg string, stages map[string]int64) {
 	if tr == nil {
 		return
 	}
@@ -492,7 +633,7 @@ func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMs
 		Loops: res.Loops, Widened: res.Widened, LLMCalls: a.LLMCalls,
 		Tokens: res.Tokens, LatencyMS: res.LatencyMS, LatencyUS: res.LatencyUS, Embedder: embedder,
 		SelfCorr: res.SelfCorrected, Refused: a.Refused, Error: errMsg,
-		StopReason: res.StopReason,
+		StopReason: res.StopReason, Stages: stages,
 	})
 }
 
@@ -503,7 +644,17 @@ func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMs
 // the caller record the failed attempt in the monitor — returning a zero
 // Result alone made every stream failure look like a successful zero-value
 // query and poisoned the averages.
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool) (deep.Result, error) {
+// streamState is the bridge between the SSE face's live sinks and the
+// engine hooks: sseSearch installs emit/onStage when the stream opens and
+// clears them when it closes.
+type streamState struct {
+	mu       *sync.Mutex
+	streamed *int
+	emit     func(event string, data any)
+	onStage  func(name string, d time.Duration)
+}
+
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool, stages map[string]int64, st *streamState) (deep.Result, error) {
 	if verbose {
 		vlog := func(f string, a ...any) {
 			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
@@ -530,6 +681,24 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		flusher.Flush()
 	}
 	started := time.Now()
+	if st != nil {
+		st.mu.Lock()
+		st.emit = emit
+		st.onStage = func(name string, d time.Duration) {
+			emit("status", map[string]any{
+				"stage": "stage", "name": name,
+				"elapsed_ms": time.Since(started).Milliseconds(),
+				"stage_ms":   d.Milliseconds(),
+			})
+		}
+		st.mu.Unlock()
+		defer func() {
+			st.mu.Lock()
+			st.emit = nil
+			st.onStage = nil
+			st.mu.Unlock()
+		}()
+	}
 	emit("status", map[string]any{"stage": "started"})
 
 	// 心跳：长检索期间保活连接；停止与 handler 返回同步，杜绝迟到写。
@@ -576,19 +745,31 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		// 不单独说出来的话，界面会把一段无关引文当成答案展示。
 		emit("status", map[string]any{"stage": "refused"})
 	}
-	emit("content", map[string]any{"text": ans.Summary})
+	// Synthesis deltas already streamed live when the engine hook was wired
+	// and the stream survived: the screen has the answer, so this event
+	// REPLACES (a re-append would duplicate it). Otherwise the whole summary
+	// goes out in one event, as before.
+	streamedN := 0
+	if st != nil {
+		st.mu.Lock()
+		streamedN = *st.streamed
+		st.mu.Unlock()
+	}
+	emit("content", map[string]any{"text": ans.Summary, "replace": streamedN > 0})
 	if len(res.Citations.Refs) > 0 {
 		emit("citations", res.Citations)
 	}
 	done := map[string]any{
-		"mode": res.Mode, "loops": res.Loops, "conf": ans.Confidence,
+		"stages": stages,
+		"mode":   res.Mode, "loops": res.Loops, "conf": ans.Confidence,
 		"coverage": ans.Coverage, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS, "widened": res.Widened,
 		"stop_reason": res.StopReason, "refused": ans.Refused, "skipped": ans.Skipped,
 	}
 	if sess != nil {
-		if _, aerr := sess.appendTurnDurable(r.Context(), sessionID, query, query, ans.Summary); aerr == nil {
+		extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))
+		if _, aerr := sess.appendTurnDurable(r.Context(), sessionID, query, query, ans.Summary, extra); aerr == nil {
 			done["session"] = sessionID
 		} else {
 			// The stream already delivered the answer, so the only honest place
@@ -626,4 +807,22 @@ func embedderName(emb cluster.Embedder) string {
 	default:
 		return fmt.Sprintf("embed-%d", emb.Dims())
 	}
+}
+
+// degradeAnalyzer keeps a malformed-LLM-reply analyze failure from failing
+// the whole query: one bad JSON from the model becomes the deterministic
+// rule analyzer (degraded retrieval) instead of a 500. The failure itself is
+// logged so the rate stays visible.
+type degradeAnalyzer struct{ inner fast.Analyzer }
+
+func (a degradeAnalyzer) Analyze(ctx context.Context, query string) (fast.Analysis, error) {
+	if a.inner == nil { // offline gate stacks carry no analyzer at all
+		return fast.RuleAnalyzer{}.Analyze(ctx, query)
+	}
+	res, err := a.inner.Analyze(ctx, query)
+	if err == nil {
+		return res, nil
+	}
+	log.Printf("[analyze] LLM analysis failed (%v) — degrading to rule analyzer", err)
+	return fast.RuleAnalyzer{}.Analyze(ctx, query)
 }

@@ -133,11 +133,9 @@ func registerAdaptFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, so
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		go func() {
-			bg, cancel := contextWithTimeout(10 * time.Minute)
-			defer cancel()
+		jobs.run(10*time.Minute, func(bg context.Context) {
 			runAdaptJob(bg, stForReq, files, fields, job)
-		}()
+		})
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"job": job, "state": "queued", "total": len(files), "ns": in.NS,
 		})

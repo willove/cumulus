@@ -36,7 +36,96 @@ type sessionMessage struct {
 	Role    string `json:"role"` // user | assistant
 	Content string `json:"content"`
 	At      int64  `json:"at"`
+	// Sources/Stats ride on the assistant turn so a refreshed page restores
+	// the citations and the run card with the answer instead of losing them
+	// (they used to live only in the browser's in-memory pane state).
+	// omitempty keeps old documents byte-compatible.
+	Sources []sessionCite `json:"sources,omitempty"`
+	Stats   *sessionStats `json:"stats,omitempty"`
 }
+
+// sessionCite is one evidence window attached to a persisted answer.
+type sessionCite struct {
+	Index    int    `json:"index"`
+	Title    string `json:"title,omitempty"`
+	SourceID string `json:"source_id,omitempty"`
+	Quote    string `json:"quote,omitempty"`
+	Resolved *bool  `json:"resolved,omitempty"`
+}
+
+// sessionStats is the run card attached to a persisted answer.
+type sessionStats struct {
+	Mode       string           `json:"mode,omitempty"`
+	Conf       float64          `json:"conf"`
+	Coverage   float64          `json:"coverage"`
+	Loops      int              `json:"loops"`
+	Widened    int              `json:"widened"`
+	Tokens     int64            `json:"tokens"`
+	LatencyMS  int64            `json:"latency_ms"`
+	Reused     bool             `json:"reused"`
+	ClusterID  string           `json:"cluster_id,omitempty"`
+	StopReason string           `json:"stop_reason,omitempty"`
+	Refused    bool             `json:"refused"`
+	Stages     map[string]int64 `json:"stages,omitempty"` // per-stage microseconds
+}
+
+// turnExtras is what a search face attaches to the assistant turn it writes.
+type turnExtras struct {
+	Sources []sessionCite
+	Stats   *sessionStats
+}
+
+// statsFrom is the bridge from the SSE done payload to the persisted card.
+func statsFrom(m map[string]any) *sessionStats {
+	if m == nil {
+		return nil
+	}
+	st := &sessionStats{
+		Mode:       str(m["mode"]),
+		Conf:       flt(m["conf"]),
+		Coverage:   flt(m["coverage"]),
+		Loops:      integer(m["loops"]),
+		Widened:    integer(m["widened"]),
+		Tokens:     int64(flt(m["tokens"])),
+		LatencyMS:  int64(flt(m["latency_ms"])),
+		Reused:     m["reused"] == true,
+		ClusterID:  str(m["cluster_id"]),
+		StopReason: str(m["stop_reason"]),
+		Refused:    m["refused"] == true,
+	}
+	// stages 有两种来路：serve 的 stages map（map[string]int64）与 SSE done
+	// 反序列化出的 map[string]any。只断言一种会静默丢整段——曾让时间轴在
+	// 刷新恢复后整体消失，两种都要吃。
+	switch raw := m["stages"].(type) {
+	case map[string]any:
+		st.Stages = map[string]int64{}
+		for k, v := range raw {
+			st.Stages[k] = int64(flt(v))
+		}
+	case map[string]int64:
+		if len(raw) > 0 {
+			st.Stages = map[string]int64{}
+			for k, v := range raw {
+				st.Stages[k] = v
+			}
+		}
+	}
+	return st
+}
+
+func str(v any) string { s, _ := v.(string); return s }
+func flt(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+func integer(v any) int { return int(flt(v)) }
 
 // sessionDoc is the KV payload.
 type sessionDoc struct {
@@ -103,7 +192,9 @@ func (st sessionStore) ensure(ctx context.Context, id, title string) (*sessionDo
 	return &sessionDoc{ID: id, Title: title, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer string) (*sessionDoc, error) {
+// extra is optional (variadic): the assistant turn carries the answer's
+// citations and run card when the caller has them.
+func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer string, extra ...*turnExtras) (*sessionDoc, error) {
 	sessionWriteMu.Lock()
 	defer sessionWriteMu.Unlock()
 	d, err := st.ensure(ctx, id, title)
@@ -114,9 +205,17 @@ func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer 
 	if d.Title == "" {
 		d.Title = title
 	}
+	assistant := sessionMessage{Role: "assistant", Content: answer, At: now}
+	for _, e := range extra {
+		if e == nil {
+			continue
+		}
+		assistant.Sources = e.Sources
+		assistant.Stats = e.Stats
+	}
 	d.Messages = append(d.Messages,
 		sessionMessage{Role: "user", Content: query, At: now},
-		sessionMessage{Role: "assistant", Content: answer, At: now},
+		assistant,
 	)
 	d.UpdatedAt = now
 	return d, st.save(ctx, d)
@@ -134,10 +233,10 @@ const sessionWriteTimeout = 5 * time.Second
 // stayed behind as an empty shell that could no longer be opened into anything.
 // The write is therefore detached from the request context and bounded by its own
 // deadline.
-func (st sessionStore) appendTurnDurable(ctx context.Context, id, title, query, answer string) (*sessionDoc, error) {
+func (st sessionStore) appendTurnDurable(ctx context.Context, id, title, query, answer string, extra ...*turnExtras) (*sessionDoc, error) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionWriteTimeout)
 	defer cancel()
-	return st.appendTurn(writeCtx, id, title, query, answer)
+	return st.appendTurn(writeCtx, id, title, query, answer, extra...)
 }
 
 // create is ensure-then-save under the same lock appendTurn takes: the pair is
