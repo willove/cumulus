@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/parquet-go/parquet-go v0.32.0
-	github.com/willove/cumulite v0.2.0
+	github.com/willove/cumulite v0.2.1
 )
 
 require (
