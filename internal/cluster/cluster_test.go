@@ -279,3 +279,71 @@ func TestCumuStoreTopicAliases(t *testing.T) {
 		})
 	}
 }
+
+// contested finally has a writer: MarkContested is what DetectConflict's
+// "// Lifecycle: contested." comment always intended — without it, tidy's
+// contested protection was dead code.
+func TestMarkContestedWritesLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st := NewMemory()
+	a := New("aaaa1111aaaa2222", "a", "c", "q", "s", nil, nil, 0.5)
+	b := New("bbbb2222bbbb3333", "b", "c", "q", "s", nil, nil, 0.5)
+	if err := st.Save(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Save(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	n, err := MarkContested(ctx, st, a.ID, b.ID, "missing-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("marked %d, want 2", n)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		c, _ := st.Get(ctx, id)
+		if c.Lifecycle != LifecycleContested {
+			t.Fatalf("cluster %s lifecycle = %s", id, c.Lifecycle)
+		}
+	}
+	// Idempotent: an already-contested cluster is not re-stamped.
+	if n, _ := MarkContested(ctx, st, a.ID); n != 0 {
+		t.Fatalf("re-mark counted %d, want 0", n)
+	}
+}
+
+// New cluster ids carry the full 64-bit topic key, and Save refuses to
+// overwrite an id held by a DIFFERENT topic_key — the old 32-bit truncation
+// made that a silent cluster-eats-cluster.
+func TestClusterIDWidthAndSaveCollisionGuard(t *testing.T) {
+	tk := "0123456789abcdef"
+	c := New(tk, "n", "c", "q", "s", nil, nil, 0.5)
+	if c.ID != "C"+tk {
+		t.Fatalf("id = %s, want C+full topic key", c.ID)
+	}
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	ctx := context.Background()
+	if err := engine.EnsureCollection(ctx, "clus_clusters"); err != nil {
+		t.Fatal(err)
+	}
+	st := NewCumuStore(engine, "clus_clusters")
+	if err := st.Save(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	other := c
+	other.TopicKey = "ffffffffffffffff"
+	if err := st.Save(ctx, other); err == nil {
+		t.Fatal("save under an id held by another topic_key must refuse")
+	}
+	// Same topic_key (a normal update) still replaces.
+	other.TopicKey = tk
+	other.Name = "updated"
+	if err := st.Save(ctx, other); err != nil {
+		t.Fatalf("same-identity update refused: %v", err)
+	}
+}

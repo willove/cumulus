@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -112,27 +114,38 @@ func BuildStructure(body string) []Span {
 		kind, label string
 		at          int // rune index
 	}
-	byteToRune := func(b int) int {
-		return len([]rune(body[:b]))
+	// Marks are collected at byte offsets and converted to rune offsets in
+	// ONE forward walk. The old per-mark len([]rune(body[:b])) rescanned the
+	// whole prefix — O(n²) on heading-dense documents.
+	type byteMark struct {
+		kind, label string
+		at          int // byte index
 	}
-	var marks []mark
+	var raw []byteMark
 	for _, m := range headingRe.FindAllStringSubmatchIndex(body, -1) {
-		marks = append(marks, mark{kind: "heading", label: strings.TrimSpace(body[m[4]:m[5]]), at: byteToRune(m[0])})
+		raw = append(raw, byteMark{kind: "heading", label: strings.TrimSpace(body[m[4]:m[5]]), at: m[0]})
 	}
 	for _, m := range pageRe.FindAllStringSubmatchIndex(body, -1) {
-		marks = append(marks, mark{kind: "page", label: "p" + body[m[2]:m[3]], at: byteToRune(m[0])})
+		raw = append(raw, byteMark{kind: "page", label: "p" + body[m[2]:m[3]], at: m[0]})
 	}
 	n := len([]rune(body))
-	if len(marks) == 0 {
+	if len(raw) == 0 {
 		if body == "" {
 			return nil
 		}
 		return []Span{{Kind: "doc", Label: "body", Start: 0, End: n}}
 	}
-	for i := 1; i < len(marks); i++ {
-		for j := i; j > 0 && marks[j].at < marks[j-1].at; j-- {
-			marks[j], marks[j-1] = marks[j-1], marks[j]
+	// Byte order equals rune order in UTF-8, so sorting bytes sorts runes.
+	sort.Slice(raw, func(i, j int) bool { return raw[i].at < raw[j].at })
+	marks := make([]mark, len(raw))
+	ri, bi := 0, 0
+	for i, bm := range raw {
+		for bi < bm.at {
+			_, size := utf8.DecodeRuneInString(body[bi:])
+			bi += size
+			ri++
 		}
+		marks[i] = mark{kind: bm.kind, label: bm.label, at: ri}
 	}
 	out := make([]Span, 0, len(marks)+1)
 	// Text before the first mark belongs to no heading, but it still has to be

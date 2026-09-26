@@ -101,3 +101,18 @@ func TestFailureTaxonomy(t *testing.T) {
 		t.Fatalf("taxonomy classes must sum to N=%d", r.N)
 	}
 }
+
+// C(67,33)≈1.4e19 overflowed int64 and wrapped negative, handing the exact
+// binomial test negative p-values from n≥67. big.Int keeps it exact.
+func TestBinomExactAtLargeN(t *testing.T) {
+	if got := binom(10, 5); got != 252 {
+		t.Fatalf("binom(10,5) = %v, want 252", got)
+	}
+	a, b := binom(67, 33), binom(67, 34)
+	if a <= 0 || a != b {
+		t.Fatalf("binom(67,33)=%v binom(67,34)=%v — symmetry broke (int64 wrap)", a, b)
+	}
+	if p := exactBinomial(80, 50); p < 0 || p > 1 {
+		t.Fatalf("exactBinomial(80,50) = %v, out of [0,1]", p)
+	}
+}

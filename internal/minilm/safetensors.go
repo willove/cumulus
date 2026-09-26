@@ -97,6 +97,9 @@ func (s *safetensors) tensor(name string) ([]float32, error) {
 }
 
 // i64Row reads int64 values (position_ids buffer) for spec verification.
+// The same offset validation as tensor(): the file arrives over the network,
+// so a malformed header must surface as an error — not an index panic on
+// DataOffsets[0]/[1] and not a slice past the data section.
 func (s *safetensors) i64Row(name string) ([]int64, error) {
 	t, ok := s.header[name]
 	if !ok {
@@ -105,8 +108,22 @@ func (s *safetensors) i64Row(name string) ([]int64, error) {
 	if t.Dtype != "I64" {
 		return nil, fmt.Errorf("tensor %q: dtype %s, want I64", name, t.Dtype)
 	}
-	off := s.dataStart + t.DataOffsets[0]
-	n := (t.DataOffsets[1] - t.DataOffsets[0]) / 8
+	if len(t.DataOffsets) < 2 {
+		return nil, fmt.Errorf("tensor %q: data_offsets needs 2 entries, got %d", name, len(t.DataOffsets))
+	}
+	begin, end := t.DataOffsets[0], t.DataOffsets[1]
+	if begin < 0 || end < begin {
+		return nil, fmt.Errorf("tensor %q: bad data_offsets [%d,%d]", name, begin, end)
+	}
+	if s.dataStart+begin < 0 || end > len(s.data)-s.dataStart {
+		return nil, fmt.Errorf("tensor %q: offsets [%d,%d) overrun the %d-byte data section",
+			name, begin, end, len(s.data)-s.dataStart)
+	}
+	n := (end - begin) / 8
+	if n == 0 {
+		return nil, fmt.Errorf("tensor %q: empty payload", name)
+	}
+	off := s.dataStart + begin
 	out := make([]int64, n)
 	for i := range out {
 		out[i] = int64(binary.LittleEndian.Uint64(s.data[off+i*8:]))

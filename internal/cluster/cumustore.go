@@ -57,10 +57,15 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 	if len(c.KeyEmbeds) > 0 {
 		doc["key_embeds"] = c.KeyEmbeds
 	}
-	// Insert-or-replace by _id (content-stable id).
+	// Insert-or-replace by _id (content-stable id) — but never silently
+	// across identities: two topic_keys colliding on one id must be loud,
+	// or the second Save quietly eats the first cluster.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
+		if tk, _ := existing["topic_key"].(string); tk != "" && c.TopicKey != "" && tk != c.TopicKey {
+			return fmt.Errorf("cluster %s already holds topic_key %s, refusing to overwrite with %s", c.ID, tk, c.TopicKey)
+		}
 		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)
 		return err
 	}

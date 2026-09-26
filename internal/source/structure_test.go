@@ -53,3 +53,29 @@ func TestPreambleSpan(t *testing.T) {
 		t.Fatalf("preamble slice = %q", got)
 	}
 }
+
+// The single-pass byte→rune conversion must land marks on rune indices even
+// for CJK-dense bodies (multi-byte runes are where the two notions diverge).
+func TestStructureRuneOffsetsOnCJK(t *testing.T) {
+	body := "汉字导语两行。\n\n# 标题甲\n\n中文内容若干。\n\n--- page 2 ---\n第二页内容。\n"
+	spans := BuildStructure(body)
+	if len(spans) != 3 { // preamble + heading + page
+		t.Fatalf("spans = %d, want 3: %+v", len(spans), spans)
+	}
+	if spans[0].Kind != "preamble" || spans[0].Start != 0 {
+		t.Fatalf("preamble span wrong: %+v", spans[0])
+	}
+	if spans[1].Label != "标题甲" {
+		t.Fatalf("heading label = %q", spans[1].Label)
+	}
+	for i, s := range spans {
+		if _, err := SliceSpan(body, spans, i); err != nil {
+			t.Fatalf("span %d (%+v) not sliceable: %v", i, s, err)
+		}
+	}
+	// The heading mark sits exactly at the rune index of '#'.
+	wantAt := len([]rune("汉字导语两行。\n\n"))
+	if spans[1].Start != wantAt {
+		t.Fatalf("heading start = %d, want %d", spans[1].Start, wantAt)
+	}
+}

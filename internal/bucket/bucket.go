@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/ns"
 )
 
@@ -107,8 +108,17 @@ func (s *Store) Get(ctx context.Context, name string) (*Bucket, error) {
 		return nil, err
 	}
 	raw, err := s.c.KVGet(ctx, RegistryPrefix+name)
-	if err != nil || len(raw) == 0 {
-		return nil, nil // missing key is not an error: "not registered"
+	if err != nil {
+		if contract.IsNotFound(err) {
+			return nil, nil // missing key is not an error: "not registered"
+		}
+		// A real read failure must NOT fold into "not registered": Create
+		// would then register a fresh zero bucket over the existing one and
+		// wipe its counters on the next put.
+		return nil, fmt.Errorf("bucket %s: %w", name, err)
+	}
+	if len(raw) == 0 {
+		return nil, nil
 	}
 	var b Bucket
 	if err := json.Unmarshal(raw, &b); err != nil {

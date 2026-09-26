@@ -24,6 +24,31 @@ const (
 	LifecycleDeprecated = "deprecated"
 )
 
+// MarkContested moves the given clusters to lifecycle=contested — the writer
+// this lifecycle always lacked: DetectConflict's "// Lifecycle: contested."
+// comment marked the intent, but nothing ever wrote the field, so tidy's
+// contested protection was dead code and the monitor's snapshot never saw
+// one. Already-contested clusters are left untouched.
+func MarkContested(ctx context.Context, st Store, ids ...string) (int, error) {
+	n := 0
+	for _, id := range ids {
+		c, err := st.Get(ctx, id)
+		if err != nil {
+			return n, err
+		}
+		if c == nil || c.Lifecycle == LifecycleContested {
+			continue
+		}
+		c.Lifecycle = LifecycleContested
+		c.UpdatedAt = time.Now().UTC()
+		if err := st.Save(ctx, *c); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
 const (
 	// MaxQueriesPerCluster is the FIFO cap on retained queries (Sirchmunk 5).
 	MaxQueriesPerCluster = 5
@@ -251,9 +276,15 @@ type Cluster struct {
 // New builds a v1 cluster from a finished FAST/DEEP answer.
 func New(topicKey, name, content, query, sourceID string, evidence []mcs.Sample, embed []float64, confidence float64) Cluster {
 	now := time.Now().UTC()
+	// The id carries the full 64-bit topic key: the old 8-hex (32-bit)
+	// truncation collided at ~1e-4 with just 10³ clusters, and a collision
+	// silently overwrote the loser (Save now refuses cross-topic_key ids,
+	// but the wider id keeps the guard from ever mattering). Clusters stored
+	// before the widening keep their short ids — reuse finds them by
+	// topic_key, not by id.
 	tk := topicKey
-	if len(tk) > 8 {
-		tk = tk[:8]
+	if len(tk) > 16 {
+		tk = tk[:16]
 	}
 	id := "C" + tk
 	normEv := NormalizeEvidence(sourceID, evidence)

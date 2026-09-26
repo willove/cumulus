@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math"
+	"math/big"
 	"strings"
 )
 
@@ -329,19 +330,24 @@ func exactBinomial(b, c int) float64 {
 }
 
 func binomPMF(n, k int, p float64) float64 {
-	return float64(binom(n, k)) * math.Pow(p, float64(k)) * math.Pow(1-p, float64(n-k))
+	return binom(n, k) * math.Pow(p, float64(k)) * math.Pow(1-p, float64(n-k))
 }
 
-func binom(n, k int) int {
+// binom returns C(n,k) as float64. The int64 multiplicative form wrapped
+// negative from n≥67 (C(67,33)≈1.4e19 > int64 max), handing exactBinomial
+// negative p-values; big.Int stays exact through the float64 conversion.
+func binom(n, k int) float64 {
 	if k < 0 || k > n {
 		return 0
 	}
 	if k > n-k {
 		k = n - k
 	}
-	r := 1
+	r := big.NewInt(1)
 	for i := 1; i <= k; i++ {
-		r = r * (n - k + i) / i
+		r.Mul(r, big.NewInt(int64(n-k+i)))
+		r.Div(r, big.NewInt(int64(i)))
 	}
-	return r
+	f, _ := new(big.Float).SetInt(r).Float64()
+	return f
 }

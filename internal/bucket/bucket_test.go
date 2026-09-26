@@ -2,6 +2,7 @@ package bucket
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/willove/cumulite"
@@ -145,5 +146,45 @@ func TestRequireRejectsEmpty(t *testing.T) {
 	}
 	if err := s.Require(ctx, "law"); err != nil {
 		t.Fatalf("a registered bucket must be accepted: %v", err)
+	}
+}
+
+// failingKVPort fails KVGet like a transient storage outage.
+type failingKVPort struct {
+	cumulite.Port
+}
+
+func (p failingKVPort) KVGet(ctx context.Context, key string) ([]byte, error) {
+	return nil, errors.New("storage unavailable")
+}
+
+// A registry read failure must NOT read as "not registered": Create would
+// then write a fresh zero bucket over the live record and wipe its counters
+// on the spot.
+func TestCreateFailsLoudlyOnRegistryReadError(t *testing.T) {
+	ctx := context.Background()
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	good := New(engine)
+	if _, err := good.Create(ctx, "law", "法条", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := good.SetCounts(ctx, "law", 3932, 77); err != nil {
+		t.Fatal(err)
+	}
+	s := New(failingKVPort{Port: engine})
+	if _, err := s.Create(ctx, "law", "改名", ""); err == nil {
+		t.Fatal("a registry read failure must fail Create, not re-register a zero bucket")
+	}
+	// The live record survived untouched.
+	kept, err := good.Get(ctx, "law")
+	if err != nil || kept == nil {
+		t.Fatalf("get after failed create: %v %v", kept, err)
+	}
+	if kept.Sources != 3932 || kept.Label != "法条" {
+		t.Fatalf("failed create disturbed the live record: %+v", kept)
 	}
 }
