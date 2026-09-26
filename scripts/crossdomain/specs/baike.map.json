@@ -1,0 +1,8 @@
+{
+  "title": "{{title}}",
+  "body": "{{content}}",
+  "key": "{{uniqueKey}}",
+  "type": "baike",
+  "lang": "zh",
+  "meta": ["url", "titleUkey", "id"]
+}

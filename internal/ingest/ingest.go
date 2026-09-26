@@ -549,6 +549,16 @@ func (s *Store) MarkEvidence(ctx context.Context, docID string, start, end int, 
 }
 
 // IngestJSONL upserts a batch with a resumable cursor under the job key.
+// IngestJSONL stores a JSONL corpus under a resumable job cursor. It runs
+// through BatchIngester (one revision index per job), NOT per-record Put:
+// the engine has no business_key index, so each Put's revisions() query was
+// a full collection scan and the job was O(n²) — measured on the sibling
+// bulk path, 6.4k records added 207s, 107k did not finish in 10 minutes.
+// The BatchIngester contract already named this path; the wiring was simply
+// never migrated. Cursor granularity is now per chunk (512) instead of per
+// record: a resumed job re-processes up to 511 records, which the digest
+// check makes idempotent. Empty bodies are skipped (batch-path contract,
+// same as ingest-adapt), where the per-record path used to fail the job.
 func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[string]any, mapFn func(map[string]any) (source.Source, error)) (int, error) {
 	if jobKey == "" {
 		jobKey = "default"
@@ -556,17 +566,30 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 	fp := recordsFingerprint(records)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
 	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(records))
+	bi, berr := s.NewBatchIngester(ctx)
+	if berr != nil {
+		return 0, berr
+	}
+	const chunk = 512
 	done := 0
-	for i := start; i < len(records); i++ {
-		src, err := mapFn(records[i])
-		if err != nil {
-			return done, fmt.Errorf("record %d: %w", i, err)
+	for i := start; i < len(records); i += chunk {
+		end := i + chunk
+		if end > len(records) {
+			end = len(records)
 		}
-		if _, err := s.Put(ctx, src); err != nil {
-			return done, fmt.Errorf("record %d put: %w", i, err)
+		batch := make([]source.Source, 0, end-i)
+		for j := i; j < end; j++ {
+			src, err := mapFn(records[j])
+			if err != nil {
+				return done, fmt.Errorf("record %d: %w", j, err)
+			}
+			batch = append(batch, src)
 		}
-		done++
-		if err := s.saveJobCursor(ctx, cursorKey, fp, i+1); err != nil {
+		if _, err := bi.PutBatch(ctx, batch); err != nil {
+			return done, fmt.Errorf("record %d batch: %w", i, err)
+		}
+		done += end - i
+		if err := s.saveJobCursor(ctx, cursorKey, fp, end); err != nil {
 			return done, err
 		}
 	}
