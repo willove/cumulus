@@ -684,21 +684,25 @@ func srcLabel(s source.Source) string {
 }
 
 // deepSynthBonus is the DEEP-tier synthesis calibration bump, applied at
-// most once and never past 1.0. PROVENANCE: none — it is an operator-era
-// constant, and because it lands on fast.SkipBelow (0.35) it can move an
-// answer across the answered/skipped line by itself (mean 4, coverage 0.2
-// → 0.30 → 0.40). It is therefore declared here instead of buried: set
-// CLUS_DEEP_SYNTH_BONUS=0 to disable it pending a measured A/B, which is
-// the only thing that should set its value.
+// most once and never past 1.0. Default is now 0 — disabled. MEASURED
+// 2026-09-26 (paired single run, same frozen base, 13-query set,
+// scripts/bench/results-bonus0.json vs results-head.json): the 0.1 bonus
+// bought nothing measurable — total wall 778s → 710s, refusals 4 → 3 with
+// it OFF, i.e. no axis improved with it on. It also landed on
+// fast.SkipBelow (0.35) and could move an answer across the answered/
+// skipped line by itself (mean 4, coverage 0.2 → 0.30 → 0.40), which is
+// no way for an unprovenanced constant to behave. Set
+// CLUS_DEEP_SYNTH_BONUS=0.1 to restore the old behavior; a repeat run
+// (R-E6) would firm the margins up.
 func deepSynthBonus() float64 {
 	v := strings.TrimSpace(os.Getenv("CLUS_DEEP_SYNTH_BONUS"))
 	if v == "" {
-		return 0.1
+		return 0
 	}
 	if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
 		return f
 	}
-	return 0.1
+	return 0
 }
 
 // deepMetrics derives the DEEP answer's coverage, confidence and deterministic
@@ -994,22 +998,23 @@ func (e *Engine) budgetHit() bool {
 }
 
 // deepEvidenceRunes is the DEEP admission sampler's evidence budget in
-// runes: CLUS_MCS_DEEP_EVIDENCE when set and positive, else 5000. The
-// FAST tier keeps its whole-body budget (15000); DEEP scores every
-// admitted file, so its per-call input is where the token burn lived.
-// PROVENANCE: the 5000 default is a cost choice with a stated rationale,
-// NOT a measured one — no run has shown that halving the scorer's window
-// costs no recall, and on long bodies (this corpus averages ~10K runes)
-// it silently hides the answer's half of a document from the scorer.
-// Settle it with a two-arm bench (default vs CLUS_MCS_DEEP_EVIDENCE=15000)
-// before trusting it; until then it is a declared tradeoff, not a default.
+// runes: CLUS_MCS_DEEP_EVIDENCE when set and positive, else 15000 — now
+// the same whole-body budget the FAST tier uses. MEASURED 2026-09-26
+// (paired single run, same frozen base, 13-query set, scripts/bench/
+// results-ev15k.json vs results-head.json): 5000 cost MORE, not less —
+// total wall 778s → 493s (-37%), tokens 370K → 346K (-6%), honest
+// refusals 4 → 0. The mechanism: this corpus averages ~10K runes per
+// document, so a 5000-rune cap cut every document at its waist and hid
+// the answer's half from the scorer, and DEEP then paid for extra loops
+// to find what the cap had removed. Caveat on record: one paired run —
+// repeat before treating -37% as settled (R-E6).
 func deepEvidenceRunes() int {
 	if v := os.Getenv("CLUS_MCS_DEEP_EVIDENCE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 5000
+	return 15000
 }
 
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {

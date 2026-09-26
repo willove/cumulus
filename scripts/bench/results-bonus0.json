@@ -1,0 +1,313 @@
+{
+ "tag": "bonus0",
+ "env": [
+  "CLUS_DEEP_SYNTH_BONUS=0"
+ ],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "pet-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "4444b78f50ef",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 138088,
+     "server_ms": 137092,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.371,
+     "loops": 8,
+     "widened": 3,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1",
+      "src:中华人民共和国民法典.txt#2",
+      "src:中华人民共和国治安管理处罚法.txt#2",
+      "src:中华人民共和国生态环境法典.txt#1"
+     ],
+     "refs": 4,
+     "tokens": 62616
+    },
+    {
+     "pass": 1,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 63494,
+     "server_ms": 62399,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.518,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 40261
+    },
+    {
+     "pass": 1,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 65026,
+     "server_ms": 63953,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.515,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 39987
+    },
+    {
+     "pass": 1,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 79614,
+     "server_ms": 78681,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.499,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 41210
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "follow",
+   "pass": 1,
+   "session": "df7e732869fc",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 26824,
+     "server_ms": 25895,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.619,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 3847
+    },
+    {
+     "pass": 1,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 68155,
+     "server_ms": 67218,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.517,
+     "loops": 3,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1",
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 16646
+    },
+    {
+     "pass": 1,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 35153,
+     "server_ms": 34218,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.709,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 17955
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "71b3e1c401e0",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 61350,
+     "server_ms": 60399,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.245,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 36039
+    },
+    {
+     "pass": 1,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 32169,
+     "server_ms": 31246,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.664,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 14348
+    },
+    {
+     "pass": 1,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 27832,
+     "server_ms": 26904,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.719,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 11453
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "cold",
+   "pass": 1,
+   "session": "ce95c6129586",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 43412,
+     "server_ms": 42490,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.45,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国工业产品生产许可证管理条例.txt#1",
+      "src:优化营商环境条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 32793
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "cold",
+   "pass": 1,
+   "session": "1e88dcfbd468",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 29810,
+     "server_ms": 28884,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": true,
+     "docs": [],
+     "refs": 0,
+     "tokens": 32150
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "cold",
+   "pass": 1,
+   "session": "67f8c3c3cb4e",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 39667,
+     "server_ms": 38732,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.592,
+     "loops": 5,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1",
+      "src:改革开放四十年大事记.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 17056
+    }
+   ]
+  }
+ ],
+ "git_rev": "c490e00",
+ "reset": true,
+ "start_learning": {
+  "namespace": "chinalaw",
+  "docs": {
+   "chinalaw:clus_affinity": 0,
+   "chinalaw:clus_cites": 0,
+   "chinalaw:clus_clusters": 0,
+   "chinalaw:clus_conflicts": 0,
+   "chinalaw:clus_evidence": 0,
+   "chinalaw:clus_weak_edges": 0,
+   "clus_evidence": 0
+  },
+  "kv_keys": 0,
+  "total": 0,
+  "clean": true
+ },
+ "at": "2026-09-27 01:56:15"
+}

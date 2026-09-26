@@ -338,21 +338,26 @@ func TestIncompleteCoverageLeadsWithTheInsufficiency(t *testing.T) {
 // The DEEP admission evidence budget: default 5K runes, env override
 // honoured, garbage ignored (keeps the default), non-positive ignored.
 func TestDeepEvidenceRunes(t *testing.T) {
+	// The default is 15000 (the FAST tier's whole-body budget), set by the
+	// 2026-09-26 paired measurement: halving it to 5000 cut every ~10K-rune
+	// document at its waist and cost MORE (778s→493s, refusals 4→0 when
+	// raised). See deepEvidenceRunes' comment; CLUS_MCS_DEEP_EVIDENCE=5000
+	// restores the old behavior.
 	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "")
-	if got := deepEvidenceRunes(); got != 5000 {
-		t.Fatalf("default = %d, want 5000", got)
+	if got := deepEvidenceRunes(); got != 15000 {
+		t.Fatalf("default = %d, want 15000", got)
 	}
 	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "8000")
 	if got := deepEvidenceRunes(); got != 8000 {
 		t.Fatalf("override = %d, want 8000", got)
 	}
 	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "not-a-number")
-	if got := deepEvidenceRunes(); got != 5000 {
-		t.Fatalf("garbage = %d, want default 5000", got)
+	if got := deepEvidenceRunes(); got != 15000 {
+		t.Fatalf("garbage = %d, want default 15000", got)
 	}
 	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "-3")
-	if got := deepEvidenceRunes(); got != 5000 {
-		t.Fatalf("negative = %d, want default 5000", got)
+	if got := deepEvidenceRunes(); got != 15000 {
+		t.Fatalf("negative = %d, want default 15000", got)
 	}
 }
 

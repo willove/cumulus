@@ -1,0 +1,314 @@
+{
+ "tag": "ev15k",
+ "env": [
+  "CLUS_MCS_DEEP_EVIDENCE=15000"
+ ],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "pet-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "71b84461d3ae",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 24808,
+     "server_ms": 23819,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.492,
+     "loops": 4,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2",
+      "src:中华人民共和国行政处罚法.txt#2"
+     ],
+     "refs": 2,
+     "tokens": 34331
+    },
+    {
+     "pass": 1,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 43753,
+     "server_ms": 42828,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.642,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 31891
+    },
+    {
+     "pass": 1,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 24558,
+     "server_ms": 23632,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.515,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 22685
+    },
+    {
+     "pass": 1,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 43256,
+     "server_ms": 42331,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.499,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 27972
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "follow",
+   "pass": 1,
+   "session": "f781d7d88d27",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 24246,
+     "server_ms": 23315,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.619,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 4034
+    },
+    {
+     "pass": 1,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 68795,
+     "server_ms": 67848,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.592,
+     "loops": 3,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1",
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 20693
+    },
+    {
+     "pass": 1,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 25638,
+     "server_ms": 24704,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.705,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 18250
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "2b9b9ddf162b",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 57172,
+     "server_ms": 56242,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.436,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2",
+      "src:中华人民共和国道路交通安全法实施条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 52178
+    },
+    {
+     "pass": 1,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 52456,
+     "server_ms": 51526,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.764,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 19671
+    },
+    {
+     "pass": 1,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 31395,
+     "server_ms": 30461,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.55,
+     "loops": 3,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2",
+      "src:中华人民共和国道路交通安全法实施条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 29262
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "cold",
+   "pass": 1,
+   "session": "ce5ca5df02c2",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 34266,
+     "server_ms": 33332,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.921,
+     "loops": 5,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国行政许可法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 37320
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "cold",
+   "pass": 1,
+   "session": "22e2951df259",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 29488,
+     "server_ms": 28542,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.8,
+     "loops": 5,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 32346
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "cold",
+   "pass": 1,
+   "session": "a07542fce369",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 33918,
+     "server_ms": 32979,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.758,
+     "loops": 3,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1",
+      "src:全面建成小康社会大事记.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 16121
+    }
+   ]
+  }
+ ],
+ "git_rev": "c490e00",
+ "reset": true,
+ "start_learning": {
+  "namespace": "chinalaw",
+  "docs": {
+   "chinalaw:clus_affinity": 0,
+   "chinalaw:clus_cites": 0,
+   "chinalaw:clus_clusters": 0,
+   "chinalaw:clus_conflicts": 0,
+   "chinalaw:clus_evidence": 0,
+   "chinalaw:clus_weak_edges": 0,
+   "clus_evidence": 0
+  },
+  "kv_keys": 0,
+  "total": 0,
+  "clean": true
+ },
+ "at": "2026-09-27 02:04:29"
+}
