@@ -334,3 +334,67 @@ func TestIncompleteCoverageLeadsWithTheInsufficiency(t *testing.T) {
 		t.Fatalf("空 missing 要有兜底文案:\n%s", none)
 	}
 }
+
+// The DEEP admission evidence budget: default 5K runes, env override
+// honoured, garbage ignored (keeps the default), non-positive ignored.
+func TestDeepEvidenceRunes(t *testing.T) {
+	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "")
+	if got := deepEvidenceRunes(); got != 5000 {
+		t.Fatalf("default = %d, want 5000", got)
+	}
+	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "8000")
+	if got := deepEvidenceRunes(); got != 8000 {
+		t.Fatalf("override = %d, want 8000", got)
+	}
+	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "not-a-number")
+	if got := deepEvidenceRunes(); got != 5000 {
+		t.Fatalf("garbage = %d, want default 5000", got)
+	}
+	t.Setenv("CLUS_MCS_DEEP_EVIDENCE", "-3")
+	if got := deepEvidenceRunes(); got != 5000 {
+		t.Fatalf("negative = %d, want default 5000", got)
+	}
+}
+
+// The zero-hit admission pre-filter (CLUS_DEEP_SKIP_ZERO_HIT): a file
+// sharing no token with the query never reaches the sampler. Off by
+// default; on, only the lexically-touching file is sampled.
+func TestZeroHitPreFilterSkipsScorerCalls(t *testing.T) {
+	ctx := context.Background()
+	fe := fast.New(mcs.KeywordScorer{Keywords: []string{"连接池"}})
+	e := New(kb.New(fe, cluster.NewMemory(), cluster.Local{N: 64}), NewMemoryConflict())
+	var sampled []string
+	e.OnFile = func(key string, best float64, windows int) { sampled = append(sampled, key) }
+	hit := source.New("命中", "md", "", "a", "zh",
+		"连接池最大 128，超时 30 秒。"+strings.Repeat("填充填充填充。\n", 40), nil)
+	miss := source.New("零命中", "md", "", "b", "zh",
+		strings.Repeat("无关内容无关内容。\n", 40), nil)
+	srcs := []source.Source{hit, miss}
+
+	// The zero-hit file reaches the loop only through the WIDEN pass
+	// (cascade admission excludes it by construction), so the filter's
+	// protection zone is observed there: a query whose second fact
+	// ("端口") is missing from the whole corpus forces a widen.
+	widened := []source.Source{miss}
+	e.Widen = func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
+		return widened, nil
+	}
+	e.WidenBudget = 3
+
+	t.Setenv("CLUS_DEEP_SKIP_ZERO_HIT", "1")
+	if _, _, _, _, _, _, _, _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sampled) != 1 || sampled[0] != "a" {
+		t.Fatalf("skip-on sampled %v, want only the admitted hit file (key a)", sampled)
+	}
+
+	sampled = nil
+	t.Setenv("CLUS_DEEP_SKIP_ZERO_HIT", "")
+	if _, _, _, _, _, _, _, _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(sampled) != 2 {
+		t.Fatalf("skip-off sampled %v, want the widened file too (keys a,b)", sampled)
+	}
+}

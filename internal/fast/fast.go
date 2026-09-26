@@ -9,9 +9,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/prior"
@@ -37,7 +40,13 @@ type Answer struct {
 	Mode       string       `json:"mode"`
 	LLMCalls   int          `json:"llm_calls"`
 	Skipped    bool         `json:"skipped"`
-	Refused    bool         `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
+	// Bridged marks an answer whose evidence came from the session-context
+	// fallback (the question's wording never appears in the statute's
+	// windows, but the thread's earlier questions do). Escalating on a
+	// bridged answer buys nothing — DEEP cannot find wording that is not
+	// there — so the caller lets it stand at FAST.
+	Bridged bool `json:"bridged"`
+	Refused bool `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
 }
 
 // Analysis is the low-cost query analysis (fast_analyze contract): intent plus
@@ -90,11 +99,45 @@ type Engine struct {
 	// PriorHist feeds the prior's history arm from successful evidence
 	// (clus_evidence). nil = history arm silent.
 	PriorHist *prior.History
+	// Usage carries query-conditioned document weights (the token×doc
+	// affinity ledger + the session evidence stack), set per request before
+	// Search. It fuses DIRECTLY into the cascade ranking: routing it through
+	// the prior's history arm diluted it twice (arm weight 0.15, then the
+	// 0.5 rank fusion) to ~4% of the final score — a whisper no candidate
+	// move could hear. Capped by design so no single weight can dominate.
+	Usage map[string]float64
+	// SampleContext is session context (the thread's recent user questions)
+	// used ONLY as a sampling fallback: when the raw query keeps no window
+	// in the chosen document — the vocabulary-gap case ("养狗叫得太吵"
+	// against a statute that says 饲养动物 — the document is right but the
+	// wording never appears in its windows. Binary, not additive: the
+	// primary pass working means the context never fires, so the common
+	// path is untouched.
+	SampleContext string
 	// Verbose, when set, receives per-step diagnostics (serve -verbose /
 	// CLUS_VERBOSE). nil → silent. It exists so a degraded step (a failed
 	// expander, a refused synthesis) is visible instead of looking like a
 	// clean miss.
 	Verbose func(format string, a ...any)
+	// Stages, when set, receives the wall time of each Search stage
+	// ("analyze", "cascade", "sample", "synth") as it completes. Pure
+	// observability — nil (the default, and every gate) behaves exactly as
+	// before. It exists so the "where did the seconds go" question is
+	// answered by data instead of anecdotes: the whole compression debate
+	// (does a smaller synthesis input even pay?) is unanswerable without a
+	// per-stage split. Wired to the monitor tracker by serve.
+	Stages func(stage string, d time.Duration)
+	// SynthDelta, when set, receives the synthesis answer delta by delta so
+	// the HTTP face can stream it to the browser (the user watches the
+	// answer being written instead of waiting for the whole generation).
+	// nil (the default, and every gate) uses the non-streaming Synthesizer.
+	SynthDelta func(chunk string)
+}
+
+// StreamSynthesizer is the optional streaming half of Synthesizer: the same
+// prompt and parse contract, delivered incrementally.
+type StreamSynthesizer interface {
+	SynthesizeStream(ctx context.Context, query string, samples []mcs.Sample, onDelta func(string)) (string, error)
 }
 
 func New(scorer mcs.Scorer) *Engine {
@@ -114,7 +157,14 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	if an == nil {
 		an = RuleAnalyzer{}
 	}
+	stage := func(name string, t0 time.Time) {
+		if e.Stages != nil {
+			e.Stages(name, time.Since(t0))
+		}
+	}
+	t0 := time.Now()
 	a, err := an.Analyze(ctx, query)
+	stage("analyze", t0)
 	if err != nil {
 		return Answer{}, err
 	}
@@ -132,6 +182,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	// 次数 ≤2") is asserted against reality instead of a hardcoded 2 — the
 	// expander is a third call and used to be invisible in the accounting.
 	calls := 1 // the analyze call above
+	t1 := time.Now()
 	ranked := e.rankFields(orderedKeys(a.Primary), sources)
 	if len(ranked) == 0 {
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
@@ -157,6 +208,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			e.Verbose("expander failed, cascade stays at primary/fallback: %v", xerr)
 		}
 	}
+	stage("cascade", t1)
 	if len(ranked) == 0 {
 		return Answer{Query: query, Mode: ModeFAST, LLMCalls: calls, Skipped: true}, nil
 	}
@@ -164,13 +216,19 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		return Answer{}, ctx.Err()
 	}
 	best := ranked[0].src
+	t2 := time.Now()
 	samples, err := e.Sampler.SampleBody(ctx, query, best.Body)
+	stage("sample", t2)
 	if err != nil {
 		return Answer{}, err
 	}
 	var kept []mcs.Sample
 	total := 0
+	primaryBest := 0.0
 	for _, sm := range samples {
+		if sm.Score > primaryBest {
+			primaryBest = sm.Score
+		}
 		if sm.Score < 4 {
 			continue
 		}
@@ -179,6 +237,51 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		}
 		kept = append(kept, sm)
 		total += len(sm.Content)
+	}
+	// 词汇鸿沟救援：主查询在非锚点文档只采到弱窗口（<7 分）或采空时，对会话
+	// 权重前几的文档（本线程引用过的）逐一用「本问 + 会话近几问」重采，取最优。
+	// 两道闸：① 最优窗口必须 ≥ bridgeFloorScore——会话里没有对的文档时（锚点
+	// 带偏到错误法族），宁可交给正常检索/拒答，也不从错文档弱答；② 主查询在
+	// 别的文档采到强窗口时不救（真换了话题或词面确实命中更好的文档）。
+	sampleQuery := query
+	bridged := false
+	if strings.TrimSpace(e.SampleContext) != "" && (len(kept) == 0 || primaryBest < bridgeMinScore) {
+		expanded := query + " " + e.SampleContext
+		var bDoc source.Source
+		var bKept []mcs.Sample
+		bBest := 0.0
+		for _, cand := range topUsageDocs(e.Usage, sources, bridgeCandidates) {
+			s2, err2 := e.Sampler.SampleBody(ctx, expanded, cand.Body)
+			if err2 != nil {
+				continue
+			}
+			// ckept must not alias kept's backing array: the primary windows
+			// stay live when the bridge fails below the floor, and a winning
+			// candidate's windows must survive the next candidate's scan.
+			var ckept []mcs.Sample
+			ctotal, cBest := 0, 0.0
+			for _, sm := range s2 {
+				if sm.Score > cBest {
+					cBest = sm.Score
+				}
+				if sm.Score < 4 || ctotal >= e.MaxChars {
+					continue
+				}
+				ckept = append(ckept, sm)
+				ctotal += len(sm.Content)
+			}
+			if cBest > bBest && len(ckept) > 0 {
+				bDoc, bKept, bBest = cand, ckept, cBest
+			}
+		}
+		if bBest >= bridgeFloorScore {
+			best, kept, total = bDoc, bKept, 0
+			for _, sm := range kept {
+				total += len(sm.Content)
+			}
+			sampleQuery = expanded
+			bridged = true
+		}
 	}
 	if len(kept) == 0 {
 		// No synthesis happened on this path, so calls must not be incremented:
@@ -189,14 +292,16 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			Skipped: true, Summary: "证据不足，未合成",
 		}, nil
 	}
-	cov := mcs.Coverage(query, kept)
+	cov := mcs.Coverage(sampleQuery, kept)
 	mean := 0.0
 	for _, sm := range kept {
 		mean += sm.Score
 	}
 	mean /= float64(len(kept))
 	conf := mcs.Confidence(mean, cov)
+	t3 := time.Now()
 	summary := e.render(ctx, query, best, kept)
+	stage("synth", t3)
 	return Answer{
 		Query:      query,
 		Mode:       ModeFAST,
@@ -206,9 +311,88 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		Coverage:   cov,
 		Confidence: conf,
 		Summary:    summary,
-		Skipped:    conf < SkipBelow,
-		Refused:    RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
+		// A bridged answer stands even under the confidence floor: the
+		// session's own document carried it, and escalating cannot find
+		// wording the statute does not contain.
+		Skipped: conf < SkipBelow && !bridged,
+		Bridged: bridged,
+		Refused: RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
 	}, nil
+}
+
+// usageShare is the usage arm's fusion share. 0.12 by default (down from the
+// original 0.20): the 3-pass A/B showed even a CORRECT usage boost stretches
+// the DEEP crawl by reordering candidates, so the arm is a tiebreaker, not a
+// re-ranker. CLUS_USAGE_SHARE tunes it.
+var usageShare = func() float64 { return envFloat("CLUS_USAGE_SHARE", 0.12) }
+
+// bridgeMinScore is the primary-pass score under which the session bridge may
+// take over: a weaker lexical hit than this in a non-anchor document is noise,
+// not a topic change.
+const bridgeMinScore = 7
+
+// bridgeFloorScore is the score a bridged window must reach for the bridge to
+// count. 4 (= the admission floor) is the default: any window that passes
+// admission may bridge. Raising it filters wrong-anchor bridges (the session
+// drifted to the wrong statute family) at the cost of more honest refusals —
+// measured by the bench sweep (CLUS_BRIDGE_FLOOR), not guessed here.
+var bridgeFloorScore = envFloat("CLUS_BRIDGE_FLOOR", 4)
+
+// bridgeCandidates is how many session-weighted documents the bridge tries
+// before settling for the best (sampling is in-memory scoring — the cost is
+// milliseconds; only the synthesis is an LLM call).
+const bridgeCandidates = 3
+
+// envFloat reads a positive float env override with a default.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
+}
+
+// topUsageDocs returns the highest-weighted documents (weight descending),
+// capped at n. Empty when nothing carries session/ledger weight.
+func topUsageDocs(usage map[string]float64, sources []source.Source, n int) []source.Source {
+	if len(usage) == 0 || n <= 0 {
+		return nil
+	}
+	type ws struct {
+		s source.Source
+		w float64
+	}
+	all := make([]ws, 0, len(usage))
+	for _, s := range sources {
+		if w, ok := usage[s.ID]; ok && w > 0 {
+			all = append(all, ws{s, w})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].w > all[j].w })
+	if len(all) > n {
+		all = all[:n]
+	}
+	out := make([]source.Source, 0, len(all))
+	for _, e := range all {
+		out = append(out, e.s)
+	}
+	return out
+}
+
+// maxUsageDoc returns the highest usage-weighted document id and its weight
+// (the session anchor when one exists), or "" when nothing carries weight.
+func maxUsageDoc(usage map[string]float64, sources []source.Source) (string, float64) {
+	if len(usage) == 0 {
+		return "", 0
+	}
+	best, bw := "", 0.0
+	for _, s := range sources {
+		if w, ok := usage[s.ID]; ok && w > bw {
+			best, bw = s.ID, w
+		}
+	}
+	return best, bw
 }
 
 // SkipBelow is the FAST confidence floor below which an answer is marked
@@ -297,6 +481,16 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 // 醉酒问题 LLM 拒答→模板代答→仍落簇).
 func (e *Engine) render(ctx context.Context, query string, src source.Source, samples []mcs.Sample) string {
 	if e.Synth != nil {
+		if e.SynthDelta != nil {
+			if ss, ok := e.Synth.(StreamSynthesizer); ok {
+				if s, err := ss.SynthesizeStream(ctx, query, samples, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+					return s
+				}
+				// The stream failed mid-way (deltas may already be on the
+				// caller's screen): fall through to the non-streaming path
+				// and let the caller reconcile the partial text.
+			}
+		}
 		if s, err := e.Synth.Synthesize(ctx, query, samples); err == nil && strings.TrimSpace(s) != "" {
 			return s
 		}
@@ -346,18 +540,41 @@ type RuleAnalyzer struct{}
 
 var docVerbRe = regexp.MustCompile(`^(请|帮我|给我)?(总结|概括|通读|翻译)`)
 var docScopeRe = regexp.MustCompile(`(全文|整篇|整份|这份|文档|一下|the whole)`)
+var chatGreetWords = []string{"你好", "您好", "在吗", "hello", "hi", "thanks", "谢谢", "再见", "拜拜"}
 
-func (RuleAnalyzer) Analyze(_ context.Context, query string) (Analysis, error) {
+// LooksLikeChat is the deterministic chat gate: a SHORT greeting-shaped
+// query. It backs the chat verdict of the production analyzer — see
+// llm.AigateAnalyzer.Analyze, which re-verifies with the thinking pass
+// when the fast no-think classify says chat but the query is not greeting
+// shaped (a real question misread as chat never reaches retrieval at all,
+// and costs the user a "（闲聊，不检索）" answer).
+func LooksLikeChat(query string) bool {
 	q := strings.TrimSpace(strings.ToLower(query))
-	if q != "" && len([]rune(q)) <= 8 {
-		for _, w := range []string{"你好", "您好", "在吗", "hello", "hi", "thanks", "谢谢", "再见", "拜拜"} {
-			if strings.Contains(q, w) {
-				return Analysis{Intent: IntentChat}, nil
-			}
+	if q == "" || len([]rune(q)) > 8 {
+		return false
+	}
+	for _, w := range chatGreetWords {
+		if strings.Contains(q, w) {
+			return true
 		}
 	}
-	if len([]rune(strings.TrimSpace(query))) <= 16 &&
-		docVerbRe.MatchString(q) && docScopeRe.MatchString(q) {
+	return false
+}
+
+// LooksLikeDocSummary is the deterministic doc-summary gate: a short
+// imperative asked against a whole-document scope. Same cross-check role
+// as LooksLikeChat for the doc_summary verdict.
+func LooksLikeDocSummary(query string) bool {
+	q := strings.TrimSpace(strings.ToLower(query))
+	return len([]rune(strings.TrimSpace(query))) <= 16 &&
+		docVerbRe.MatchString(q) && docScopeRe.MatchString(q)
+}
+
+func (RuleAnalyzer) Analyze(_ context.Context, query string) (Analysis, error) {
+	if LooksLikeChat(query) {
+		return Analysis{Intent: IntentChat}, nil
+	}
+	if LooksLikeDocSummary(query) {
 		return Analysis{Intent: IntentDocSummary}, nil
 	}
 	primary := map[string]float64{}
@@ -433,7 +650,12 @@ func MatchFilename(query string, sources []source.Source) (Answer, bool) {
 // honest skip.
 func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 	plain := rankSources(fields, sources)
-	if !e.UsePrior || len(fields) == 0 || len(plain) == 0 {
+	if len(fields) == 0 || len(plain) == 0 {
+		return plain
+	}
+	// Usage weights fuse whether or not the prior runs (CLUS_PRIOR off must
+	// not silence them); only the five-signal prior arm is opt-in.
+	if !e.UsePrior && len(e.Usage) == 0 {
 		return plain
 	}
 	// FUSE, do not replace. prior.Rank normalises its top file to 1.0 and drops
@@ -441,8 +663,10 @@ func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 	// strong cascade hit the prior ranked low. Normalise the cascade's own
 	// scores and combine, so the two signals must agree to move a file.
 	priorScore := make(map[string]float64)
-	for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
-		priorScore[f.SourceID] = f.Score
+	if e.UsePrior {
+		for _, f := range prior.Rank(fields, sources, e.PriorHist, 0).Files {
+			priorScore[f.SourceID] = f.Score
+		}
 	}
 	maxCascade := 0.0
 	for _, sc := range plain {
@@ -457,7 +681,15 @@ func (e *Engine) rankFields(fields []string, sources []source.Source) []scored {
 		if maxCascade > 0 {
 			norm = out[i].score / maxCascade
 		}
-		out[i].score = 0.5*norm + 0.5*priorScore[out[i].src.ID]
+		// Three fused arms: the cascade's own score (normalized), the
+		// five-signal prior, and the query-conditioned usage weights. The
+		// 0.20 usage share is a nudge with a ceiling — it reshuffles near
+		// ties and lifts remembered documents, it cannot outvote lexical.
+		usage := 0.0
+		if len(e.Usage) > 0 {
+			usage = prior.Saturate(e.Usage[out[i].src.ID])
+		}
+		out[i].score = 0.45*norm + 0.35*priorScore[out[i].src.ID] + usageShare()*usage
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].score > out[j].score })
 	return out
@@ -550,9 +782,57 @@ func synthesize(query string, src source.Source, samples []mcs.Sample) string {
 	b.WriteString("\n")
 	for i, sm := range samples {
 		span := locate(src, sm.Start, sm.End)
-		fmt.Fprintf(&b, "[%d] (%s %s [%d,%d)) %s\n", i+1, span, sm.Source, sm.Start, sm.End, trim(sm.Content, 240))
+		fmt.Fprintf(&b, "[%d] (%s %s [%d,%d)) %s\n", i+1, span, sm.Source, sm.Start, sm.End, trimAround(sm.Content, query, 240))
 	}
 	return b.String()
+}
+
+// trimAround renders the most query-relevant n-rune window of s. The
+// small-file full-body path makes one sample span the whole document, so
+// a fixed head trim (trim) would render the file's opening boilerplate
+// and drop the answer wherever it actually sits — the offline gate's
+// "FAST finds the known answer" assertion caught exactly that. The
+// window is chosen deterministically by query-token hit count (ties go
+// to the earliest window), and ellipses mark what was cut. The LLM
+// synthesizer receives the untruncated sample; this only fixes how the
+// deterministic template presents it.
+func trimAround(s, query string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	toks := mcs.Fields(query)
+	if len(toks) == 0 {
+		return trim(s, n)
+	}
+	step := n / 4
+	if step < 1 {
+		step = 1
+	}
+	best, bestScore := 0, -1
+	for start := 0; start+n <= len(r); start += step {
+		score := 0
+		win := string(r[start : start+n])
+		for _, tk := range toks {
+			if strings.Contains(win, tk) {
+				score++
+			}
+		}
+		if score > bestScore {
+			best, bestScore = start, score
+			if score == len(toks) {
+				break
+			}
+		}
+	}
+	out := string(r[best : best+n])
+	if best > 0 {
+		out = "…" + out
+	}
+	if best+n < len(r) {
+		out += "…"
+	}
+	return out
 }
 
 func locate(src source.Source, start, end int) string {

@@ -47,6 +47,12 @@ type Query struct {
 	// material for tuning the escalation/budget knobs — without it, tuning
 	// runs on anecdotes (the "96s for a guaranteed refusal" kind).
 	StopReason string `json:"stop_reason,omitempty"`
+	// Stages is the per-stage wall-time split (microseconds): analyze,
+	// cascade, sample, synth on the FAST path; deep_sample / deep_synth on
+	// the DEEP loop. Telemetry only — the "where did the seconds go"
+	// question (and every compression-worth-it debate) is unanswerable
+	// without it. Empty when the stage hooks were not wired (gates).
+	Stages map[string]int64 `json:"stages,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
 

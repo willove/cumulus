@@ -72,6 +72,13 @@ func TestUtilityStopDisabledWalksAllCandidates(t *testing.T) {
 			strings.Repeat("无关内容。", 60), nil))
 	}
 
+	// Budget-wide-enough that the loop is bounded only by the candidate
+	// list: the assertion is about the utility-stop path, not about the
+	// loop budgets (whose defaults this test must not be coupled to).
+	e.MaxLoops = len(srcs)
+	e.CorrectBudget = len(srcs)
+	e.WidenBudget = len(srcs)
+
 	_, _, _, _, sc, _, _, reason, err := e.runDeep(ctx, "连接池最大连接数是多少", srcs, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,23 +29,36 @@ import (
 const EscalateBelow = 0.35
 
 // MaxLoops bounds the DEEP tool loop (Sirchmunk max_loops analogue).
-const MaxLoops = 6
+// 4, down from 6: measured answerable queries converge on the utility stop
+// long before the cap (a cross-law criminal query finished in 2 loops), so
+// the cap only ever bound the grind — the unreachable queries that spent
+// 130s / 76K tokens re-scoring files earlier rounds had cleared. The cut
+// halves that class without touching the converging ones. Overridable per
+// deployment via CLUS_DEEP_LOOPS.
+const MaxLoops = 4
 
 // WidenBudget is the widening pass's own file allowance, independent of
 // MaxLoops (the initial admission must not starve exploration). Exported
 // because it is part of the observable DEEP cost model — the eval scoreboard
 // binds it into the config fingerprint so two runs with different budgets are
-// not reported as the same configuration.
-const WidenBudget = 4
+// not reported as the same configuration. 3, down from 4: same measurement
+// as MaxLoops (answerable queries converge on the utility stop; the cap only
+// bound the unreachable-query grind). CLUS_DEEP_WIDEN overrides.
+const WidenBudget = 3
 
 // CorrectBudget is the self-correction file allowance (D4): admission
 // usually spends MaxLoops on the first wave; missing-fact re-sampling must
 // not share that clock or the weakest-requirement pass never runs. Exported
-// for the same reason as WidenBudget.
-const CorrectBudget = 3
+// for the same reason as WidenBudget. 2, down from 3 — same measurement as
+// MaxLoops; CLUS_DEEP_CORRECT overrides.
+const CorrectBudget = 2
 
 // maxKeepWindows is the synthesis budget: only the top-scored windows are
-// handed to the synthesizer / returned in the answer.
+// handed to the synthesizer / returned in the answer. 8: measured DEEP
+// answers carry 2-4 scored windows in practice, so the cap binds only on
+// multi-file runs — where cutting it trades evidence completeness for a
+// fraction of a second of prefill on a now-thinking-disabled synthesis call.
+// CLUS_DEEP_KEEP_WINDOWS overrides per deployment.
 const maxKeepWindows = 8
 
 // Mode labels.
@@ -188,6 +202,16 @@ type Engine struct {
 	// Synth renders DEEP summaries (synthesize_roi). nil = deterministic
 	// template; production wires llm.AigateSynthesizer.
 	Synth fast.Synthesizer
+	// SampleContext is the session fallback for the sampler (see
+	// fast.Engine.SampleContext): when the raw query keeps no window in an
+	// admitted document, retry once with the thread's recent questions
+	// folded in. Binary — fires only when the primary pass found nothing.
+	SampleContext string
+	// DocWeights is the per-request usage-weight snapshot (ledger ∪ session
+	// stack). The loop reads it for the session-bridge early exit: an
+	// anchored document (≥0.6) yielding bridged evidence ends the crawl —
+	// the thread's document answered.
+	DocWeights map[string]float64
 	// History + HistoryRewriter fold follow-up context into a standalone
 	// query before retrieval (history_rewrite contract; nil = raw query).
 	History         []string
@@ -212,6 +236,25 @@ type Engine struct {
 	// scoring each admitted file. Judge tokens never enter this budget.
 	TokenBudget int64
 	TokensUsed  func() int64
+	// Stages, when set, receives DEEP-loop stage wall times
+	// ("deep_sample" accumulated across admission/widen/self-correct
+	// SampleBody calls, "deep_synth" per synthesis). Pure observability —
+	// nil (the default, and every gate) changes nothing. See
+	// fast.Engine.Stages for why the split exists.
+	Stages func(stage string, d time.Duration)
+	// SynthDelta streams the synthesis answer delta by delta (see
+	// fast.Engine.SynthDelta); nil = non-streaming synthesis.
+	SynthDelta func(chunk string)
+	// Loop budgets (defaults MaxLoops/WidenBudget/CorrectBudget; serve
+	// overrides from CLUS_DEEP_LOOPS/CLUS_DEEP_WIDEN/CLUS_DEEP_CORRECT).
+	// Measured DEEP queries ran ~14 rounds (6 admission + 4 widen + 3
+	// correct), and rounds past the useful ones burn scorer calls on files
+	// earlier rounds already cleared. Fields, not constants, so the cut is
+	// per-deployment configurable and the e2e gates still exercise the
+	// constants via New().
+	MaxLoops      int
+	WidenBudget   int
+	CorrectBudget int
 	// BudgetHit reports the last Ask stopped because TokenBudget was spent.
 	BudgetHit bool
 	// Abstain is an optional zero-LLM failure head (ir-rag 3.1 / RCS idea).
@@ -264,7 +307,34 @@ func (e *Engine) effectiveQuery(ctx context.Context, query string) string {
 }
 
 func New(k *kb.Engine, conflicts ConflictStore) *Engine {
-	return &Engine{KB: k, Conflicts: conflicts, EscalateBelow: EscalateBelow}
+	return &Engine{
+		KB: k, Conflicts: conflicts, EscalateBelow: EscalateBelow,
+		MaxLoops: MaxLoops, WidenBudget: WidenBudget, CorrectBudget: CorrectBudget,
+	}
+}
+
+// envFloat reads a positive float env override with a default.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
+}
+
+// bridgeFloorScore mirrors fast.bridgeFloorScore (CLUS_BRIDGE_FLOOR, default
+// 4): bridged evidence weaker than this does not end the loop.
+var bridgeFloorScore = envFloat("CLUS_BRIDGE_FLOOR", 4)
+
+// nonePass reports whether no sample cleared the admission floor.
+func nonePass(samples []mcs.Sample) bool {
+	for _, sm := range samples {
+		if sm.Score >= 4 {
+			return false
+		}
+	}
+	return true
 }
 
 // rankAdmission orders sources before exploration (nil → untouched order).
@@ -345,10 +415,24 @@ func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source)
 		res.LatencyMS = d.Milliseconds()
 		res.LatencyUS = d.Microseconds()
 	}()
+	return e.askEffective(ctx, e.effectiveQuery(ctx, query), sources)
+}
+
+// askEffective is the Ask body on a query already folded out of session
+// history. AskLazy rewrites once up front — the narrow-reuse attempt needs
+// the rewritten query too — so its fall-through to the full path must not
+// rewrite again: every rewrite is a real LLM call, and rewriting a rewrite
+// pays twice for a twice-distorted question.
+func (e *Engine) askEffective(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
+	started := time.Now()
+	defer func() {
+		d := time.Since(started)
+		res.LatencyMS = d.Milliseconds()
+		res.LatencyUS = d.Microseconds()
+	}()
 	if e.Sources == nil {
 		e.Sources = sources
 	}
-	query = e.effectiveQuery(ctx, query)
 	fx := facts.Build(query)
 	thr := e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
 
@@ -403,7 +487,8 @@ func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (
 	if e.Sources == nil {
 		e.Sources = all
 	}
-	return e.Ask(ctx, query, all)
+	// query was folded once at the top of AskLazy; askEffective takes it as-is.
+	return e.askEffective(ctx, query, all)
 }
 
 // afterBase is the shared post-reuse path: citations, conflicts, cover, the
@@ -447,6 +532,12 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	need := base.Answer.Skipped || base.Answer.Refused || base.Answer.Confidence < thr || len(base.Answer.Samples) == 0 ||
 		len(res.Conflicts) > 0 ||
 		(!res.Cover.Complete && (!base.Reused || len(fx) > 1))
+	// Session-bridged FAST answers stand: the evidence came from the thread's
+	// own document via the sampler fallback, and no amount of DEEP crawling
+	// finds wording the statute does not contain.
+	if base.Answer.Bridged {
+		need = false
+	}
 	// Zero-LLM abstention head (ir-rag 3.1): structural features only; nil
 	// head keeps the historical escalate/refuse gates unchanged.
 	if e.Abstain != nil {
@@ -478,7 +569,13 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 				res.Answer.Refused = true
 				res.Answer.Skipped = true
 				if strings.TrimSpace(res.Answer.Summary) == "" {
-					res.Answer.Summary = "证据不足，暂不作答"
+					// Early abstain is the cheapest honest "no", so its
+					// message has to carry the same diagnosis the DEEP
+					// bare refusal now carries (live case: "什么叫帮信罪"
+					// — 刑法 not in the corpus): what is missing and the
+					// likely shape of the gap, so the user can act on it.
+					res.Answer.Summary = "证据不足，暂不作答。语料中未找到与「" + query +
+						"」直接相关的原文依据；该问题所需的法规可能未被本库收录（例如罪名定义多见于《刑法》），补充相关法规或文档后再问。"
 				}
 				res.AbstainEarly = true
 				res.Citations.Legend = legend(res.Citations, false)
@@ -688,8 +785,12 @@ func topKeepsWith(kept []mcs.Sample, sources []source.Source) []mcs.Sample {
 		live = resyncContent(live, sources)
 	}
 	sort.Slice(live, func(i, j int) bool { return live[i].Score > live[j].Score })
-	if len(live) > maxKeepWindows {
-		live = live[:maxKeepWindows]
+	keep := maxKeepWindows
+	if n, err := strconv.Atoi(os.Getenv("CLUS_DEEP_KEEP_WINDOWS")); err == nil && n > 0 {
+		keep = n
+	}
+	if len(live) > keep {
+		live = live[:keep]
 	}
 	return live
 }
@@ -874,7 +975,38 @@ func (e *Engine) budgetHit() bool {
 	return true
 }
 
+// deepEvidenceRunes is the DEEP admission sampler's evidence budget in
+// runes: CLUS_MCS_DEEP_EVIDENCE when set and positive, else 5000. The
+// FAST tier keeps its whole-body budget (15000); DEEP scores every
+// admitted file, so its per-call input is where the token burn lived.
+func deepEvidenceRunes() int {
+	if v := os.Getenv("CLUS_MCS_DEEP_EVIDENCE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 5000
+}
+
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
+	// Sampling telemetry: every admission/widen/self-correct SampleBody call
+	// accumulates here and is reported once on exit (any exit path). DEEP's
+	// repeated whole-body window scoring is where this corpus's token burn
+	// lives, so it needs its own line in the per-stage split.
+	var sampleNS int64
+	defer func() {
+		if sampleNS > 0 && e.Stages != nil {
+			e.Stages("deep_sample", time.Duration(sampleNS))
+		}
+	}()
+	// Admission pre-filter (CLUS_DEEP_SKIP_ZERO_HIT): a file sharing no
+	// token with the query gets no LLM scorer call — every measured widen
+	// pass burned whole-window calls on files that then scored 0. OFF by
+	// default: the files this skips are exactly the lexically-unreachable
+	// ones a semantic-only match could still rescue, so the operator opts
+	// in knowingly.
+	skipZeroHit := os.Getenv("CLUS_DEEP_SKIP_ZERO_HIT") == "1"
+	qToks := mcs.Fields(query)
 	if affinity == nil {
 		affinity = map[string]bool{}
 	}
@@ -895,7 +1027,20 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		return facts.ReportFor(fx, samples)
 	}
 	newSampler := func() *mcs.Sampler {
-		smp := mcs.New(mcs.EnvConfig(), e.scorer())
+		cfg := mcs.EnvConfig()
+		// DEEP admission budget: this loop scores every admitted file, and
+		// whole-body inputs made deep_sample the dominant cost (measured on
+		// the live endpoint: 83.5s of a 114s query, ~15 scorer calls × up to
+		// 15K-rune inputs). Feeding the query-densest deepEvidenceRunes()
+		// view instead cuts the per-call input ~3x. Offsets stay exact
+		// against the live body (the budget window is a real rune slice via
+		// mcs' densestWindow), so citations, warm-prior validation and
+		// cluster evidence binding are unaffected — only how much of each
+		// file reaches the scorer changes. Never grows past EnvConfig.
+		if n := deepEvidenceRunes(); n > 0 && cfg.MaxEvidence > n {
+			cfg.MaxEvidence = n
+		}
+		smp := mcs.New(cfg, e.scorer())
 		smp.FactHints = hints
 		return smp
 	}
@@ -937,6 +1082,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if s.Status != source.StatusActive {
 			continue
 		}
+		if skipZeroHit && !mcs.HasAnyToken(s.Body, qToks) {
+			continue
+		}
 		// Weakest-requirement stop: the strongest window with full
 		// coverage is enough — sampling further admitted files wastes budget
 		// and latency (真机: 85s/13944 tokens 空转在已答问题上).
@@ -948,7 +1096,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			break
 		}
 		loops++
-		if loops > MaxLoops {
+		if loops > e.MaxLoops {
 			reason = "budget"
 			break
 		}
@@ -962,7 +1110,22 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 			break
 		}
+		_ts := time.Now()
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
+		sampleNS += int64(time.Since(_ts))
+		bridged := false
+		bridgeBest := 0.0
+		if err == nil && nonePass(samples) && strings.TrimSpace(e.SampleContext) != "" {
+			if s2, err2 := newSampler().SampleBody(ctx, query+" "+e.SampleContext, s.Body); err2 == nil {
+				for _, sm := range s2 {
+					if sm.Score > bridgeBest {
+						bridgeBest = sm.Score
+					}
+				}
+				samples = s2
+				bridged = true
+			}
+		}
 		if err != nil {
 			if e.Verbose != nil {
 				e.Verbose("file %s: sample error %v", s.BusinessKey, err)
@@ -990,6 +1153,17 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestSrc = s
 		}
 		rep = report(kept)
+		// Session-bridge early exit: an anchored document (the thread's own,
+		// weight ≥ 0.6) that only the fallback could sample is the answer.
+		// Continuing the crawl just burns budget on documents the session
+		// never endorsed — the 174s pathology this rule exists to prevent.
+		if bridged && len(kept) > 0 && e.DocWeights[s.ID] >= 0.6 && bridgeBest >= bridgeFloorScore {
+			reason = "session-bridge"
+			if e.Verbose != nil {
+				e.Verbose("file %s: session bridge ends the loop (anchored doc, bridged windows)", s.BusinessKey)
+			}
+			break
+		}
 		// Per-round pessimistic exit (u_d, Jev-Mem §3.3 的单出口在零 LLM 头上的
 		// 对应物). Opt-in on the SAME knob as the FAST-boundary early refuse
 		// (CLUS_EARLY_ABSTAIN): after ≥2 scored files, p_fail at/over the line
@@ -1036,7 +1210,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// just decided more retrieval buys nothing (opt-in trade, see the
 	// per-round exit above).
 	selfCorrected := false
-	if reason != "utility" && !rep.Complete && CorrectBudget > 0 && !e.budgetHit() {
+	if reason != "utility" && !rep.Complete && e.CorrectBudget > 0 && !e.budgetHit() {
 		selfCorrected = true
 		var order []source.Source
 		for _, s := range sources {
@@ -1059,7 +1233,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			gap = float64(len(rep.Missing)) / float64(len(fx))
 		}
 		exploreSampler := func() *mcs.Sampler {
-			smp := mcs.New(mcs.EnvConfig(), e.scorer())
+			ecfg := mcs.EnvConfig()
+			if n := deepEvidenceRunes(); n > 0 && ecfg.MaxEvidence > n {
+				ecfg.MaxEvidence = n
+			}
+			smp := mcs.New(ecfg, e.scorer())
 			smp.FactHints = hints
 			if gap > 0 {
 				smp.ExploreBoost = 1 + 2*gap // 1.0 (no gap) → 3.0 (all open)
@@ -1091,13 +1269,20 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				if cancelled(ctx) {
 					break outer_correct
 				}
-				if correctUsed >= CorrectBudget || e.budgetHit() {
+				if correctUsed >= e.CorrectBudget || e.budgetHit() {
 					break outer_correct
 				}
 				correctUsed++
 				loops++
 				tried[s.ID] = true
+				_ts := time.Now()
 				samples, err := exploreSampler().SampleBody(ctx, mq, s.Body)
+				if err == nil && nonePass(samples) && strings.TrimSpace(e.SampleContext) != "" {
+					if s2, err2 := exploreSampler().SampleBody(ctx, mq+" "+e.SampleContext, s.Body); err2 == nil {
+						samples = s2
+					}
+				}
+				sampleNS += int64(time.Since(_ts))
 				if err != nil {
 					continue
 				}
@@ -1138,7 +1323,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// wrong-doc windows "complete". The budget term uses the REAL loop count
 	// (passing 0 made the predicate collapse to !Complete, so the "budget
 	// aware" gate never saw the budget).
-	if reason != "utility" && (facts.NeedContinue(rep, loops, MaxLoops+CorrectBudget+WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
+	if reason != "utility" && (facts.NeedContinue(rep, loops, e.MaxLoops+e.CorrectBudget+e.WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -1146,16 +1331,21 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for k := range lawAffinity(keptIDs, sources) {
 			affinity[k] = true
 		}
-		if extra, err := e.Widen(ctx, query, widenExclude(), WidenBudget, affinity); err == nil && len(extra) > 0 {
+		if extra, err := e.Widen(ctx, query, widenExclude(), e.WidenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
 				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
+				if skipZeroHit && !mcs.HasAnyToken(s.Body, qToks) {
+					continue
+				}
 				loops++
 				widened++
 				tried[s.ID] = true
+				_ts := time.Now()
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
+				sampleNS += int64(time.Since(_ts))
 				if err != nil {
 					continue
 				}
@@ -1184,7 +1374,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		rep = report(kept)
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
-			Summary: "深度检索仍证据不足",
+			Summary: insufficientSummary(query, tried, sources),
 		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 	}
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
@@ -1219,16 +1409,21 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for id := range keptIDs {
 			exclude[id] = true
 		}
-		if extra, err := e.Widen(ctx, query, exclude, WidenBudget, affinity); err == nil && len(extra) > 0 {
+		if extra, err := e.Widen(ctx, query, exclude, e.WidenBudget, affinity); err == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
 				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
+				if skipZeroHit && !mcs.HasAnyToken(s.Body, qToks) {
+					continue
+				}
 				loops++
 				widened++
 				tried[s.ID] = true
+				_ts := time.Now()
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
+				sampleNS += int64(time.Since(_ts))
 				if err != nil {
 					continue
 				}
@@ -1259,15 +1454,63 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 }
 
+// insufficientSummary is the honest "no answer" answer. The bare
+// "深度检索仍证据不足" it replaces spent 38.8s and 45K tokens to tell the
+// user nothing they could act on (live case: "什么叫帮信罪" — the defining
+// article is 刑法第287条之二 and the corpus holds no 刑法, so this refusal
+// was the CORRECT outcome; only the message was useless). Deterministic —
+// it names what was searched and the nearest documents, so the user learns
+// the shape of the gap (missing source vs wrong wording) and where to add.
+func insufficientSummary(query string, tried map[string]bool, sources []source.Source) string {
+	var titles []string
+	for _, s := range sources {
+		if tried[s.ID] && len(titles) < 5 {
+			titles = append(titles, "《"+srcLabel(s)+"》")
+		}
+	}
+	b := "深度检索仍证据不足。"
+	if len(titles) > 0 {
+		b += "已检索的最近文档（" + strings.Join(titles, "、") + "）中，未找到能回答「" +
+			query + "」的原文依据。"
+	} else {
+		b += "语料中未检索到与「" + query + "」相关的原文依据。"
+	}
+	b += "这可能是因为：① 问法措辞与法条原文差异较大；② 该问题所需的法规本库未收录（例如罪名定义多见于《刑法》，概念定义多见于专门法律/司法解释）。补充相关法规或文档后再问。"
+	return b
+}
+
 // render prefers the production Synthesizer (synthesize_roi) and degrades to
 // the deterministic DEEP template on refusal/error.
 func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, template string) string {
 	if e.Synth != nil {
-		if s, err := e.Synth.Synthesize(ctx, query, kept); err == nil && strings.TrimSpace(s) != "" {
+		// Both branches report their wall time — an early return from the
+		// streaming path used to leave deep_synth out of the stage split.
+		t0 := time.Now()
+		if e.SynthDelta != nil {
+			if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
+				if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+					e.stage("deep_synth", t0)
+					return s
+				}
+			}
+		}
+		s, err := e.Synth.Synthesize(ctx, query, kept)
+		e.stage("deep_synth", t0)
+		if err == nil && strings.TrimSpace(s) != "" {
 			return s
 		}
 	}
 	return template
+}
+
+// stage reports one DEEP-loop stage's wall time to the observability hook.
+// Pure telemetry: nil (the default, and every gate) costs nothing. DEEP's
+// sampling time is accumulated across the admission/widen/self-correct
+// SampleBody calls by the caller before being reported once.
+func (e *Engine) stage(name string, t0 time.Time) {
+	if e.Stages != nil {
+		e.Stages(name, time.Since(t0))
+	}
 }
 
 func (e *Engine) conflictsFor(ctx context.Context, id string) []Conflict {

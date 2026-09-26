@@ -2,6 +2,7 @@ package mcs
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -70,5 +71,62 @@ func TestCoverageAndConfidence(t *testing.T) {
 	}
 	if Confidence(0, 0) != 0 {
 		t.Fatal("zero inputs should give zero confidence")
+	}
+}
+
+func TestHasAnyToken(t *testing.T) {
+	if !HasAnyToken("连接池最大 128", []string{"连接池", "端口"}) {
+		t.Error("hit token must be found")
+	}
+	if HasAnyToken("无关内容", []string{"连接池", "端口"}) {
+		t.Error("no token may match a body without them")
+	}
+	if !HasAnyToken("anything", nil) {
+		t.Error("empty token set must keep the file (unfilterable)")
+	}
+}
+
+// totalFailScorer fails every window: the network is down, auth expired, the
+// quota ran out. What must come back is an error the caller can surface —
+// not an all-ScoreFailed page that downstream filters into 证据不足 and
+// reports as a clean refusal.
+type totalFailScorer struct{}
+
+func (totalFailScorer) Score(context.Context, string, Sample) (float64, string, error) {
+	return 0, "", errors.New("scorer down")
+}
+
+func TestSampleBodyErrorsWhenEveryWindowFails(t *testing.T) {
+	s := New(DefaultConfig(), totalFailScorer{})
+	_, err := s.SampleBody(context.Background(), "广州 端口", "系统部署在广州机房，端口是 8480。")
+	if err == nil || !strings.Contains(err.Error(), "scorer failed for all") {
+		t.Fatalf("want total-failure error, got %v", err)
+	}
+}
+
+// The scorer must be monotone in coverage: the old mid band rose to ~14 and
+// dropped to 8 at the 0.8 break, so 4-of-5 keywords scored WORSE than 3-of-5.
+func TestKeywordScorerMonotoneInDensity(t *testing.T) {
+	kws := []string{"甲", "乙", "丙", "丁", "戊"}
+	prev := -1.0
+	for hits := 0; hits <= len(kws); hits++ {
+		content := strings.Repeat("填充文本。", 3)
+		for i := 0; i < hits; i++ {
+			content += kws[i]
+		}
+		sc, _, err := KeywordScorer{Keywords: kws}.Score(context.Background(), "q", Sample{Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hits > 0 && sc < prev {
+			t.Fatalf("score dropped as coverage rose: hits=%d score=%v prev=%v", hits, sc, prev)
+		}
+		prev = sc
+	}
+	// The 0.8 break specifically: 4/5 must not score below 3/5.
+	sc45, _, _ := KeywordScorer{Keywords: kws}.Score(context.Background(), "q", Sample{Content: "甲乙丙丁"})
+	sc35, _, _ := KeywordScorer{Keywords: kws}.Score(context.Background(), "q", Sample{Content: "甲乙丙"})
+	if sc45 < sc35 {
+		t.Fatalf("density 0.8 (%v) below density 0.6 (%v)", sc45, sc35)
 	}
 }

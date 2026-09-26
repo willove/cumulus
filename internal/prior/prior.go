@@ -58,6 +58,24 @@ type Belief struct {
 type History struct {
 	SourceIDs   []string
 	QueryTokens []string
+	// DocWeights carries query-conditioned usage weights (the affinity
+	// ledger and the session evidence stack), already accumulated over the
+	// incoming query's tokens. A document present here is scored by weight;
+	// the binary/token fallback below stays for callers that pass only
+	// SourceIDs (eval runs, offline stacks).
+	DocWeights map[string]float64
+}
+
+// Saturate maps an accumulated usage weight onto (0,1) monotonically:
+// one token of support → 0.5, two → 0.667, three → 0.75 … Ordering is
+// preserved and no accumulation can exceed the arm's 1.0 ceiling.
+func Saturate(w float64) float64 { return saturate(w) }
+
+func saturate(w float64) float64 {
+	if w <= 0 {
+		return 0
+	}
+	return w / (1 + w)
 }
 
 // HistoryFrom merges successful-evidence sources and snippet texts into a
@@ -232,6 +250,11 @@ func structScore(fields []string, s source.Source) float64 {
 func historyScore(s source.Source, hist *History) float64 {
 	if hist == nil {
 		return 0
+	}
+	// Query-conditioned usage first: the ledger/session weights for THIS
+	// query's tokens. The old global-binary path remains the fallback.
+	if w, ok := hist.DocWeights[s.ID]; ok && w > 0 {
+		return saturate(w)
 	}
 	for _, id := range hist.SourceIDs {
 		// Exact match only: substring matching made src:abc a history hit for

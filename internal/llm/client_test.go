@@ -64,17 +64,43 @@ func TestAigateSynthesizerRefusalState(t *testing.T) {
 			wantErr: "json: cannot unmarshal",
 		},
 	}
+	// The synthesizer now runs thinking-disabled first and retries with the
+	// thinking pass on failure, so each step implies a request plan: a step
+	// whose response succeeds consumes ONE request, a failing step consumes
+	// TWO (the retry gets the same response and the same error surfaces).
+	// Expanding the steps keeps the per-call assertions identical.
+	type req struct {
+		status  int
+		content string
+	}
+	var plan []req
+	for _, st := range steps {
+		ok := st.status == 0 && func() bool {
+			var out SynthesizeResult
+			return parseJSON(st.content, &out) == nil && strings.TrimSpace(out.Summary) != ""
+		}()
+		n := 1
+		if !ok {
+			n = 2
+		}
+		for i := 0; i < n; i++ {
+			plan = append(plan, req{st.status, st.content})
+		}
+	}
 	request := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/chat/completions" {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		if request >= len(steps) {
+		if request >= len(plan) {
 			t.Error("unexpected extra request")
 			http.Error(w, "unexpected request", http.StatusInternalServerError)
 			return
 		}
-		step := steps[request]
+		step := struct {
+			status  int
+			content string
+		}{plan[request].status, plan[request].content}
 		request++
 		status := step.status
 		if status == 0 {

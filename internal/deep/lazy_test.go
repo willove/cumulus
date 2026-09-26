@@ -105,3 +105,35 @@ func TestAskLazyLoadsCorpusWhenEscalating(t *testing.T) {
 		t.Fatalf("escalated answer must cite the corpus: %q", res.Answer.Summary[:80])
 	}
 }
+
+type countingRewriter struct{ calls int }
+
+func (r *countingRewriter) Rewrite(_ context.Context, _ []string, q string) (string, error) {
+	r.calls++
+	return q + " 连接池", nil
+}
+
+// AskLazy folds history into the query once, up front; its miss-path
+// fall-through must not rewrite again — each rewrite is a real LLM call, and
+// the second one re-folds an already-folded query.
+func TestAskLazyRewritesHistoryExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	rw := &countingRewriter{}
+	e := newEngine()
+	e.History = []string{"上一问：数据库连接怎么配"}
+	e.HistoryRewriter = rw
+	loads := 0
+	load := func(_ context.Context) ([]source.Source, error) {
+		loads++
+		return srcs(), nil
+	}
+	if _, err := e.AskLazy(ctx, "最大是多少", load); err != nil {
+		t.Fatal(err)
+	}
+	if rw.calls != 1 {
+		t.Fatalf("history rewrite called %d times, want exactly 1", rw.calls)
+	}
+	if loads != 1 {
+		t.Fatalf("corpus loads = %d, want 1", loads)
+	}
+}

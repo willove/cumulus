@@ -7,6 +7,7 @@ package mcs
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -73,11 +74,14 @@ func (k KeywordScorer) Score(_ context.Context, query string, s Sample) (float64
 		return 0, "no keyword overlap", nil
 	}
 	density := float64(hits) / float64(len(kws))
+	// Monotone in density: 1→5 on [0,0.4), 5→8 on [0.4,0.8), 8→8.4 on
+	// [0.8,1]. The mid band used to rise to ~14 and drop to 8 at the 0.8
+	// break — better coverage scored WORSE (4/5 keywords < 3/5 keywords).
 	switch {
 	case density >= 0.8:
 		return 8 + 2*density - 1.6, "strong keyword coverage", nil
 	case density >= 0.4:
-		return 4 + 10*(density-0.4)/0.4, "partial keyword coverage", nil
+		return 5 + 3*(density-0.4)/0.4, "partial keyword coverage", nil
 	default:
 		return 1 + 10*density, "weak keyword coverage", nil
 	}
@@ -139,8 +143,22 @@ func DefaultConfig() Config {
 		Rounds:          2,
 		TopSeeds:        3,
 		Sigma:           180,
-		SmallFileRunes:  1000,
-		MaxEvidence:     15000,
+		// Whole-file shortcut threshold (runes). 100_000 aligns with the
+		// reference implementation's _FAST_SMALL_FILE_THRESHOLD = 100_000
+		// (sirchmunk src/sirchmunk/search.py:1541): a body under 100K chars
+		// is read in full instead of Monte-Carlo windowed sampling. On the
+		// production corpus (Chinese law, avg ~31.5 KB ≈ 10K runes) this is
+		// what keeps a FAST query at ONE evidence-scoring call instead of
+		// ~20 — the reference's whole FAST path is 2 LLM calls total
+		// (analyze + synthesize), and per-window scoring was the gap.
+		// Tradeoff, stated plainly: the in-file localisation the gaussian
+		// arm provides is skipped for small bodies — the evidence is the
+		// whole body (or its densest budget window), not windows chosen
+		// by seed refinement — and the confidence gate plus DEEP
+		// re-sampling remain the backstop for a body whose answer the
+		// budget window missed. Still overridable via CLUS_MCS_SMALL_FILE.
+		SmallFileRunes: 100_000,
+		MaxEvidence:    15000,
 	}
 }
 
@@ -248,7 +266,25 @@ func (s *Sampler) SampleBody(ctx context.Context, query, body string) ([]Sample,
 		return nil, nil
 	}
 	if len(runes) <= s.Cfg.SmallFileRunes {
-		sm := Sample{Start: 0, End: len(runes), Content: body, Source: "full", Arm: "local"}
+		// The whole body is the evidence, but the budget still binds:
+		// cap at MaxEvidence runes exactly like the sampling path's kept
+		// list, so a 100K-rune body cannot hand the synthesizer an
+		// unbounded prompt. This mirrors the reference implementation
+		// bounding evidence to _FAST_MAX_EVIDENCE_CHARS (sirchmunk
+		// search.py:1755/1540). The budget window is centred on the
+		// query's densest hit region rather than blindly at the head —
+		// the reference centres its non-small-file windows on grep hits
+		// the same way (search.py:2088 _read_context_windows), and a head
+		// cut drops answers that sit past the budget (the gate's
+		// "known answer" fixture has its answer at ~16K runes). Start/End
+		// stay rune-exact against the live body so citation back-tracking
+		// and the warm-prior validation keep holding.
+		start, end := 0, len(runes)
+		if s.Cfg.MaxEvidence > 0 && end-start > s.Cfg.MaxEvidence {
+			start = densestWindow(string(runes), query, s.Cfg.MaxEvidence)
+			end = start + s.Cfg.MaxEvidence
+		}
+		sm := Sample{Start: start, End: end, Content: string(runes[start:end]), Source: "full", Arm: "local"}
 		evs, err := s.evalAll(ctx, query, []Sample{sm})
 		if err != nil {
 			return nil, err
@@ -430,6 +466,64 @@ func armsByWeight(λ map[string]float64) []string {
 	return sorted
 }
 
+// HasAnyToken reports whether body contains at least one of toks (plain
+// substring match, the same primitive Fields-based scoring already uses).
+// The DEEP admission pre-filter uses it to skip the LLM scorer call for
+// files with zero lexical overlap with the query — those calls returned 0
+// scores on every measured widen pass.
+func HasAnyToken(body string, toks []string) bool {
+	if len(toks) == 0 {
+		return true // no tokens to judge by: keep the file (not filterable)
+	}
+	low := strings.ToLower(body)
+	for _, t := range toks {
+		if t != "" && strings.Contains(low, strings.ToLower(t)) {
+			return true
+		}
+	}
+	return false
+}
+
+// densestWindow returns the rune offset of the n-rune window of body with
+// the most distinct query tokens in it (ties → the earliest window). It is
+// the deterministic locator behind the small-file full-body path's evidence
+// budget: the whole document is the evidence, but when it exceeds the
+// budget the view kept is centred on the query rather than at the head.
+// Mirrors the reference implementation centring evidence windows on grep
+// hits (sirchmunk search.py:2088). O(windows × tokens) with a quarter-width
+// stride, so a 100K-rune body stays well under a millisecond.
+func densestWindow(body, query string, n int) int {
+	r := []rune(body)
+	if len(r) <= n {
+		return 0
+	}
+	toks := Fields(query)
+	if len(toks) == 0 {
+		return 0
+	}
+	step := n / 4
+	if step < 1 {
+		step = 1
+	}
+	best, bestScore := 0, -1
+	for start := 0; start+n <= len(r); start += step {
+		score := 0
+		win := string(r[start : start+n])
+		for _, tk := range toks {
+			if strings.Contains(win, tk) {
+				score++
+			}
+		}
+		if score > bestScore {
+			best, bestScore = start, score
+			if score == len(toks) {
+				break
+			}
+		}
+	}
+	return best
+}
+
 func (s *Sampler) stage1(runes []rune, query, body string) []Sample {
 	n := len(runes)
 	half := s.Cfg.Window
@@ -499,6 +593,8 @@ func (s *Sampler) globalScatter(runes []rune, limit int) []Sample {
 func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sample, error) {
 	fa, _ := s.Scorer.(FactAware)
 	out := make([]Sample, 0, len(in))
+	failed := 0
+	var lastErr error
 	for _, sm := range in {
 		if fa != nil && len(s.FactHints) > 0 {
 			sc, why, covers, err := fa.ScoreWithFacts(ctx, query, s.FactHints, sm)
@@ -506,6 +602,7 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 				// A3: observation failure ≠ judged irrelevant.
 				sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
 				out = append(out, sm)
+				failed, lastErr = failed+1, err
 				continue
 			}
 			sm.Score, sm.Reasoning, sm.Covers = sc, why, covers
@@ -516,10 +613,19 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 		if err != nil {
 			sm.Score, sm.Reasoning = ScoreFailed, "scorer error: "+err.Error()
 			out = append(out, sm)
+			failed, lastErr = failed+1, err
 			continue
 		}
 		sm.Score, sm.Reasoning = sc, why
 		out = append(out, sm)
+	}
+	// Total failure must not dress up as "no evidence": when every window's
+	// scoring failed the scorer itself is down (network, auth, quota), and
+	// the honest result is an error the caller can surface — not an all-
+	// ScoreFailed page that reads downstream as 证据不足/insufficient and
+	// poisons refusals and eval numbers alike.
+	if len(in) > 0 && failed == len(in) {
+		return out, fmt.Errorf("mcs: scorer failed for all %d windows: %w", len(in), lastErr)
 	}
 	return out, nil
 }

@@ -67,3 +67,30 @@ func TestRankUsesFields(t *testing.T) {
 		t.Fatalf("rank must lift the manual: %+v", files)
 	}
 }
+
+// The history arm is query-conditioned first: a document carrying usage
+// weight for THIS query's tokens scores by (saturated) weight; documents
+// with no weight fall back to the global-binary path unchanged.
+func TestHistoryArmUsesDocWeightsBeforeBinary(t *testing.T) {
+	h := &History{
+		SourceIDs:  []string{"src:global"},
+		DocWeights: map[string]float64{"src:used": 2.0, "src:weak": 0.2},
+	}
+	docs := []source.Source{{ID: "src:global"}, {ID: "src:used"}, {ID: "src:weak"}, {ID: "src:cold"}}
+	if got := historyScore(docs[0], h); got != 1.0 {
+		t.Fatalf("global-binary fallback = %v, want 1.0", got)
+	}
+	if got := historyScore(docs[1], h); got <= 0.66 || got >= 0.67 {
+		t.Fatalf("weighted 2 tokens = %v, want ~0.667", got)
+	}
+	if got := historyScore(docs[2], h); got <= 0.166 || got >= 0.167 { // 0.2/1.2
+		t.Fatalf("weighted 0.2 = %v, want ~0.167", got)
+	}
+	if got := historyScore(docs[3], h); got != 0 {
+		t.Fatalf("cold doc = %v, want 0", got)
+	}
+	// Nil history and empty weights keep the arm silent.
+	if historyScore(docs[0], nil) != 0 || historyScore(docs[0], &History{}) != 0 {
+		t.Fatal("empty history must score 0")
+	}
+}
