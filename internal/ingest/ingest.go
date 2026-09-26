@@ -48,6 +48,13 @@ type Store struct {
 	clusters  string
 	namespace string
 	jobs      string
+
+	// EmbedProgress reports backfill progress to stderr. Opt-in, set by the
+	// operator-facing face (CLI ensure -embed) only: eval/search faces share
+	// their output stream with machine-parsed JSON, and a progress line on
+	// the merged stream is a contract break (the -l1pre e2e gate caught
+	// exactly that).
+	EmbedProgress bool
 }
 
 func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store {
@@ -864,6 +871,9 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	done, skipped := 0, 0
 	nextReport := 512
 	report := func(force bool) {
+		if !s.EmbedProgress {
+			return
+		}
 		if !force && done < nextReport {
 			return
 		}

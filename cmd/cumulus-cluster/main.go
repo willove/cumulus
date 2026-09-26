@@ -489,6 +489,12 @@ func main() {
 		fs := flag.NewFlagSet("ensure", flag.ExitOnError)
 		embed := fs.Bool("embed", false, "also backfill body_embed vectors (L1)")
 		_ = fs.Parse(rest)
+		if *embed {
+			// Operator-facing long job: progress on stderr, final JSON on
+			// stdout. The library default is silent (eval/search faces share
+			// their stream with machine-parsed output).
+			st.EmbedProgress = true
+		}
 		colls, err := st.Ensure(ctx, edgesColl, citesColl, conflictsColl, affinityColl)
 		if err != nil {
 			fatal(err)
