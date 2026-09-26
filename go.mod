@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
 	github.com/parquet-go/parquet-go v0.32.0
-	github.com/willove/cumulite v0.1.0
+	github.com/willove/cumulite v0.2.0
 )
 
 require (
@@ -30,5 +30,3 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
 )
-
-replace github.com/willove/cumulite => ../db-works/cumulite
