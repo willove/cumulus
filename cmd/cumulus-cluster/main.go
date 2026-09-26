@@ -160,6 +160,17 @@ func main() {
 			fatal(fmt.Errorf("CLUS_TIMEOUT: %w", err))
 		}
 		timeout = d
+	} else if cmd == "ensure" {
+		// The production default above exists for LLM-call commands. A
+		// corpus-scale L1 backfill is a minutes-long CPU job — the 300s
+		// default killed a 20k-doc backfill mid-flight (it resumes, but an
+		// operator should not need CLUS_TIMEOUT to survive one).
+		for _, a := range rest {
+			if a == "-embed" {
+				timeout = 60 * time.Minute
+				break
+			}
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

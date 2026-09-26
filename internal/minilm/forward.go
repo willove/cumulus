@@ -18,10 +18,33 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
 )
+
+// embedWorkerCap bounds the block-level matmul parallelism per call
+// (GOMAXPROCS when unset — the pre-knob behaviour). A backfill on a
+// workstation wants a cap: the text-level semaphore is 4, so peak
+// goroutines are 4×this, and the uncapped default puts ~40 goroutines on a
+// 10-core host and pegs it. CLUS_EMBED_WORKERS=2 keeps the machine usable.
+var embedWorkerCap = parseWorkerCap(os.Getenv("CLUS_EMBED_WORKERS"))
+
+// parseWorkerCap reads the CLUS_EMBED_WORKERS value: a positive integer caps
+// the block-level parallelism; anything else (unset, garbage, <1) means no
+// cap — GOMAXPROCS, the pre-knob behaviour. It never fails the process over
+// a bad knob; the host just runs hot.
+func parseWorkerCap(v string) int {
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0
+	}
+	return n
+}
 
 const (
 	hidden  = 384
@@ -126,6 +149,9 @@ func (m *Model) Tokenizer() *Tokenizer { return m.tok }
 func matmulRowsT(x, w, b []float32, L, out, in int, y []float32) {
 	blocks := (out + rowBloc - 1) / rowBloc
 	workers := runtime.GOMAXPROCS(0)
+	if embedWorkerCap > 0 && embedWorkerCap < workers {
+		workers = embedWorkerCap
+	}
 	if blocks < workers {
 		workers = blocks
 	}

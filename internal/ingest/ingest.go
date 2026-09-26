@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -860,6 +861,15 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 		batch = 64
 	}
 	var texts, ids []string
+	done, skipped := 0, 0
+	nextReport := 512
+	report := func(force bool) {
+		if !force && done < nextReport {
+			return
+		}
+		log.Printf("[embed] embedded=%d skipped=%d", done, skipped)
+		nextReport = done + 512
+	}
 	flush := func() error {
 		if len(texts) == 0 {
 			return nil
@@ -876,6 +886,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 			}
 		}
 		texts, ids = nil, nil
+		report(false)
 		return nil
 	}
 	// Paginate: a corpus larger than one page used to be silently truncated
@@ -896,6 +907,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 		}
 		for _, d := range res.Documents {
 			if _, ok := d["body_embed"]; ok {
+				skipped++
 				continue
 			}
 			id, _ := d["_id"].(string)
@@ -903,6 +915,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 			if id == "" || body == "" {
 				continue
 			}
+			done++
 			texts = append(texts, trimRunes(body, 2000))
 			ids = append(ids, id)
 			if len(texts) >= batch {
@@ -918,6 +931,7 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	if e := flush(); e != nil {
 		return len(ids), e
 	}
+	report(true)
 	// Report the true backfilled total (idempotent re-runs count everything).
 	n = 0
 	for skip := 0; ; skip += page {
