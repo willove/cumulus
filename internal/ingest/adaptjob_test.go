@@ -2,11 +2,15 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/adapt"
+	"github.com/willove/cumulus/internal/source"
 )
 
 // IngestAdapted's skip ledger must add up: Skipped is the SUM over reasons
@@ -82,9 +86,10 @@ func TestIngestAdaptedRecordsIsThisRunOnly(t *testing.T) {
 	if err := os.WriteFile(good2, []byte("{\"body\": \"端口是 8480。\"}\n{\"body\": \"备份每天 02:00。\"}\n{\"body\": \"灰度窗口 10%。\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a resume that already covered file 0: the cursor parks at 1.
+	// Simulate a resume that already covered file 0: the cursor parks at 1,
+	// fingerprinted to this exact file list.
 	cursorKey := st.jobs + "jr" + jobCursorSuffix
-	if err := st.c.KVPut(ctx, cursorKey, []byte("1"), 0); err != nil {
+	if err := st.saveJobCursor(ctx, cursorKey, listFingerprint([]string{good1, good2}), 1); err != nil {
 		t.Fatal(err)
 	}
 	n, err := st.IngestAdapted(ctx, []string{good1, good2}, adapt.Fields{}, "jr")
@@ -103,5 +108,83 @@ func TestIngestAdaptedRecordsIsThisRunOnly(t *testing.T) {
 	}
 	if doc.Done != 2 {
 		t.Fatalf("Done = %d, want 2 (file 0 counts through the cursor)", doc.Done)
+	}
+}
+
+// failingRetirePort refuses the first retire patch (sources status→stale),
+// simulating a transient engine refusal exactly where the old code swallowed
+// the error and left two live revisions for one identity.
+type failingRetirePort struct {
+	cumulite.Port
+	failed bool
+}
+
+func (p *failingRetirePort) PatchDocument(ctx context.Context, coll, id string, update map[string]any) (map[string]any, error) {
+	if set, ok := update["$set"].(map[string]any); ok &&
+		coll == "clus_sources" && set["status"] == source.StatusStale && !p.failed {
+		p.failed = true
+		return nil, errors.New("engine says no")
+	}
+	return p.Port.PatchDocument(ctx, coll, id, update)
+}
+
+// A failed retire must fail the batch, not pass silently: two live revisions
+// for one identity never converge again (Reconcile skips actives).
+func TestPutBatchFailsWhenRetireFails(t *testing.T) {
+	st, engine := newTestStore(t)
+	ctx := context.Background()
+	bi, err := st.NewBatchIngester(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bi.PutBatch(ctx, []source.Source{
+		source.New("A", "jsonl", "", "k", "zh", "第一版正文", nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	st.c = &failingRetirePort{Port: engine}
+	bi2, err := st.NewBatchIngester(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = bi2.PutBatch(ctx, []source.Source{
+		source.New("A", "jsonl", "", "k", "zh", "第二版正文，内容完全不同", nil),
+	})
+	if err == nil || !strings.Contains(err.Error(), "retiring previous revision") {
+		t.Fatalf("want retire failure to fail the batch, got %v", err)
+	}
+}
+
+// A storage refusal inside the adapt stream must fail the JOB — the file is
+// not malformed, so counting it as adapt_failed (and reporting done over the
+// lost data) is the exact bug.
+func TestIngestAdaptedStoreErrorFailsJobNotSkip(t *testing.T) {
+	st, engine := newTestStore(t)
+	ctx := context.Background()
+	bi, err := st.NewBatchIngester(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bi.PutBatch(ctx, []source.Source{
+		source.New("A", "jsonl", "", "k", "zh", "第一版正文", nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "a.jsonl")
+	if err := os.WriteFile(f, []byte("{\"key\": \"k\", \"body\": \"第二版正文，完全不同\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st.c = &failingRetirePort{Port: engine}
+	_, err = st.IngestAdapted(ctx, []string{f}, adapt.Fields{}, "sf")
+	if err == nil || !strings.Contains(err.Error(), "retiring previous revision") {
+		t.Fatalf("want the store refusal to fail the job, got %v", err)
+	}
+	doc, err := st.GetJobDoc(ctx, "sf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if doc.SkipReasons["adapt_failed"] != 0 {
+		t.Fatalf("store error must not be counted as adapt_failed: %+v", doc.SkipReasons)
 	}
 }

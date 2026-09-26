@@ -6,7 +6,10 @@ package ingest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,7 +182,13 @@ func (s *Store) NewBatchIngester(ctx context.Context) (*BatchIngester, error) {
 	live := map[string]liveRev{}
 	const page = 1000
 	for skip := 0; ; skip += page {
-		res, err := s.c.Query(ctx, s.sources, contract.Query{Limit: page, Skip: skip})
+		// Metadata only: the live-revision index never reads bodies or
+		// vectors, so they stay out of the scan — a field newly read below
+		// must be added to the projection too.
+		res, err := s.c.Query(ctx, s.sources, contract.Query{
+			Limit: page, Skip: skip,
+			Projection: []string{"_id", "business_key", "digest", "status", "version", "ingested_at"},
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -259,12 +268,18 @@ func (b *BatchIngester) PutBatch(ctx context.Context, srcs []source.Source) (int
 		if hasPrev && prev.status == source.StatusActive && prev.id != src.ID {
 			if _, perr := b.st.c.PatchDocument(ctx, b.st.sources, prev.id, map[string]any{
 				"$set": map[string]any{"status": source.StatusStale, "updated_at": now},
-			}); perr == nil {
-				retired = prev.id
+			}); perr != nil {
+				// A swallowed retire leaves two live revisions for one identity
+				// with no path that ever converges them (Reconcile skips
+				// actives) — same rule as the single-doc Put's retireLive.
+				return n, fmt.Errorf("retiring previous revision %s: %w", prev.id, perr)
 			}
+			retired = prev.id
 		}
 		if retired != "" {
-			_, _ = b.st.invalidateEvidence(ctx, retired)
+			if _, ierr := b.st.invalidateEvidence(ctx, retired); ierr != nil {
+				return n, fmt.Errorf("invalidating evidence of retired %s: %w", retired, ierr)
+			}
 		}
 		b.live[identity] = liveRev{
 			id: src.ID, version: next, digest: src.Digest,
@@ -530,13 +545,9 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 	if jobKey == "" {
 		jobKey = "default"
 	}
+	fp := recordsFingerprint(records)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
-	start := 0
-	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
-		if n, err := strconv.Atoi(string(raw)); err == nil {
-			start = n
-		}
-	}
+	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(records))
 	done := 0
 	for i := start; i < len(records); i++ {
 		src, err := mapFn(records[i])
@@ -547,7 +558,7 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 			return done, fmt.Errorf("record %d put: %w", i, err)
 		}
 		done++
-		if err := s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0); err != nil {
+		if err := s.saveJobCursor(ctx, cursorKey, fp, i+1); err != nil {
 			return done, err
 		}
 	}
@@ -661,8 +672,9 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error
 	// Shape 1: the cluster's own answer source.
 	for skip := 0; ; skip += 1000 {
 		res, err := s.c.Query(ctx, s.clusters, contract.Query{
-			Filter: map[string]any{"source_id": docID},
-			Limit:  1000, Skip: skip,
+			Filter:     map[string]any{"source_id": docID},
+			Limit:      1000, Skip: skip,
+			Projection: []string{"_id"},
 		})
 		if err != nil {
 			return 0, err
@@ -680,7 +692,13 @@ func (s *Store) markClustersStale(ctx context.Context, docID string) (int, error
 	// collection is scanned (clusters ≤10³ per the scale assumption) because
 	// the filter would have to reach into an array field.
 	for skip := 0; ; skip += 1000 {
-		res, err := s.c.Query(ctx, s.clusters, contract.Query{Limit: 1000, Skip: skip})
+		// _id survives the inclusion by default; the only other field read
+		// here is the evidence array, so content and embeddings stay out of
+		// the scan.
+		res, err := s.c.Query(ctx, s.clusters, contract.Query{
+			Limit: 1000, Skip: skip,
+			Projection: map[string]any{"evidence": 1},
+		})
 		if err != nil {
 			return 0, err
 		}
@@ -743,8 +761,9 @@ func (s *Store) Reclaim(ctx context.Context, includeStale bool) (int, error) {
 		statuses = append(statuses, source.StatusStale)
 	}
 	res, err := s.c.Query(ctx, s.sources, contract.Query{
-		Filter: map[string]any{"status": map[string]any{"$in": statuses}},
-		Limit:  1000,
+		Filter:     map[string]any{"status": map[string]any{"$in": statuses}},
+		Limit:      1000,
+		Projection: []string{"_id"},
 	})
 	if err != nil {
 		return 0, err
@@ -769,8 +788,9 @@ func (s *Store) Reclaim(ctx context.Context, includeStale bool) (int, error) {
 
 func (s *Store) purgeEvidence(ctx context.Context, docID string) error {
 	res, err := s.c.Query(ctx, s.evidence, contract.Query{
-		Filter: map[string]any{"doc_id": docID},
-		Limit:  1000,
+		Filter:     map[string]any{"doc_id": docID},
+		Limit:      1000,
+		Projection: []string{"_id"},
 	})
 	if err != nil {
 		return err
@@ -832,10 +852,13 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	// mode as the earlier ActiveSources truncation.
 	const page = 1000
 	for skip := 0; ; skip += page {
+		// _id is kept through an inclusion by default; body is the embedding
+		// input and body_embed the skip check, so everything else stays out.
 		res, qe := s.c.Query(ctx, s.sources, contract.Query{
-			Filter: map[string]any{"status": source.StatusActive},
-			Skip:   skip,
-			Limit:  page,
+			Filter:     map[string]any{"status": source.StatusActive},
+			Skip:       skip,
+			Limit:      page,
+			Projection: map[string]any{"body": 1, "body_embed": 1},
 		})
 		if qe != nil {
 			return 0, qe
@@ -867,10 +890,13 @@ func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, mod
 	// Report the true backfilled total (idempotent re-runs count everything).
 	n = 0
 	for skip := 0; ; skip += page {
+		// The count only checks body_embed; reading bodies to count vectors
+		// was the expensive way around.
 		res, qe := s.c.Query(ctx, s.sources, contract.Query{
-			Filter: map[string]any{"status": source.StatusActive},
-			Skip:   skip,
-			Limit:  page,
+			Filter:     map[string]any{"status": source.StatusActive},
+			Skip:       skip,
+			Limit:      page,
+			Projection: map[string]any{"body_embed": 1},
 		})
 		if qe != nil {
 			return 0, qe
@@ -900,6 +926,58 @@ func trimRunes(s string, n int) string {
 // finished job restarted from zero) and the cursor read parsed JSON as an
 // integer, silently falling back to zero.
 const jobCursorSuffix = ":cursor"
+
+// A resume cursor is a bare index into an input list, so it is only valid
+// against the exact list it was written for. The stored value therefore
+// carries the list's fingerprint ("fp:index"); on a mismatch — a different
+// directory reusing a static job key ("files"/"adapt"/"default"), an edited
+// list, or the old bare-integer format — the run restarts from zero. Upserts
+// are digest-idempotent, so re-processing is the safe side; the old behaviour
+// silently skipped that many files (or a whole smaller corpus) and still
+// reported State:"done".
+func listFingerprint(items []string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\x00", len(items))
+	for _, p := range items {
+		fmt.Fprintf(h, "%s\x00", p)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+func recordsFingerprint(records []map[string]any) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%d\x00", len(records))
+	for _, r := range records {
+		if b, err := json.Marshal(r); err == nil {
+			h.Write(b)
+		}
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// loadJobCursor reads a fingerprinted cursor; max bounds the index against a
+// list that shrank under the same fingerprint (KV corruption, not normal
+// operation — a matching fingerprint implies the same list).
+func loadJobCursor(ctx context.Context, c cumulite.Port, key, fp string, max int) int {
+	raw, err := c.KVGet(ctx, key)
+	if err != nil || len(raw) == 0 {
+		return 0
+	}
+	got, idx, ok := strings.Cut(string(raw), ":")
+	if !ok || got != fp {
+		return 0
+	}
+	n, err := strconv.Atoi(idx)
+	if err != nil || n < 0 || n > max {
+		return 0
+	}
+	return n
+}
+
+func (s *Store) saveJobCursor(ctx context.Context, key, fp string, next int) error {
+	return s.c.KVPut(ctx, key, []byte(fp+":"+strconv.Itoa(next)), 0)
+}
 
 // JobDoc is the async-ingest state-machine state under KV clus:job:<name>.
 type JobDoc struct {
@@ -1030,13 +1108,9 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	if jobKey == "" {
 		jobKey = "adapt"
 	}
+	fp := listFingerprint(files)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
-	start := 0
-	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
-		if n, err := strconv.Atoi(string(raw)); err == nil {
-			start = n
-		}
-	}
+	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(files))
 	skip := map[string]int{}
 	skipErr := map[string]string{}
 	doneFiles := 0 // files fully processed (the unit Total counts)
@@ -1082,6 +1156,9 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	}
 	progress("extracting")
 	for i := start; i < len(files); i++ {
+		if err := ctx.Err(); err != nil {
+			return records, err
+		}
 		path := files[i]
 		fh, err := os.Open(path)
 		if err != nil {
@@ -1093,7 +1170,7 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			// the thing the operator is here to read — silently disappears.
 			skipErr[path] = err.Error()
 			doneFiles++
-			if cerr := s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0); cerr != nil {
+			if cerr := s.saveJobCursor(ctx, cursorKey, fp, i+1); cerr != nil {
 				return records, cerr
 			}
 			progress("extracting")
@@ -1101,6 +1178,13 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 		}
 		n, aerr := s.adaptOne(ctx, bi, path, f)
 		fh.Close()
+		var sf *storeFailure
+		if aerr != nil && errors.As(aerr, &sf) {
+			// Storage refused the write (or the ctx ended): the file is not
+			// malformed, so it must NOT become an adapt_failed skip — the job
+			// fails here, the cursor stays at this file, a re-run retries it.
+			return records, aerr
+		}
 		if aerr != nil {
 			// An unrecognized container or a malformed record is a skipped
 			// file with an auditable reason — INCLUDING the reason itself. A
@@ -1112,7 +1196,7 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			records += n
 		}
 		doneFiles++
-		if cerr := s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0); cerr != nil {
+		if cerr := s.saveJobCursor(ctx, cursorKey, fp, i+1); cerr != nil {
 			return records, cerr
 		}
 		progress("upserting")
@@ -1126,6 +1210,15 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	}
 	return records, nil
 }
+
+// storeFailure marks storage-level failures inside the adapt stream: the file
+// is NOT malformed — the engine refused a write or the ctx ended — so the job
+// must fail instead of recording an adapt_failed skip and reporting done over
+// lost data.
+type storeFailure struct{ err error }
+
+func (e *storeFailure) Error() string { return e.err.Error() }
+func (e *storeFailure) Unwrap() error { return e.err }
 
 // adaptOne streams one open file into the store, returning how many records it
 // stored. Bodyless or unreadable records are skipped; a store-level error fails
@@ -1143,7 +1236,7 @@ func (s *Store) adaptOne(ctx context.Context, b *BatchIngester, path string, f a
 		put, err := b.PutBatch(ctx, batch)
 		n += put
 		if err != nil {
-			return err
+			return &storeFailure{err}
 		}
 		batch = batch[:0]
 		return nil
@@ -1275,13 +1368,9 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 	if jobKey == "" {
 		jobKey = "files"
 	}
+	fp := listFingerprint(files)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
-	start := 0
-	if raw, err := s.c.KVGet(ctx, cursorKey); err == nil && len(raw) > 0 {
-		if n, err := strconv.Atoi(string(raw)); err == nil {
-			start = n
-		}
-	}
+	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(files))
 	skip := map[string]int{}
 	skipErr := map[string]string{}
 	skipped := 0
@@ -1320,7 +1409,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		_ = s.PutJobDoc(ctx, jobKey, snapshot("running"))
 	}
 	advance := func(i int) error {
-		return s.c.KVPut(ctx, cursorKey, []byte(strconv.Itoa(i+1)), 0)
+		return s.saveJobCursor(ctx, cursorKey, fp, i+1)
 	}
 	progress("extracting")
 	for i := start; i < len(files); i++ {

@@ -104,7 +104,7 @@ type cursorFailurePort struct {
 }
 
 func (p cursorFailurePort) KVPut(ctx context.Context, key string, value []byte, ttl time.Duration) error {
-	if strings.HasSuffix(key, jobCursorSuffix) && string(value) == "2" {
+	if strings.HasSuffix(key, jobCursorSuffix) && strings.HasSuffix(string(value), ":2") {
 		p.cancel()
 		return context.Canceled
 	}
