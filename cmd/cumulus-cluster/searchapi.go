@@ -558,7 +558,7 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 						log.Printf("[search] session %s: turn not persisted: %v", in.Session, aerr)
 					}
 				}
-				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Citations.Refs, res.Answer.SourceID, res.Answer.Confidence)
+				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Answer, res.Citations.Refs)
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
 				bumpBucket(r.Context(), buckets, in.NS, ss)
@@ -569,7 +569,7 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			bumpBucket(r.Context(), buckets, in.NS, ss)
 			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt)
 			if serr == nil {
-				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Citations.Refs, sres.Answer.SourceID, sres.Answer.Confidence)
+				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Answer, sres.Citations.Refs)
 			}
 			errMsg := ""
 			if serr != nil {

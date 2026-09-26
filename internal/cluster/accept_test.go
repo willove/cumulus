@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/willove/cumulus/internal/mcs"
@@ -60,5 +61,28 @@ func TestAcceptFoldRejectsDivergentCrossTopicClaims(t *testing.T) {
 	ok, why := AcceptFold(winner, loser, []Cluster{winner, loser}, 3)
 	if !ok {
 		t.Fatalf("same-topic claim update must still fold: %s", why)
+	}
+}
+
+// Production TopicKeys are sha256 identities, not text: as a "proposed key"
+// a hash matches nothing (keyRel = 0 against every cluster), so the
+// specificity gate fell back to ID-order — with more than topK clusters
+// alive, a same-domain fold was rejected on ID sort order alone. This
+// reproduces that shape (unreadable identities, winner ID sorting LAST,
+// five unrelated clusters) and pins that the fold is decided on the query
+// text, which is the only thing a future search can issue.
+func TestAcceptFoldIgnoresTopicKeyHashIdentity(t *testing.T) {
+	winner := Cluster{ID: "W9", TopicKey: "99ea9360f3babe85", Content: "红灯亮时，禁止车辆通行。", Queries: []string{"闯红灯会有什么处罚"}}
+	loser := Cluster{ID: "L8", TopicKey: "48f360fb70b0ae36", Content: "违反交通信号灯通行的处罚。", Queries: []string{"闯红灯怎么处罚"}}
+	corpus := []Cluster{winner, loser}
+	for i := 0; i < 5; i++ {
+		corpus = append(corpus, Cluster{
+			ID: fmt.Sprintf("A%d", i), TopicKey: fmt.Sprintf("hash%016d", i),
+			Content: fmt.Sprintf("无关文档 %d 的内容。", i), Queries: []string{fmt.Sprintf("无关的问题 %d", i)},
+		})
+	}
+	ok, why := AcceptFold(winner, loser, corpus, 3)
+	if !ok {
+		t.Fatalf("same-domain fold with hash identities must be decided on query text, not ID order: %s", why)
 	}
 }

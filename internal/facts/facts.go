@@ -9,6 +9,7 @@ package facts
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/willove/cumulus/internal/mcs"
 )
@@ -92,7 +93,11 @@ func Evaluate(facts []Fact, samples []mcs.Sample) Report {
 			if hit > nearMiss {
 				nearMiss = hit
 			}
-			if hit < CoverHit {
+			// Coverage needs BOTH the fragment share and a contiguous
+			// 3-character core of the fact in the window: the share alone
+			// let half a word cover a whole fact (the red-light refusal
+			// that looked "covered" on "红灯").
+			if hit < CoverHit || !corePresent(f.Query, sm.Content) {
 				continue
 			}
 			if best == nil || hit > bestHit || (hit == bestHit && sm.Score > best.Score) {
@@ -264,6 +269,28 @@ func MissingQueries(facts []Fact, rep Report) []string {
 	return out
 }
 
+// corePresent reports whether the window carries a contiguous span of the
+// FACT — at least 3 characters of the query verbatim (two adjacent bigrams
+// of a CJK run). mcs.Fields expands a CJK run into overlapping bigrams that
+// are all fragments of ONE word, so counting each fragment independently
+// let a window holding half a word ("红灯" for "闯红灯", "试用" for
+// "试用期") clear the old 0.5 share — a fact looked covered by a sliver of
+// its own rarest term. A fact shorter than one span imposes no requirement
+// (the share test is the whole test at that size).
+func corePresent(fact, content string) bool {
+	r := []rune(fact)
+	if len(r) < 3 {
+		return true
+	}
+	low := strings.ToLower(content)
+	for i := 0; i+2 < len(r); i++ {
+		if strings.Contains(low, strings.ToLower(string(r[i:i+3]))) {
+			return true
+		}
+	}
+	return false
+}
+
 func hitRatio(kws []string, content string) float64 {
 	if len(kws) == 0 {
 		return 0
@@ -312,8 +339,18 @@ func findMark(s string) (idx, length int) {
 		if i < 0 {
 			continue
 		}
+		// A single-character CJK conjunction splits only when BOTH sides
+		// carry at least two characters. The old boundary() guard was dead
+		// code (it tested a UTF-8 continuation byte against a lead-byte
+		// range, so it was invariably true) and single-char marks were
+		// splitting inside words: "参与违法怎么办" produced the degenerate
+		// facts ["参", …] whose empty keyword set can never be covered, so
+		// the DEEP loop burned its whole budget on a phantom requirement.
+		// Two characters on each side is the decidable, word-list-free
+		// version of "not glued into a longer word" (it also keeps "与否"
+		// and trailing "和" whole); marks like "以及" are unambiguous.
 		if m == "和" || m == "与" || m == "及" {
-			if !boundary(s, i, len(m)) {
+			if utf8.RuneCountInString(s[:i]) < 2 || utf8.RuneCountInString(s[i+len(m):]) < 2 {
 				continue
 			}
 		}
@@ -322,17 +359,6 @@ func findMark(s string) (idx, length int) {
 		}
 	}
 	return bestIdx, bestLen
-}
-
-func boundary(s string, i, n int) bool {
-	beforeOK := i == 0 || !isCJKByte(s[i-1])
-	after := i + n
-	afterOK := after >= len(s) || !isCJKByte(s[after])
-	return beforeOK || afterOK
-}
-
-func isCJKByte(b byte) bool {
-	return b >= 0xE4 && b <= 0xE9
 }
 
 var splitMarks = []string{

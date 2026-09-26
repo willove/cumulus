@@ -690,6 +690,14 @@ func firstNumber(s string) string {
 	return string(digits)
 }
 
+// proposedKeys lists the keys the A2 gate tests "as a query must retrieve
+// the winner". TopicKey/TopicKeys are deliberately NOT here: they are
+// sha256 IDENTITIES matched by exact equality in the reuse path, never by
+// lexical retrieval. Including them made keyRel return 0 against every
+// cluster, so specificity degenerated into an ID-order lottery — with more
+// than topK clusters alive, same-domain folds were rejected on ID sort
+// order alone (the three red-light clusters never merged). Only text a
+// future search can actually issue is a proposed key.
 func proposedKeys(loser Cluster) []string {
 	var ks []string
 	seen := map[string]bool{}
@@ -698,10 +706,6 @@ func proposedKeys(loser Cluster) []string {
 			seen[s] = true
 			ks = append(ks, s)
 		}
-	}
-	add(loser.TopicKey)
-	for _, k := range loser.TopicKeys {
-		add(k)
 	}
 	for _, q := range loser.Queries {
 		add(q)

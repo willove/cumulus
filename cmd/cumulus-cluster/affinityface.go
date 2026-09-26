@@ -157,13 +157,24 @@ func applyUsagePrior(ctx context.Context, c cumulite.Port, namespace, query, ses
 // recordUsage folds one finished answer into the ledger and the session
 // stack. Weight scales with the answer's confidence: a weak answer still
 // records topical adjacency, a strong one teaches properly.
-func recordUsage(ctx context.Context, c cumulite.Port, namespace, query, sessionID string, refs []deep.Ref, anchor string, conf float64) {
+//
+// A refused or skipped answer teaches NOTHING: kb.Persist and MarkEvidence
+// both gate on exactly these flags, and this path used to have no gate at
+// all — so every honest refusal was recorded, and a high-lexical-coverage
+// refusal (the red-light case: a confident-sounding gap report with
+// conf≥0.7) taught the ledger the WRONG document at full OutcomeWeight.
+// The session stack sits behind the same gate because it feeds the
+// default-on ranking path, not just the gated ledger.
+func recordUsage(ctx context.Context, c cumulite.Port, namespace, query, sessionID string, ans fast.Answer, refs []deep.Ref) {
+	if ans.Refused || ans.Skipped {
+		return
+	}
 	docs := citedDocIDs(refs)
-	if len(docs) == 0 && anchor == "" {
+	if len(docs) == 0 && ans.SourceID == "" {
 		return
 	}
 	if sessionEvidenceEnabled() && sessionID != "" {
-		sessEvidence.Add(namespace, sessionID, docs, anchor, time.Now())
+		sessEvidence.Add(namespace, sessionID, docs, ans.SourceID, time.Now())
 	}
 	if !affinityEnabled() {
 		return
@@ -172,7 +183,7 @@ func recordUsage(ctx context.Context, c cumulite.Port, namespace, query, session
 	// is a lost learning opportunity, not a failed query. Debug-gated so a
 	// silently empty ledger (a missing collection, say) is findable.
 	if err := affinity.NewCumuStore(c, ns.Coll(namespace, "clus_affinity")).
-		Record(ctx, queryTokens(query), docs, affinity.OutcomeWeight(conf), time.Now()); err != nil && os.Getenv("CLUS_AFFINITY_DEBUG") == "1" {
+		Record(ctx, queryTokens(query), docs, affinity.OutcomeWeight(ans.Confidence), time.Now()); err != nil && os.Getenv("CLUS_AFFINITY_DEBUG") == "1" {
 		log.Printf("[affinity] record %s: %v", namespace, err)
 	}
 }
