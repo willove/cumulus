@@ -455,6 +455,10 @@ func (c *Cluster) Evolve(query string, embed []float64) bool {
 		changed = true
 	}
 	if c.Hotness < 1.0 {
+		// +0.1 per evolution is an unprovenanced increment: hotness's only
+		// consumers are the MinHotness prune (OFF by default) and tidy's
+		// mean report, so this ladder is near-decorative — declared here so
+		// nobody reads a trend into it.
 		c.Hotness += 0.1
 		if c.Hotness > 1.0 {
 			c.Hotness = 1.0
@@ -601,12 +605,18 @@ func SplitCap(clusters []Cluster, topicKey string, cap int) []Cluster {
 	return out
 }
 
+// DefaultGateOverlap is the bar RelevanceGate applies when the caller passes
+// no threshold. Every in-repo caller passes 0.15 (the G-pollute
+// calibration); NEITHER value has a measurement behind it — pick on a
+// held-out set, not on this comment.
+const DefaultGateOverlap = 0.3
+
 // RelevanceGate is the G-pollute check: does this cluster actually answer the
 // question? Offline stub = field overlap with cluster content; production
 // goes through aigate.
 func RelevanceGate(query string, c Cluster, minOverlap float64) bool {
 	if minOverlap <= 0 {
-		minOverlap = 0.3
+		minOverlap = DefaultGateOverlap
 	}
 	return mcs.Coverage(query, []mcs.Sample{{Content: c.Content + " " + strings.Join(c.Queries, " ")}}) >= minOverlap
 }

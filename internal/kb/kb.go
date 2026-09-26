@@ -17,6 +17,13 @@ import (
 
 // DefaultReuseTheta is the cosine line for reuse; DefaultMergeTheta is looser
 // so near-paraphrases merge instead of fracturing.
+//
+// PROVENANCE: unprovenanced for THIS deployment — both values were dialled
+// in by hand against the Chinese-law corpus distribution (scripts/theta-
+// probe.sh reports the histogram but deliberately does not pick a theta).
+// Treat them as the starting point a new corpus must re-measure, not as
+// transferable constants: reusing them off-domain inherits a legal-corpus
+// calibration silently.
 const (
 	DefaultReuseTheta = 0.85
 	DefaultMergeTheta = 0.55
@@ -499,6 +506,18 @@ func (e *Engine) edgeStore() graph.Store {
 	return e.Edges
 }
 
+// Graph-expansion knobs for the neighborhood prefilter. expandMaxDepth: 2
+// is the DESIGN value (weak_edges are specified for 1..2 hops — design-plan
+// §2). The other three are unprovenanced: MaxResults caps the fan-out and
+// MinWeight the edge cut, both picked by feel; re-measure on a held-out set
+// before trusting them.
+const (
+	expandHopKNN     = 3
+	expandMaxDepth   = 2
+	expandMaxResults = 16
+	expandMinWeight  = 0.5
+)
+
 func (e *Engine) expand(ctx context.Context, start string, probe []float64, sources []source.Source) []graph.ExpandResult {
 	if e.Edges == nil {
 		return nil
@@ -533,11 +552,11 @@ func (e *Engine) expand(ctx context.Context, start string, probe []float64, sour
 	}
 	hop := e.HopKNN
 	if hop <= 0 {
-		hop = 3
+		hop = expandHopKNN
 	}
 	got, err := ex.Expand(ctx, graph.ExpandRequest{
-		StartID: start, MaxDepth: 2, MaxResults: 16,
-		MinWeight: 0.5, HopKNN: hop, Probe: probe,
+		StartID: start, MaxDepth: expandMaxDepth, MaxResults: expandMaxResults,
+		MinWeight: expandMinWeight, HopKNN: hop, Probe: probe,
 		MinHotness: e.MinHotness, MinConfidence: e.MinConfidence,
 	})
 	if err != nil {

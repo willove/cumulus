@@ -683,6 +683,24 @@ func srcLabel(s source.Source) string {
 	return s.ID
 }
 
+// deepSynthBonus is the DEEP-tier synthesis calibration bump, applied at
+// most once and never past 1.0. PROVENANCE: none — it is an operator-era
+// constant, and because it lands on fast.SkipBelow (0.35) it can move an
+// answer across the answered/skipped line by itself (mean 4, coverage 0.2
+// → 0.30 → 0.40). It is therefore declared here instead of buried: set
+// CLUS_DEEP_SYNTH_BONUS=0 to disable it pending a measured A/B, which is
+// the only thing that should set its value.
+func deepSynthBonus() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_DEEP_SYNTH_BONUS"))
+	if v == "" {
+		return 0.1
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+		return f
+	}
+	return 0.1
+}
+
 // deepMetrics derives the DEEP answer's coverage, confidence and deterministic
 // template from the FINAL kept set. Both the primary build and the post-widen
 // rebuild go through here: they used to be two ~30-line copies that had already
@@ -702,8 +720,8 @@ func deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (c
 		mean /= float64(len(kept))
 	}
 	conf := mcs.Confidence(mean, cov)
-	if conf < 1 {
-		conf = min1(conf + 0.1)
+	if b := deepSynthBonus(); b > 0 && conf < 1 {
+		conf = min1(conf + b)
 	}
 	var b strings.Builder
 	b.WriteString("【DEEP 摘要】")
@@ -979,6 +997,12 @@ func (e *Engine) budgetHit() bool {
 // runes: CLUS_MCS_DEEP_EVIDENCE when set and positive, else 5000. The
 // FAST tier keeps its whole-body budget (15000); DEEP scores every
 // admitted file, so its per-call input is where the token burn lived.
+// PROVENANCE: the 5000 default is a cost choice with a stated rationale,
+// NOT a measured one — no run has shown that halving the scorer's window
+// costs no recall, and on long bodies (this corpus averages ~10K runes)
+// it silently hides the answer's half of a document from the scorer.
+// Settle it with a two-arm bench (default vs CLUS_MCS_DEEP_EVIDENCE=15000)
+// before trusting it; until then it is a declared tradeoff, not a default.
 func deepEvidenceRunes() int {
 	if v := os.Getenv("CLUS_MCS_DEEP_EVIDENCE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

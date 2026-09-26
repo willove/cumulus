@@ -283,6 +283,9 @@ func scanScore(s source.Source) float64 {
 		sc += 0.2
 	}
 	n := len([]rune(s.Body))
+	// The 200..8000-rune band is unprovenanced, and on a long-body corpus
+	// (this deployment averages ~10K runes) it never fires — the +0.3 is
+	// dead weight there, not a signal. Re-measure per corpus or drop it.
 	if n > 200 && n < 8000 {
 		sc += 0.3
 	}
