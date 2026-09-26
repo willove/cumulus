@@ -46,6 +46,14 @@ type Engine struct {
 	SourceReader SourceReader
 	ReuseTheta   float64
 	MergeTheta   float64
+	// Judge is the optional no-reference persist judge: does the ANSWER
+	// answer the QUESTION? The serve face wires the aigate judge (nil on
+	// the eval face, so eval stays deterministic). The verdict is recorded
+	// on the cluster; JudgeGates turns a negative verdict into a refusal
+	// to persist. A judge ERROR never blocks — fail-open on error,
+	// fail-closed on verdict.
+	Judge      func(ctx context.Context, query, answer string) (ok bool, why string, err error)
+	JudgeGates bool
 	// writeMu serializes the cluster write path. Choosing a fold target is a
 	// read-modify-write — read the candidates, decide, save the merged snapshot
 	// — so two concurrent asks for one topic would either both create the same
@@ -111,9 +119,14 @@ type Result struct {
 	// content/evidence (only the ask was recorded, so the topic does not
 	// fracture); it used to be discarded, making a refused fold look like a
 	// successful merge in the eval cost line.
-	FoldRejected string               `json:"fold_rejected,omitempty"`
-	Neighbors    []graph.ExpandResult `json:"neighbors,omitempty"`
-	PrevCluster  string               `json:"prev_cluster,omitempty"`
+	FoldRejected string `json:"fold_rejected,omitempty"`
+	// Judged/JudgeOK/JudgeWhy report the optional persist judge (nil Judge
+	// = the default, no verdict: Judged stays false).
+	Judged      bool                 `json:"judged"`
+	JudgeOK     bool                 `json:"judge_ok"`
+	JudgeWhy    string               `json:"judge_why,omitempty"`
+	Neighbors   []graph.ExpandResult `json:"neighbors,omitempty"`
+	PrevCluster string               `json:"prev_cluster,omitempty"`
 }
 
 // Ask runs reuse-or-search. Reuse path: 0 samples. Fresh path: FAST + save/merge.
@@ -389,8 +402,26 @@ func (e *Engine) candidates(ctx context.Context, key string, qe []float64, query
 func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []source.Source, qe []float64, replace bool) (Result, error) {
 	ans.Samples = cluster.NormalizeEvidence(ans.SourceID, ans.Samples)
 	res := Result{Answer: ans, Sampled: len(ans.Samples)}
-	if ans.Skipped || ans.Refused || ans.SourceID == "" || !cluster.RelevanceGate(ans.Query, cluster.Cluster{Content: ans.Summary}, 0.15) {
+	// The gate judges the answer's EVIDENCE (pinned corpus windows), never
+	// its own Summary: a summary echoing the query's words used to pass this
+	// check by construction (audit C2 — the system confirming itself).
+	if ans.Skipped || ans.Refused || ans.SourceID == "" ||
+		!cluster.RelevanceGate(ans.Query, cluster.Cluster{Evidence: ans.Samples}, 0.15) {
 		return res, nil
+	}
+	var judgeOK *bool
+	if e.Judge != nil {
+		ok, why, jerr := e.Judge(ctx, ans.Query, ans.Summary)
+		if jerr != nil {
+			// No verdict was produced; an error must not become a refusal.
+			res.JudgeWhy = "judge error: " + jerr.Error()
+		} else {
+			res.Judged, res.JudgeOK, res.JudgeWhy = true, ok, why
+			judgeOK = &ok
+			if !ok && e.JudgeGates {
+				return res, nil
+			}
+		}
 	}
 	key := cluster.TopicKey(ans.Query)
 	e.writeMu.Lock()
@@ -452,6 +483,9 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 			target.Evidence = merged
 		}
 		target.SourceID = ans.SourceID
+		if judgeOK != nil {
+			target.JudgeOK, target.JudgeWhy = judgeOK, res.JudgeWhy
+		}
 		if wasStale {
 			target.Lifecycle = cluster.LifecycleEmerging
 		}
@@ -488,6 +522,9 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 	}
 
 	c := cluster.New(key, ans.Query, ans.Summary, ans.Query, ans.SourceID, ans.Samples, qe, ans.Confidence)
+	if judgeOK != nil {
+		c.JudgeOK, c.JudgeWhy = judgeOK, res.JudgeWhy
+	}
 	e.refreshEmbeds(ctx, &c)
 	if err := e.Store.Save(ctx, c); err != nil {
 		return res, err

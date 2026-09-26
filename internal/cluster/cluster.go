@@ -257,20 +257,25 @@ type Cluster struct {
 	// KeyEmbeds are per-level-key embeddings (MVR-cache 分段 MaxSim, ir-rag
 	// 2.5): MaxSim over segments instead of one vector for the whole cluster.
 	// Aligned 1:1 with LevelKeys; nil or length mismatch falls back to Embed.
-	KeyEmbeds  [][]float64     `json:"key_embeds,omitempty"`
-	Name       string          `json:"name"`
-	Content    string          `json:"content"`
-	Queries    []string        `json:"queries"`
-	Embed      []float64       `json:"embed"`
-	Confidence float64         `json:"confidence"`
-	Hotness    float64         `json:"hotness"`
-	Lifecycle  string          `json:"lifecycle"`
-	Version    int             `json:"version"`
-	SourceID   string          `json:"source_id"`
-	Evidence   []mcs.Sample    `json:"evidence"`
-	Flags      map[string]bool `json:"flags,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
+	KeyEmbeds  [][]float64  `json:"key_embeds,omitempty"`
+	Name       string       `json:"name"`
+	Content    string       `json:"content"`
+	Queries    []string     `json:"queries"`
+	Embed      []float64    `json:"embed"`
+	Confidence float64      `json:"confidence"`
+	Hotness    float64      `json:"hotness"`
+	Lifecycle  string       `json:"lifecycle"`
+	Version    int          `json:"version"`
+	SourceID   string       `json:"source_id"`
+	Evidence   []mcs.Sample `json:"evidence"`
+	// JudgeOK/JudgeWhy carry the optional no-reference persist judge's
+	// verdict (nil/empty = not judged — the default). Recorded for
+	// analysis; see kb.Engine.Judge.
+	JudgeOK   *bool           `json:"judge_ok,omitempty"`
+	JudgeWhy  string          `json:"judge_why,omitempty"`
+	Flags     map[string]bool `json:"flags,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 // New builds a v1 cluster from a finished FAST/DEEP answer.
@@ -612,13 +617,41 @@ func SplitCap(clusters []Cluster, topicKey string, cap int) []Cluster {
 const DefaultGateOverlap = 0.3
 
 // RelevanceGate is the G-pollute check: does this cluster actually answer the
-// question? Offline stub = field overlap with cluster content; production
-// goes through aigate.
+// question? Offline stub = field overlap with the cluster's EVIDENCE (the
+// pinned corpus windows) plus its recorded questions; production goes
+// through aigate.
+//
+// The surface used to be c.Content — the system's own synthesized summary —
+// which made the gate self-confirming: a summary echoing the query's words
+// passed it, and that same summary was the text later queries matched
+// against (persist gate → cluster content → reuse surface, one loop). The
+// surface is now evidence-first; Content survives only as the fallback for
+// clusters stored before evidence was populated.
 func RelevanceGate(query string, c Cluster, minOverlap float64) bool {
 	if minOverlap <= 0 {
 		minOverlap = DefaultGateOverlap
 	}
-	return mcs.Coverage(query, []mcs.Sample{{Content: c.Content + " " + strings.Join(c.Queries, " ")}}) >= minOverlap
+	return mcs.Coverage(query, []mcs.Sample{{Content: relevanceSurface(c)}}) >= minOverlap
+}
+
+// relevanceSurface is the text RelevanceGate judges: the cluster's EVIDENCE
+// windows only. Recorded questions are deliberately NOT in the surface —
+// they are identity/matching material (topic keys, the lexical reuse arm),
+// and letting them in would let a cluster "answer" a query by quoting the
+// question back to itself. Content is the fallback for clusters stored
+// before evidence was populated.
+func relevanceSurface(c Cluster) string {
+	var b strings.Builder
+	for _, ev := range c.Evidence {
+		if strings.TrimSpace(ev.Content) != "" {
+			b.WriteString(ev.Content)
+			b.WriteString("\n")
+		}
+	}
+	if s := strings.TrimSpace(b.String()); s != "" {
+		return s
+	}
+	return c.Content
 }
 
 // AcceptFold is the Self-Index validation pair (ir-rag A2, zero-LLM) that must

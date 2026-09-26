@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1097,4 +1098,31 @@ func (sc *jsonFieldScrubber) unescape(r rune) rune {
 		return 0
 	}
 	return r
+}
+
+// JudgeAnswer asks the no-reference persist judge: does this candidate
+// answer actually answer the question — versus refusing, drifting off, or
+// restating the question? Returns (ok, why, err). The caller decides
+// record-vs-gate; an error here is NOT a verdict (the write path fails
+// open on errors, closes on verdicts).
+func (c *ChatClient) JudgeAnswer(ctx context.Context, query, answer string) (bool, string, error) {
+	if c == nil {
+		return false, "", errors.New("judge: no chat client")
+	}
+	tmpl := prompts.MustRender(prompts.JudgeAnswer, map[string]string{
+		"query": query, "answer": answer,
+	})
+	raw, err := c.Complete(ctx, tmpl)
+	if err != nil {
+		return false, "", err
+	}
+	clean, _ := SplitThink(raw)
+	var parsed struct {
+		OK  bool   `json:"ok"`
+		Why string `json:"why"`
+	}
+	if err := parseJSON(clean, &parsed); err != nil {
+		return false, "", fmt.Errorf("judge: %w", err)
+	}
+	return parsed.OK, strings.TrimSpace(parsed.Why), nil
 }

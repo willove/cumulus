@@ -153,6 +153,17 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		}
 	}
 	kbE := kb.New(fe, cluster.NewCumuStore(c, ns.Coll(opt.Namespace, "clus_clusters")), stack.emb)
+	// C2: the optional no-reference persist judge. Record by default (the
+	// verdict rides on the cluster for analysis); CLUS_PERSIST_JUDGE=1 turns
+	// a negative verdict into a refusal to persist. The eval face leaves
+	// this nil so eval runs stay deterministic and endpoint-free.
+	if stack.chat != nil {
+		chat := stack.chat
+		kbE.Judge = func(ctx context.Context, query, answer string) (bool, string, error) {
+			return chat.JudgeAnswer(ctx, query, answer)
+		}
+		kbE.JudgeGates = os.Getenv("CLUS_PERSIST_JUDGE") == "1"
+	}
 	// The ask-sequence cursor (KV, namespace-scoped): without it the warm
 	// reuse path masks the previous cluster and repeated walks never
 	// accumulate into pathway edges (P4).
