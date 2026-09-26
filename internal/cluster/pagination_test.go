@@ -67,3 +67,40 @@ func TestAllPaginatesPastOnePage(t *testing.T) {
 		}
 	}
 }
+
+// The persist judge's verdict must survive the CumuStore round-trip: Save
+// writes an explicit field map (not a whole-struct marshal), so a new
+// Cluster field is silently dropped here while the in-memory store keeps
+// it — the C2 stamp died at exactly this boundary once.
+func TestCumuStoreRoundTripKeepsJudgeVerdict(t *testing.T) {
+	ctx := context.Background()
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	const coll = "clus_clusters"
+	if err := engine.EnsureCollection(ctx, coll); err != nil {
+		t.Fatal(err)
+	}
+	st := NewCumuStore(engine, coll)
+	yes := true
+	in := Cluster{
+		ID: "c1", TopicKey: "k", Name: "n", Content: "c",
+		Queries: []string{"q"}, Lifecycle: "stable", Version: 1,
+		JudgeOK: &yes, JudgeWhy: "直接回答了问题",
+	}
+	if err := st.Save(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := st.Get(ctx, "c1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.JudgeOK == nil || !*out.JudgeOK {
+		t.Fatalf("judge_ok lost in the round-trip: %v", out.JudgeOK)
+	}
+	if out.JudgeWhy != "直接回答了问题" {
+		t.Fatalf("judge_why lost in the round-trip: %q", out.JudgeWhy)
+	}
+}

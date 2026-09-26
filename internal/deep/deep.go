@@ -136,19 +136,25 @@ func (s *MemoryConflict) All(_ context.Context) ([]Conflict, error) {
 
 // Result is a DEEP (or escalated) answer with citations.
 type Result struct {
-	Answer     fast.Answer          `json:"answer"`
-	Escalated  bool                 `json:"escalated"`
-	Mode       string               `json:"mode"`
-	Loops      int                  `json:"loops"`
-	Citations  CitationSet          `json:"citations"`
-	Conflicts  []Conflict           `json:"conflicts,omitempty"`
-	ClusterID  string               `json:"cluster_id,omitempty"`
-	ClusterVer int                  `json:"cluster_version,omitempty"`
-	Reused     bool                 `json:"reused"`
-	Sampled    int                  `json:"sampled"`
-	Persisted  bool                 `json:"persisted"`
-	Merged     bool                 `json:"merged"`
-	Neighbors  []graph.ExpandResult `json:"neighbors,omitempty"`
+	Answer     fast.Answer `json:"answer"`
+	Escalated  bool        `json:"escalated"`
+	Mode       string      `json:"mode"`
+	Loops      int         `json:"loops"`
+	Citations  CitationSet `json:"citations"`
+	Conflicts  []Conflict  `json:"conflicts,omitempty"`
+	ClusterID  string      `json:"cluster_id,omitempty"`
+	ClusterVer int         `json:"cluster_version,omitempty"`
+	Reused     bool        `json:"reused"`
+	Sampled    int         `json:"sampled"`
+	Persisted  bool        `json:"persisted"`
+	Merged     bool        `json:"merged"`
+	// The persist judge's verdict, copied from the kb Result: the cluster
+	// stamp is the durable record; these make it visible to the response
+	// surface and eval (a fail-open error used to vanish here).
+	Judged    bool                 `json:"judged"`
+	JudgeOK   bool                 `json:"judge_ok"`
+	JudgeWhy  string               `json:"judge_why,omitempty"`
+	Neighbors []graph.ExpandResult `json:"neighbors,omitempty"`
 	// Cover is the per-fact multi-hop coverage report (oracle annotations
 	// vector when the scorer annotates covers).
 	Cover facts.Report `json:"cover"`
@@ -513,6 +519,12 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		Merged:     base.Merged,
 		Neighbors:  base.Neighbors,
 		Mode:       ModeFAST,
+		// The persist judge's verdict, same as the DEEP path copies it —
+		// the FAST path used to drop it, so a recorded verdict was
+		// invisible on every FAST answer.
+		Judged:   base.Judged,
+		JudgeOK:  base.JudgeOK,
+		JudgeWhy: base.JudgeWhy,
 	}
 	res.Citations = BuildCitations(query, base.Answer, citeCorpus)
 	res.Conflicts = e.conflictsFor(ctx, base.ClusterID)
@@ -667,6 +679,10 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	res.ClusterVer = sub.ClusterVer
 	res.Persisted = sub.Persisted
 	res.Merged = sub.Merged
+	// The persist judge's verdict rides along: the record channel is the
+	// cluster stamp, but the response/eval must also SEE it (a fail-open
+	// error used to vanish here entirely).
+	res.Judged, res.JudgeOK, res.JudgeWhy = sub.Judged, sub.JudgeOK, sub.JudgeWhy
 	res.Reused = false
 	res.Sampled = len(deepAns.Samples)
 	res.BudgetHit = e.BudgetHit

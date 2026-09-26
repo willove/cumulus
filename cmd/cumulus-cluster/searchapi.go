@@ -163,6 +163,9 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 			return chat.JudgeAnswer(ctx, query, answer)
 		}
 		kbE.JudgeGates = os.Getenv("CLUS_PERSIST_JUDGE") == "1"
+		if os.Getenv("CLUS_VERBOSE") == "1" {
+			fmt.Fprintf(os.Stderr, "[stack] persist judge wired (gates=%v)\n", kbE.JudgeGates)
+		}
 	}
 	// The ask-sequence cursor (KV, namespace-scoped): without it the warm
 	// reuse path masks the previous cluster and repeated walks never

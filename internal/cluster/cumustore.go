@@ -57,6 +57,17 @@ func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
 	if len(c.KeyEmbeds) > 0 {
 		doc["key_embeds"] = c.KeyEmbeds
 	}
+	// The persist judge's verdict (C2). Save writes an explicit field map,
+	// so a new Cluster field is dropped here unless it is listed — the
+	// stamp used to die at this boundary while the in-memory store (whole-
+	// struct marshal) kept it, which is exactly the kind of silent split
+	// the round-trip test pins.
+	if c.JudgeOK != nil {
+		doc["judge_ok"] = *c.JudgeOK
+	}
+	if c.JudgeWhy != "" {
+		doc["judge_why"] = c.JudgeWhy
+	}
 	// Insert-or-replace by _id (content-stable id) — but never silently
 	// across identities: two topic_keys colliding on one id must be loud,
 	// or the second Save quietly eats the first cluster.
