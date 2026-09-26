@@ -162,12 +162,15 @@ func main() {
 		timeout = d
 	} else if cmd == "ensure" {
 		// The production default above exists for LLM-call commands. A
-		// corpus-scale L1 backfill is a minutes-long CPU job — the 300s
-		// default killed a 20k-doc backfill mid-flight (it resumes, but an
-		// operator should not need CLUS_TIMEOUT to survive one).
+		// corpus-scale L1 backfill is a minutes-to-hours CPU job — the 300s
+		// default killed a 20k-doc backfill mid-flight, and the 60m this
+		// became still cut one at 79% (20k at one worker measured ~80
+		// minutes). Six hours bounds a wedged run while covering any
+		// realistic operator backfill; CLUS_TIMEOUT still overrides, and
+		// Ctrl-C + the skip-embedded resume stay the escape hatches.
 		for _, a := range rest {
 			if a == "-embed" {
-				timeout = 60 * time.Minute
+				timeout = 6 * time.Hour
 				break
 			}
 		}
