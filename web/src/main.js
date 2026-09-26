@@ -8,6 +8,11 @@ import "./theme.css";
 // 少这一行图表就是不可见（canvas 绝对定位 + 容器无高度）。<eb-chart> 组件本身
 // 已由 business-ui 全局注册，所以这里只需要补样式。
 import "@wil-works/evoke-charts/styles";
+import { loadFullIcons } from "@wil-works/evoke-business-ui/full-icons";
 import App from "./App.vue";
+
+// Remix 全量图标后台预载：进度时间轴/引用卡/运行卡的 icon 渲染不等它，
+// 预载完成后同步可用（不阻塞启动）。
+loadFullIcons();
 
 createApp(App).use(EvokeBusinessUI).use(EvokeChat).mount("#app");

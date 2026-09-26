@@ -1,0 +1,779 @@
+{
+ "tag": "curve-on",
+ "env": [],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "pet-session",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 198621,
+     "server_ms": 198621,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.5,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 3,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 105753,
+     "server_ms": 105753,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.23,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 2,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 22992,
+     "server_ms": 22992,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.74,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 93680,
+     "server_ms": 93680,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.33,
+     "loops": null,
+     "widened": null,
+     "stop": "session-bridge",
+     "insufficient": false,
+     "docs": [],
+     "refs": 2,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 21219,
+     "server_ms": 21219,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 80489,
+     "server_ms": 80489,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 91260,
+     "server_ms": 91260,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.69,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 64992,
+     "server_ms": 64992,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.34,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 33766,
+     "server_ms": 33766,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.76,
+     "loops": null,
+     "widened": null,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 1,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 23413,
+     "server_ms": 23413,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.84,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 25627,
+     "server_ms": 25627,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.82,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 99779,
+     "server_ms": 99779,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.45,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "",
+   "pass": 1,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 109138,
+     "server_ms": 109138,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.72,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 2,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "pet-session",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 1099,
+     "server_ms": 1099,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.5,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 3,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 138304,
+     "server_ms": 138304,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.37,
+     "loops": null,
+     "widened": null,
+     "stop": "session-bridge",
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 86570,
+     "server_ms": 86570,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.4,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 7357,
+     "server_ms": 7357,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.4,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 1105,
+     "server_ms": 1105,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 21532,
+     "server_ms": 21532,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.74,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 29702,
+     "server_ms": 29702,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 75577,
+     "server_ms": 75577,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.4,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": true,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 5868,
+     "server_ms": 5868,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.76,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 2,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 109224,
+     "server_ms": 109224,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.36,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 1092,
+     "server_ms": 1092,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.82,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 93770,
+     "server_ms": 93770,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.0,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": true,
+     "docs": [],
+     "refs": 0,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "",
+   "pass": 2,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 2,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 1095,
+     "server_ms": 1095,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.72,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 2,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "pet-session",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 1104,
+     "server_ms": 1104,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.5,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 3,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 84744,
+     "server_ms": 84744,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.29,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 2832,
+     "server_ms": 2832,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.4,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 6701,
+     "server_ms": 6701,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.4,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 1105,
+     "server_ms": 1105,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 3049,
+     "server_ms": 3049,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.67,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 36187,
+     "server_ms": 36187,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.64,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 94031,
+     "server_ms": 94031,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.34,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 2269,
+     "server_ms": 2269,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.76,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    },
+    {
+     "pass": 3,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 28458,
+     "server_ms": 28458,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.78,
+     "loops": null,
+     "widened": null,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 1099,
+     "server_ms": 1099,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.82,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 1,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 90069,
+     "server_ms": 90069,
+     "mode": "DEEP",
+     "reused": null,
+     "conf": 0.0,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": true,
+     "docs": [],
+     "refs": 0,
+     "tokens": null
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "",
+   "pass": 3,
+   "session": "recovered",
+   "rows": [
+    {
+     "pass": 3,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 1099,
+     "server_ms": 1099,
+     "mode": "FAST",
+     "reused": null,
+     "conf": 0.72,
+     "loops": null,
+     "widened": null,
+     "stop": null,
+     "insufficient": false,
+     "docs": [],
+     "refs": 2,
+     "tokens": null
+    }
+   ]
+  }
+ ],
+ "git_rev": "recovered-from-log",
+ "reset": true,
+ "at": "2026-09-26 13:22:25",
+ "note": "recovered from buffered log after run.py crashed on a NameError (git_rev rev); per-query wall/conf/mode/stop/refs preserved"
+}

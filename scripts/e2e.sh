@@ -343,6 +343,9 @@ assert d["messages"][0]["role"]=="user" and d["messages"][1]["role"]=="assistant
 print("ok")' ; check "search -session folds history and appends turns (P2 KV)" $?
 
 SPORT="${E2E_SERVE_PORT:-8599}"
+# 账本门的查询与词元：取查询前两个汉字做中文二元组；负向词元必须从未出现。
+AFFQ="内容里连接池最大是多少"
+AFFNEG="量子纠缠"
 own_port "$SPORT"
 "$WORK/cumulus-cluster" -data "$DATA" serve -listen "127.0.0.1:$SPORT" >"$WORK/serve.log" 2>&1 &
 SERVE_PID=$!
@@ -391,7 +394,7 @@ echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
 echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
 UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/cumulus-cluster/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
-echo "$UIA" | grep -q "簇到证据窗口的星图" ; check "web UI carries the cluster browse panel (UI v3)" $?
+echo "$UIA" | grep -q "知识簇是什么" ; check "web UI carries the cluster browse panel (UI v3)" $?
 echo "$UIA" | grep -q "当前知识库" ; check "web UI carries the namespace selector (B1)" $?
 SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
 echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?
@@ -404,6 +407,30 @@ for _ in $(seq 1 50); do
 	sleep 0.2
 done
 [ "$JDONE" = "1" ] ; check "GET /v1/ingest/jobs/{id} tracks the run to done" $?
+# --- Gate J: 使用亲和度账本（token×doc 写入 + 查询条件化读取） ---------------
+# 一次带引用的提问后，账本必须为该问的词元记下被引文档；读取必须只对
+# 查询词元条件化（无关词元不返回任何文档）。
+SQ="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/search" -H 'Content-Type: application/json' -d '{"query":"'.$AFFQ.'","ns":"httpface","prior":true}')" 2>/dev/null
+echo "$SQ" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert (d.get("citations") or {}).get("refs"), d' ; check "affinity setup query has citations" $?
+AFFDOC="$(echo "$SQ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["citations"]["refs"][0]["source_id"])')"
+# 词元来自该查询本身（中文二元组），查询条件化读取必须命中被引文档。
+AFFTOK="$(python3 -c "print('$AFFQ'[0:2])")"
+AFFR="$(curl -fsS "http://127.0.0.1:$SPORT/v1/affinity?token=$AFFTOK&ns=httpface")"
+echo "$AFFR" | python3 -c '
+import json,sys,os
+d=json.load(sys.stdin)
+docs={x["source_id"]:x["weight"] for x in d.get("docs",[])}
+assert docs, "ledger empty after a cited query"
+assert docs.get(sys.argv[1]) is not None, ("cited doc missing from ledger", docs)
+print("ok", docs.get(sys.argv[1]))' "$AFFDOC" ; check "affinity ledger records cited doc under query token" $?
+# 无关词元：账本必须沉默（查询条件化，不是全局热表）。
+AFFNO="$(curl -fsS "http://127.0.0.1:$SPORT/v1/affinity?token=$AFFNEG&ns=httpface")"
+echo "$AFFNO" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+assert not d.get("docs"), ("unrelated token must be silent", d.get("docs"))
+print("ok")' ; check "affinity ledger is query-conditioned (unrelated token silent)" $?
+
 stop_serve "$SERVE_PID"
 CITES="$($A cites list)"
 echo "$CITES" | python3 -c '
@@ -413,6 +440,8 @@ assert isinstance(r, list) and r, r
 doc=r[0]
 assert doc.get("_from") and doc.get("_to") and doc.get("start",0) < doc.get("end",0), doc
 print("ok")' ; check "clus_cites records cluster→source evidence edges" $?
+
+
 
 # --- Gate I: docx/pdf extract / L1 prefilter / B4 prior ----------------------
 # Minimal docx (zip container with word/document.xml) via python.

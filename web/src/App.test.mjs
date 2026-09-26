@@ -63,6 +63,7 @@ function app(fetch, thinkError, namespace = "t1") {
         },
         stopThinking(id) { if (find(id)) find(id).thinking = false; },
         appendContent(id, text) { find(id).content += text; find(id).status = "streaming"; },
+        updateMessage(id, updates) { Object.assign(find(id), updates); },
         completeMessage(id) { completed.push(id); Object.assign(find(id), { status: "done", thinking: false }); },
         setMessageError(id, error) { Object.assign(find(id), { status: "error", error, thinking: false }); },
         cancelMessage(id) { Object.assign(find(id), { status: "cancelled", thinking: false }); },
@@ -1116,4 +1117,55 @@ test("file chooser additions accumulate and duplicate paths are excluded", () =>
   }
   assert.deepEqual(plain(state.uploadFiles.value.map(f => f.name)), ["a.md", "b.md"]);
   assert.match(state.uploadMeta.value, /1.*跳过/);
+});
+
+// 流式合成：content 是增量，replace 事件整段替换（流式失败回退时屏幕不叠加），
+// stage 状态事件实时累积成时间轴，done 的权威分段落到消息上。
+test("streaming synthesis, stage timeline and replace semantics", async () => {
+  const server = chatBackend(url => url === "/v1/search/stream" ? new Response(
+    'event: status\ndata: {"stage":"stage","name":"analyze","stage_ms":1151,"elapsed_ms":1152}\n\n' +
+    'event: status\ndata: {"stage":"stage","name":"cascade","stage_ms":340,"elapsed_ms":1492}\n\n' +
+    'event: content\ndata: {"text":"# 标题\\n"}\n\n' +
+    'event: content\ndata: {"text":"第一段。"}\n\n' +
+    'event: content\ndata: {"text":"# 完整答案","replace":true}\n\n' +
+    'event: citations\ndata: {"refs":[{"index":1,"title":"法.txt","source_id":"src:法","quote":"条文","resolved":true}]}\n\n' +
+    'event: done\ndata: {"mode":"DEEP","conf":0.7,"coverage":0.5,"loops":3,"tokens":1234,"latency_ms":5000,"reused":false,"cluster_id":"c9","stop_reason":"sufficient","stages":{"analyze":1151000,"cascade":340000,"deep_sample":900000,"deep_synth":600000}}\n\n'
+  ) : undefined);
+  const state = app(server.fetch);
+  await state.onSend("问题");
+  const msg = state.messages.value[1];
+  // replace 语义：最终内容是权威全文，不是增量拼接。
+  assert.equal(msg.content, "# 完整答案");
+  // 实时时间轴：两个 stage 事件已累积。
+  assert.deepEqual(plain(msg.stages.map(s => [s.name, s.ms])), [["analyze", 1151], ["cascade", 340]]);
+  // done 的权威分段（微秒）与运行卡落到本条消息。
+  assert.equal(msg.stats.mode, "DEEP");
+  assert.equal(msg.stats.tokens, 1234);
+  assert.equal(msg.stats.cluster_id, "c9");
+  assert.deepEqual(Object.keys(msg.stats.stages).sort(), ["analyze", "cascade", "deep_sample", "deep_synth"]);
+  // 引用挂到本条消息（历史恢复靠它）。
+  assert.equal(msg.sources[0].source, "src:法");
+});
+
+// 刷新持久化：会话文档里带回 sources/stats 时，重新打开会话引用卡和运行卡都在。
+test("history restore carries citations, stats and stage timeline", async () => {
+  const server = chatBackend();
+  const state = app(server.fetch);
+  await state.onSend("第一问");
+  await state.onSend("第二问");
+  const firstID = server.calls.find(c => c.url === "/v1/search/stream").body.session;
+  // 模拟服务端会话文档已随答案存下引用与运行卡（sessionMessage 的 sources/stats）。
+  const doc = server.sessions.get(firstID);
+  doc.messages[1].at = 1700000000000;
+  doc.messages[1].sources = [{ index: 1, title: "源.txt", source_id: "src:a", quote: "条文一", resolved: true }];
+  doc.messages[1].stats = { mode: "FAST", conf: 0.8, coverage: 0.6, loops: 0, tokens: 900, latency: 3200, reused: true, cluster_id: "cx", stages: { analyze: 1200000, cascade: 300000, sample: 800000, synth: 900000 } };
+  await state.openSession({ id: firstID });
+  const restored = state.messages.value[1];
+  assert.equal(restored.sources.length, 1);
+  assert.equal(restored.sources[0].source, "src:a");
+  assert.equal(restored.stats.mode, "FAST");
+  assert.equal(restored.stats.reused, true);
+  // 时间轴从 stats.stages 还原（微秒 → 毫秒）。
+  assert.deepEqual(plain(restored.stages.map(s => [s.name, s.ms])), [["analyze", 1200], ["cascade", 300], ["sample", 800], ["synth", 900]]);
+  assert.equal(restored.createdAt, 1700000000000);
 });

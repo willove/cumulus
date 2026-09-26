@@ -41,7 +41,7 @@ body { font-family: var(--cul-sans); color: var(--eb-text-color-primary); backgr
 .form-stack > label:not(.eb-checkbox), .field-pair > label { display: grid; gap: var(--eb-space-2); font-size: var(--eb-font-size-sm); color: var(--eb-text-color-regular); }
 .form-stack p { margin: 0; line-height: 1.8; }
 .source-link { max-width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-.empty-guide { max-width: 420px; margin: var(--eb-space-12) auto; text-align: center; }
+.empty-guide { max-width: 560px; margin: var(--eb-space-12) auto; text-align: center; }
 .empty-guide h3 { margin: 0 0 var(--eb-space-3); font-size: var(--eb-font-size-md); font-weight: var(--eb-font-weight-semibold); color: var(--eb-text-color-primary); }
 .cite-card { display: flex; gap: var(--eb-space-2); align-items: flex-start; border: 1px solid var(--eb-border-color-lighter); border-radius: var(--eb-radius-md); padding: var(--eb-space-2) var(--eb-space-3); margin-bottom: var(--eb-space-2); background: var(--eb-bg-color-overlay); }
 .cite-card .idx { flex: none; }

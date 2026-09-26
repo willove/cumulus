@@ -1,0 +1,261 @@
+{
+ "tag": "bridge",
+ "env": [],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "pet-session",
+   "tag": "gap",
+   "session": "189f5ae6e13a",
+   "rows": [
+    {
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 1186,
+     "server_ms": 188,
+     "mode": "FAST",
+     "reused": true,
+     "conf": 0.45,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2",
+      "src:中华人民共和国生态环境法典.txt#1",
+      "src:中华人民共和国行政处罚法.txt#2"
+     ],
+     "refs": 3,
+     "tokens": 0
+    },
+    {
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 2934,
+     "server_ms": 1992,
+     "mode": "FAST",
+     "reused": true,
+     "conf": 0.443,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国传染病防治法实施办法.txt#1",
+      "src:中华人民共和国动物防疫法.txt#1",
+      "src:中华人民共和国野生动物保护法.txt#2"
+     ],
+     "refs": 3,
+     "tokens": 1181
+    },
+    {
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 86763,
+     "server_ms": 85804,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.275,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国生态环境法典.txt#1"
+     ],
+     "refs": 5,
+     "tokens": 31474
+    },
+    {
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 108320,
+     "server_ms": 107372,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.4,
+     "loops": 3,
+     "widened": 0,
+     "stop": "session-bridge",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1",
+      "src:中华人民共和国生态环境法典.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 45218
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "follow",
+   "session": "1f4640897caa",
+   "rows": [
+    {
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 17159,
+     "server_ms": 16220,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.619,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 3753
+    },
+    {
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 72592,
+     "server_ms": 71650,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.617,
+     "loops": 3,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1",
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 2,
+     "tokens": 17206
+    },
+    {
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 48802,
+     "server_ms": 47863,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.871,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 12623
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "gap",
+   "session": "fb09bd044ca5",
+   "rows": [
+    {
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 47480,
+     "server_ms": 46527,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": true,
+     "docs": [],
+     "refs": 0,
+     "tokens": 39258
+    },
+    {
+     "query": "酒后开车怎么处理",
+     "wall_ms": 109090,
+     "server_ms": 108150,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.764,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 69442
+    },
+    {
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 96893,
+     "server_ms": 95926,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.363,
+     "loops": 8,
+     "widened": 1,
+     "stop": "session-bridge",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 50470
+    }
+   ]
+  },
+  {
+   "name": "cold-queries",
+   "tag": "cold",
+   "session": "042ad5c6f66e",
+   "rows": [
+    {
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 1130,
+     "server_ms": 184,
+     "mode": "FAST",
+     "reused": true,
+     "conf": 0.771,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国行政许可法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 0
+    },
+    {
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 13458,
+     "server_ms": 12494,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.7,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 11795
+    },
+    {
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 2535,
+     "server_ms": 1587,
+     "mode": "FAST",
+     "reused": true,
+     "conf": 0.817,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:改革开放四十年大事记.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 1713
+    }
+   ]
+  }
+ ],
+ "at": "2026-09-26 02:47:01"
+}

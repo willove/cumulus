@@ -1,69 +1,86 @@
 <template>
   <div class="pane">
     <eb-alert v-if="clusterError" type="error" :title="clusterError" :closable="false" show-icon><eb-button type="primary" link @click="loadClusters">重试列表</eb-button></eb-alert>
+
+    <!-- 这个面板过去最大的问题是「不知道它是干什么的」：先讲清楚口径再用。
+         知识簇 = 问过的问题按主题归档的答案缓存；同类问题再问命中簇时是
+         毫秒级、不再调模型。待复核 = 簇的证据窗口尚未对当前语料复核。 -->
+    <div class="intro">
+      <div class="intro-text">
+        <b>知识簇是什么</b>
+        <p>系统把问过的问题按主题自动归并：同一个主题再问，直接复用已合成好的答案——<b>毫秒级返回、不再调用模型、不烧 token</b>。每个簇记着它依据的原文窗口，可逐条核对。</p>
+        <p class="tiny">待复核 = 该簇的证据窗口还没对当前语料验证过（语料可能已更新）；选中后点「复核」即可以当前原文逐窗校验，通过则转为稳定。</p>
+      </div>
+      <div class="intro-stats">
+        <div class="stat"><span class="stat-num">{{ stats.total }}</span><span class="stat-label">簇</span></div>
+        <div class="stat"><span class="stat-num warn">{{ stats.emerging }}</span><span class="stat-label">待复核</span></div>
+        <div class="stat"><span class="stat-num ok">{{ stats.stable }}</span><span class="stat-label">稳定</span></div>
+        <div class="stat"><span class="stat-num bad">{{ stats.contested }}</span><span class="stat-label">有争议</span></div>
+      </div>
+    </div>
+
     <div class="split">
       <aside class="rail">
         <div class="rail-head"><span class="rail-title">知识簇 · {{ clusters.length }}</span></div>
-        <div v-for="c in clusters" :key="c._id" class="rail-item" :class="{ cur: clusterCur && clusterCur.cluster._id === c._id }"
+        <div class="filter-row">
+          <eb-button v-for="f in filters" :key="f.value" size="small" :type="activeFilter === f.value ? 'primary' : 'default'" text @click="activeFilter = f.value">{{ f.label }}</eb-button>
+        </div>
+        <div v-for="c in visibleClusters" :key="c._id" class="rail-item" :class="{ cur: clusterCur && clusterCur.cluster._id === c._id }"
              @click="openCluster(c._id)">
           <span class="t">{{ (c.queries && c.queries[0]) || c.name || c._id }}</span>
           <eb-status-tag :value="c.lifecycle" :statuses="lifecycleStatuses" size="small" />
         </div>
         <div v-if="clusterLoading" class="tiny" style="padding: 0 12px">加载中……</div>
-        <div v-else-if="!clusters.length" class="tiny" style="padding: 0 12px">当前库还没有簇</div>
+        <div v-else-if="!visibleClusters.length" class="tiny" style="padding: 0 12px">{{ clusters.length ? "该分类下没有簇" : "当前库还没有簇——问过问题后自动生成" }}</div>
       </aside>
 
       <div>
         <div v-if="!clusterCur" class="empty-guide">
           <h3>{{ clusters.length ? "从左侧选一个知识簇" : "当前库还没有知识簇" }}</h3>
+          <p v-if="!clusters.length" class="tiny">在会话里提过的问题会被归并成簇；下次同类问题命中簇时毫秒级返回。</p>
           <eb-button v-if="!clusters.length" type="primary" @click="gotoChat">去检索会话</eb-button>
         </div>
         <template v-else>
           <div class="frow2" style="margin-bottom: 8px">
             <eb-status-tag :value="clusterCur.cluster.lifecycle" :statuses="lifecycleStatuses" />
             <b style="font-size: var(--eb-font-size-md)">{{ clusterCur.cluster.name || clusterCur.cluster._id }}</b>
-            <span class="tiny num">v{{ clusterCur.cluster.version }} · conf {{ (clusterCur.cluster.confidence ?? 0).toFixed(2) }} · 热度 {{ (clusterCur.cluster.hotness ?? 0).toFixed(1) }}</span>
-          </div>
-
-          <!-- 证据星图：Sirchmunk 没有任何图视图；这里把簇→原文窗口的 cites 边画出来，
-               边宽按得分，越粗越强。读图不交互，诚实呈现当前数据形态。 -->
-          <div class="graph-wrap" v-if="clusterCur.cites && clusterCur.cites.length">
-            <svg viewBox="0 0 340 240" width="100%" height="220" role="img" aria-label="簇到证据窗口的星图">
-              <g v-for="(e, i) in graphEdges" :key="i">
-                <line :x1="170" :y1="120" :x2="e.x" :y2="e.y"
-                      stroke="var(--eb-color-primary)"
-                      :stroke-width="e.w" stroke-opacity="0.55" stroke-linecap="round" />
-                <circle :cx="e.x" :cy="e.y" r="5" fill="var(--eb-color-primary)" />
-                <text :x="e.x + (e.x >= 170 ? 9 : -9)" :y="e.y + 4" :text-anchor="e.x >= 170 ? 'start' : 'end'"
-                      font-size="10" fill="var(--eb-text-color-secondary)" class="num">{{ e.label }}</text>
-              </g>
-              <circle cx="170" cy="120" r="26" fill="var(--eb-color-primary)" fill-opacity="0.12"
-                      stroke="var(--eb-color-primary)" stroke-width="1.5" />
-              <text x="170" y="116" text-anchor="middle" font-size="10" fill="var(--eb-text-color-secondary)">簇</text>
-              <text x="170" y="130" text-anchor="middle" font-size="11" font-weight="600" fill="var(--eb-text-color-primary)">
-                {{ (clusterCur.cluster.queries || [clusterCur.cluster._id])[0].slice(0, 8) }}
-              </text>
-            </svg>
-            <div class="tiny" style="padding: 0 6px 4px">边宽 = 证据得分（{{ clusterCur.cites.length }} 条 cites 边）</div>
+            <span class="tiny num">v{{ clusterCur.cluster.version }} · 置信度 {{ (clusterCur.cluster.confidence ?? 0).toFixed(2) }} · 热度 {{ (clusterCur.cluster.hotness ?? 0).toFixed(1) }}</span>
           </div>
 
           <div style="margin: 10px 0">
-            <span class="sub">问法：</span>
+            <span class="sub">问法（命中这些问题时直接复用）：</span>
             <eb-tag v-for="q in (clusterCur.cluster.queries || [])" :key="q" size="small">{{ q }}</eb-tag>
           </div>
           <pre class="pre-block">{{ clusterCur.cluster.content }}</pre>
 
+          <!-- 复核区：待复核的簇给按钮和结论；稳定的簇给「重新复核」（语料会变）。 -->
+          <div class="review-row">
+            <eb-button size="small" :loading="reviewBusy" @click="reviewCluster(clusterCur.cluster._id)">
+              {{ clusterCur.cluster.lifecycle === "emerging" ? "复核这个簇" : "重新复核" }}
+            </eb-button>
+            <span v-if="reviewResult" class="tiny" :class="reviewResult.valid ? 'ok' : 'warn'">
+              {{ reviewResult.error ? "复核失败：" + reviewResult.error
+                : reviewResult.valid ? `复核通过：${reviewResult.checked} 个证据窗口与当前原文一致，已转为稳定。`
+                : `发现 ${reviewResult.reasons.length} 处对不上的窗口（语料已变）；下次同类问题会自动重新检索自愈。` }}
+            </span>
+          </div>
+          <ul v-if="reviewResult && reviewResult.reasons?.length" class="reasons tiny">
+            <li v-for="(r, i) in reviewResult.reasons" :key="i">{{ r }}</li>
+          </ul>
+
           <div style="margin-top: 14px">
-            <div class="sub" style="margin-bottom: 6px">证据边（cites，{{ clusterCur.cites.length }}）</div>
+            <div class="sub" style="margin-bottom: 6px">依据的原文窗口（{{ clusterCur.cites.length }}）</div>
             <div v-if="!clusterCur.cites.length" class="tiny">暂无 cites 边——复用簇可能不带窗口。</div>
-            <table v-else class="readtab">
-              <tr><th>源</th><th>窗口</th><th>得分</th></tr>
-              <tr v-for="(e, i) in clusterCur.cites" :key="i">
-                <td class="num" style="max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ e._to }}</td>
-                <td class="num">{{ e.start }}–{{ e.end }}</td>
-                <td class="num">{{ (e.score ?? 0).toFixed(1) }}</td>
-              </tr>
-            </table>
+            <div v-else class="cite-cards">
+              <article v-for="(e, i) in clusterCur.cites" :key="i" class="evi-card">
+                <div class="evi-head">
+                  <span class="evi-src num">{{ e._to }}</span>
+                  <span class="tiny num">{{ e.start }}–{{ e.end }}</span>
+                  <span class="evi-score" :style="{ width: scorePct(e.score) }" :title="'证据得分 ' + (e.score ?? 0).toFixed(1)"></span>
+                  <span class="tiny num">{{ (e.score ?? 0).toFixed(1) }}</span>
+                </div>
+              </article>
+            </div>
           </div>
         </template>
       </div>
@@ -72,11 +89,11 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
-import { useClustersPane, lifecycleLabel } from "../panes/clusters.js";
+import { computed, ref } from "vue";
+import { useClustersPane, lifecycleLabel, clusterStats } from "../panes/clusters.js";
 import { pane } from "../state.js";
 
-const { clusters, clusterCur, clusterLoading, clusterError, loadClusters, openCluster } = useClustersPane();
+const { clusters, clusterCur, clusterLoading, clusterError, reviewBusy, reviewResult, loadClusters, openCluster, reviewCluster } = useClustersPane();
 
 function gotoChat() { pane.value = "chat"; }
 
@@ -87,21 +104,42 @@ const lifecycleStatuses = [
   { value: "deprecated", label: lifecycleLabel.deprecated, type: "info" },
 ];
 
-// 星图几何：cites 均匀铺开在圆周上，边宽随得分 1–5px。
-const graphEdges = computed(() => {
-  const cites = clusterCur.value?.cites || [];
-  const n = cites.length;
-  return cites.map((e, i) => {
-    const ang = (2 * Math.PI * i) / n - Math.PI / 2;
-    const R = 96;
-    return {
-      x: 170 + R * Math.cos(ang),
-      y: 120 + R * Math.sin(ang),
-      w: Math.max(1, Math.min(5, (e.score ?? 0) / 2)),
-      label: (e.start ?? 0) + "–" + (e.end ?? 0),
-    };
-  });
-});
+const stats = computed(() => clusterStats(clusters.value));
+const filters = [
+  { value: "", label: "全部" },
+  { value: "emerging", label: "待复核" },
+  { value: "stable", label: "稳定" },
+  { value: "contested", label: "有争议" },
+  { value: "deprecated", label: "已退役" },
+];
+const activeFilter = ref("");
+const visibleClusters = computed(() =>
+  activeFilter.value ? clusters.value.filter((c) => c.lifecycle === activeFilter.value) : clusters.value);
+
+// 证据得分 → 强度条宽度百分比（0–10 分制）。
+function scorePct(score) { return Math.max(4, Math.min(100, ((score ?? 0) / 10) * 100)) + "%"; }
 </script>
 
-<style src="./common.css"></style>
+<style scoped src="./common.css"></style>
+<style scoped>
+.intro { display: flex; gap: 20px; align-items: flex-start; padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; background: var(--eb-fill-color-light); }
+.intro-text { flex: 1; min-width: 0; }
+.intro-text p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.8; color: var(--eb-text-color-secondary); }
+.intro-stats { display: flex; gap: 14px; flex: none; }
+.stat { display: flex; flex-direction: column; align-items: center; min-width: 44px; }
+.stat-num { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.stat-num.ok { color: var(--eb-color-success); }
+.stat-num.warn { color: var(--eb-color-warning); }
+.stat-num.bad { color: var(--eb-color-danger); }
+.stat-label { font-size: 11px; color: var(--eb-text-color-placeholder); margin-top: 2px; }
+.filter-row { display: flex; flex-wrap: wrap; gap: 2px; padding: 0 8px 8px; }
+.review-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.review-row .ok { color: var(--eb-color-success); }
+.review-row .warn { color: var(--eb-color-warning); }
+.reasons { margin: 4px 0 0; padding-left: 18px; color: var(--eb-text-color-secondary); line-height: 1.7; }
+.cite-cards { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; }
+.evi-card { padding: 8px 10px; border: 1px solid var(--eb-border-color-lighter); border-radius: 8px; }
+.evi-head { display: flex; align-items: center; gap: 10px; }
+.evi-src { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evi-score { height: 6px; border-radius: 3px; background: var(--eb-color-primary); opacity: .75; flex: none; max-width: 120px; }
+</style>
