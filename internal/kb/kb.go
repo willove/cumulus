@@ -5,6 +5,7 @@ package kb
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -415,9 +416,11 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 		if jerr != nil {
 			// No verdict was produced; an error must not become a refusal.
 			res.JudgeWhy = "judge error: " + jerr.Error()
+			log.Printf("[kb] persist judge error (fail-open, answer persisted): %v", jerr)
 		} else {
 			res.Judged, res.JudgeOK, res.JudgeWhy = true, ok, why
 			judgeOK = &ok
+			log.Printf("[kb] persist judge: ok=%v why=%q query=%q", ok, why, ans.Query)
 			if !ok && e.JudgeGates {
 				return res, nil
 			}
