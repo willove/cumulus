@@ -3,9 +3,13 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/mcs"
 )
 
 // M9: All() used to read a single hardcoded page of 1000 — exactly the design's
@@ -102,5 +106,62 @@ func TestCumuStoreRoundTripKeepsJudgeVerdict(t *testing.T) {
 	}
 	if out.JudgeWhy != "直接回答了问题" {
 		t.Fatalf("judge_why lost in the round-trip: %q", out.JudgeWhy)
+	}
+}
+
+// CumuStore.Save writes an explicit field map, NOT a whole-struct marshal
+// like the memory store — so a field added to Cluster is silently dropped
+// on the Badger path while every memory-store test stays green. The C2
+// judge stamp died at exactly this seam: in-memory tests passed, the
+// durable record came back empty, and nothing on the write path errored.
+// This walks the struct's json tags and fails when one is missing from the
+// document the store actually WROTE (read raw, not parsed — the parsed
+// form cannot reveal a field Save never wrote). The next added field is
+// now the gate's problem, not whoever-remembers'.
+func TestCumuStoreSaveCoversEveryClusterField(t *testing.T) {
+	ctx := context.Background()
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	const coll = "clus_clusters"
+	if err := engine.EnsureCollection(ctx, coll); err != nil {
+		t.Fatal(err)
+	}
+	st := NewCumuStore(engine, coll)
+	yes := true
+	// Every field populated, so no conditional branch can hide a gap.
+	in := Cluster{
+		ID: "c1", TopicKey: "k", TopicKeys: []string{"k2"},
+		LevelKeys: []LevelKey{{Level: "scenario", Text: "t"}},
+		KeyEmbeds: [][]float64{{1}},
+		Name:      "n", Content: "c", Queries: []string{"q"},
+		Embed: []float64{1}, Confidence: 0.5, Hotness: 0.5,
+		Lifecycle: "stable", Version: 2, SourceID: "s",
+		Evidence: []mcs.Sample{{Content: "e"}},
+		JudgeOK:  &yes, JudgeWhy: "w", Flags: map[string]bool{"f": true},
+	}
+	if err := st.Save(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	res, err := engine.Query(ctx, coll, contract.Query{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Documents) != 1 {
+		t.Fatalf("stored docs = %d, want 1", len(res.Documents))
+	}
+	doc := res.Documents[0]
+	typ := reflect.TypeOf(Cluster{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if _, ok := doc[name]; !ok {
+			t.Errorf("Cluster field %q is missing from the CumuStore document — Save's field map is out of sync with the struct (this is how the judge stamp vanished)", name)
+		}
 	}
 }
