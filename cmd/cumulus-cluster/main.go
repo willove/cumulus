@@ -580,7 +580,7 @@ func main() {
 		runBucketCLI(ctx, c, rest)
 	case "serve":
 		fs := flag.NewFlagSet("serve", flag.ExitOnError)
-		listen := fs.String("listen", "127.0.0.1:8484", "listen address")
+		listen := fs.String("listen", "127.0.0.1:8484", "listen address — 面上无任何鉴权,回环绑定即安全边界;绑到 127.0.0.1 之外等于把摄取/扫描/检索暴露给所有能连到该端口者")
 		verbose := fs.Bool("verbose", false, "per-request diagnostic logs (also CLUS_VERBOSE=1)")
 		_ = fs.Parse(rest)
 		// serve is long-running: the whole-process CLI budget above (60s, or

@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 
 	"github.com/willove/cumulite"
@@ -54,6 +55,12 @@ type ResetReport struct {
 	Total     int            `json:"total"`
 }
 
+// kvScanCap bounds the KV listing (the Port contract has no cursor — one
+// page per prefix). Hitting it is reported loudly rather than silently
+// under-deleting / under-counting: a false "clean" poisons the very eval
+// starting point this reset exists to guarantee.
+const kvScanCap = 10000
+
 // ResetLearned clears the namespace's derived learning state. dryRun counts
 // without deleting (the "what would this touch?" preflight). Sources are
 // never in the list, so the corpus survives by construction, not by a flag.
@@ -77,9 +84,12 @@ func ResetLearned(ctx context.Context, c cumulite.Port, namespace, evidenceColl 
 	// KV: sessions + the ask cursor. Keys are listed then deleted; a key that
 	// vanished between list and delete is reported as gone, not an error.
 	for _, prefix := range []string{sessionKVPrefix(namespace), cursorKVKey(namespace)} {
-		keys, err := c.KVKeys(ctx, prefix, 10000)
+		keys, err := c.KVKeys(ctx, prefix, kvScanCap)
 		if err != nil {
 			return nil, fmt.Errorf("list kv %s: %w", prefix, err)
+		}
+		if len(keys) == kvScanCap {
+			log.Printf("resetlearned: kv list for %s hit the %d-key scan cap — residue beyond it is NOT deleted", prefix, kvScanCap)
 		}
 		if !dryRun {
 			for _, k := range keys {
@@ -164,9 +174,12 @@ func LearningState(ctx context.Context, c cumulite.Port, namespace, evidenceColl
 		rep.Total += n
 	}
 	for _, prefix := range []string{sessionKVPrefix(namespace), cursorKVKey(namespace)} {
-		keys, err := c.KVKeys(ctx, prefix, 10000)
+		keys, err := c.KVKeys(ctx, prefix, kvScanCap)
 		if err != nil {
 			return nil, err
+		}
+		if len(keys) == kvScanCap {
+			log.Printf("learning: kv list for %s hit the %d-key scan cap — the report may read cleaner than reality", prefix, kvScanCap)
 		}
 		rep.KVKeys += len(keys)
 	}

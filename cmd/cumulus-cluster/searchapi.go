@@ -481,6 +481,14 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			var streamMu sync.Mutex
 			streamed := 0
 			streamSt := &streamState{mu: &streamMu, streamed: &streamed}
+			// recStage/emitDelta read streamSt.onStage/emit WITHOUT st.mu.
+			// That is safe by structure, not by luck: sseSearch installs the
+			// hooks, runs runSearch (whose engine hooks call back
+			// synchronously), and clears them — all in THIS goroutine. If
+			// the engine hooks ever fire from another goroutine, these reads
+			// must take st.mu first, and the lock ORDER against the SSE
+			// writer mutex must be designed then — do not bolt a lock on
+			// here without that design.
 			recStage := func(name string, d time.Duration) {
 				stageMu.Lock()
 				stages[name] = d.Microseconds()
