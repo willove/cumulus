@@ -178,3 +178,38 @@ func TestSessionBridgeFailureKeepsPrimaryWindows(t *testing.T) {
 		t.Fatalf("summary quotes the failed bridge candidate: %s", ans.Summary)
 	}
 }
+
+// Cross-script gate fairness (P2 transfer fixes): a Latin greeting word
+// must match as a whole word — "hi" inside "which?" is not a greeting, and
+// a question eaten by the chat gate never reaches retrieval. The doc-summary
+// and question-word gates get the same treatment: English verbs and
+// wh-words must route like their Chinese counterparts instead of falling
+// through (or misfiring) on script alone.
+func TestIntentGatesAreScriptFair(t *testing.T) {
+	for _, q := range []string{"which", "this", "thin", "arch?"} {
+		if LooksLikeChat(q) {
+			t.Errorf("LooksLikeChat(%q)=true — a Latin substring is not a greeting", q)
+		}
+	}
+	for _, q := range []string{"hi", "hello", "thanks"} {
+		if !LooksLikeChat(q) {
+			t.Errorf("LooksLikeChat(%q)=false, want true", q)
+		}
+	}
+	if !LooksLikeDocSummary("summarize this") {
+		t.Error("LooksLikeDocSummary(\"summarize this\")=false — English verb+scope must pass")
+	}
+	if LooksLikeDocSummary("what is probation") {
+		t.Error("LooksLikeDocSummary(\"what is probation\")=true — a question is not a doc-summary op")
+	}
+	for _, q := range []string{"what is the max connection", "how do I reset"} {
+		if !questionShaped(q) {
+			t.Errorf("questionShaped(%q)=false — English question routed to filename-only", q)
+		}
+	}
+	for _, q := range []string{"config max connections", "部署手册"} {
+		if questionShaped(q) {
+			t.Errorf("questionShaped(%q)=true — a noun phrase is not a question", q)
+		}
+	}
+}

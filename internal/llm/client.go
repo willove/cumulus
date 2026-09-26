@@ -675,7 +675,7 @@ type AigateKeywordRefiner struct {
 func (r *AigateKeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
 	domain := strings.TrimSpace(os.Getenv("CLUS_DOMAIN_HINT"))
 	if domain == "" {
-		domain = "未指定——按通用书面文档处理"
+		domain = "通用文档（未指定领域）"
 	}
 	tmpl := prompts.MustRender(prompts.KeywordsRefine, map[string]string{
 		"query":  query,
@@ -744,7 +744,7 @@ func (s *AigateQuerySimulator) Complement(ctx context.Context, origin string, tr
 	}
 	domain := strings.TrimSpace(os.Getenv("CLUS_DOMAIN_HINT"))
 	if domain == "" {
-		domain = "未指定——按通用书面文档处理"
+		domain = "通用文档（未指定领域）"
 	}
 	seen := append([]string{}, tried...)
 	raw2, err := s.Client.Complete(ctx, prompts.MustRender(prompts.QueryFromAbstract, map[string]string{

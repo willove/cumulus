@@ -21,6 +21,7 @@ import (
 	"github.com/willove/cumulus/internal/kb"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/source"
 )
 
@@ -266,7 +267,7 @@ func (e *evalExecutor) Execute(ctx context.Context, it eval.Item, remaining int6
 			return
 		}
 		before := chat.TotalTokens()
-		answer, err := chat.Complete(ctx, "仅凭你自己的记忆回答下面的问题，不要编造；不知道就只回答「不知道」。问题："+it.Query)
+		answer, err := chat.Complete(ctx, prompts.MustRender(prompts.ClosedBook, map[string]string{"query": it.Query}))
 		out.ClosedBookTokens = chat.TotalTokens() - before
 		out.ClosedBookAnswer = answer
 		if e.budget != nil {

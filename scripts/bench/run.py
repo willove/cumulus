@@ -88,18 +88,23 @@ def main():
         shutil.rmtree(data)
     shutil.copytree(BASE, data, ignore=shutil.ignore_patterns("LOCK", "*.lock"))
 
+    # The namespace comes from the scenario set, never from this file: the
+    # harness is corpus-agnostic, and every CLI/serve call below uses it.
+    spec = json.load(open(args.scenarios))
+    ns = spec.get("ns", "chinalaw")
+
     # 干净起点：reset 掉这份拷贝学过的所有东西（语料不动）。记录 reset 前后
     # 的学习状态，让“这轮从多干净开始”成为结果的一部分而不是口头承诺。
     start_state = None
     if args.reset:
         rc = subprocess.run([os.path.join(ROOT, "bin", "cumulus-cluster"), "-data", data,
-                             "reset", "learned", "-yes", "-ns", "chinalaw",
+                             "reset", "learned", "-yes", "-ns", ns,
                              "-evidence", "clus_evidence"],
                             cwd=ROOT, capture_output=True, text=True)
         if rc.returncode != 0:
             raise SystemExit(f"reset failed: {rc.stderr[:300]}")
     rc = subprocess.run([os.path.join(ROOT, "bin", "cumulus-cluster"), "-data", data,
-                         "learning", "-ns", "chinalaw", "-evidence", "clus_evidence"],
+                         "learning", "-ns", ns, "-evidence", "clus_evidence"],
                         cwd=ROOT, capture_output=True, text=True)
     if rc.returncode == 0:
         try:
@@ -116,19 +121,17 @@ def main():
         env[k] = v
     binpath = os.path.join(ROOT, "bin", "cumulus-cluster")
     proc = subprocess.Popen(
-        [binpath, "-ns", "chinalaw", "-sources", "clus_sources", "-evidence", "clus_evidence",
+        [binpath, "-ns", ns, "-sources", "clus_sources", "-evidence", "clus_evidence",
          "-data", data, "serve", "-listen", f"127.0.0.1:{PORT}"],
         cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     try:
         wait_health(proc)
-        spec = json.load(open(args.scenarios))
-        ns = spec.get("ns", "chinalaw")
         runs = []
         for pass_no in range(1, max(1, args.passes) + 1):
             if args.passes > 1:
                 st = subprocess.run([os.path.join(ROOT, "bin", "cumulus-cluster"), "-data", data,
-                                     "learning", "-ns", "chinalaw", "-evidence", "clus_evidence"],
+                                     "learning", "-ns", ns, "-evidence", "clus_evidence"],
                                     cwd=ROOT, capture_output=True, text=True)
                 learned = "?"
                 if st.returncode == 0:
@@ -153,7 +156,10 @@ def main():
                         "conf": round(ans.get("confidence", 0), 3),
                         "loops": d.get("loops", 0), "widened": d.get("widened", 0),
                         "stop": d.get("stop_reason", ""),
-                        "insufficient": "证据不足" in (ans.get("summary") or ""),
+                        # Structured flag, NOT a substring of the summary text:
+                        # the old "证据不足" match silently read false on any
+                        # non-Chinese summary.
+                        "insufficient": bool(ans.get("refused")),
                         "docs": sorted({r.get("source_id", "") for r in refs}),
                         "refs": len(refs),
                         "tokens": d.get("tokens", 0),
@@ -171,7 +177,7 @@ def main():
         dest = os.path.join(BENCH, f"results-{args.tag}.json")
         json.dump(out, open(dest, "w"), ensure_ascii=False, indent=1)
         rc2 = subprocess.run([os.path.join(ROOT, "bin", "cumulus-cluster"), "-data", data,
-                              "learning", "-ns", "chinalaw", "-evidence", "clus_evidence"],
+                              "learning", "-ns", ns, "-evidence", "clus_evidence"],
                              cwd=ROOT, capture_output=True, text=True)
         if rc2.returncode == 0:
             try:

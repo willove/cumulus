@@ -25,6 +25,7 @@ const (
 	QueryAbstract      = "query_abstract"
 	QueryFromAbstract  = "query_from_abstract"
 	ScanRank           = "scan_rank"
+	ClosedBook         = "closed_book"
 )
 
 // Load returns the raw markdown body of a prompt asset.

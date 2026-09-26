@@ -575,7 +575,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 					// — 刑法 not in the corpus): what is missing and the
 					// likely shape of the gap, so the user can act on it.
 					res.Answer.Summary = "证据不足，暂不作答。语料中未找到与「" + query +
-						"」直接相关的原文依据；该问题所需的法规可能未被本库收录（例如罪名定义多见于《刑法》），补充相关法规或文档后再问。"
+						"」直接相关的原文依据；所需内容可能未被本库收录，补充相关文档后再问。"
 				}
 				res.AbstainEarly = true
 				res.Citations.Legend = legend(res.Citations, false)
@@ -714,7 +714,7 @@ func deepMetrics(query, srcTitle string, kept []mcs.Sample, rep facts.Report) (c
 	// 答案的摘要——用户看到的是引文，读不出「这句话回答不了你的问题」。
 	// 头部前缀保持原样：模板识别（fast.RefusedOfSummary 依赖「摘要】」）不能破。
 	if !rep.Complete {
-		b.WriteString("⚠ 证据不足：这份语料里没有能直接回答这个问题的依据。以下是最接近的条文，它不等于答案；请补充相关法规或文档后再问。\n")
+		b.WriteString("⚠ 证据不足：这份语料里没有能直接回答这个问题的依据。以下是最接近的原文片段，它不等于答案；请补充相关文档后再问。\n")
 	}
 	b.WriteString("【来源】")
 	b.WriteString(srcTitle)
@@ -1372,8 +1372,13 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	if bestSrc.ID == "" || len(kept) == 0 {
 		kept = topKeepsWith(kept, sources)
 		rep = report(kept)
+		// Refused rides with Skipped here as it does on the other two
+		// refusal paths: without the flag this bare refusal looked like a
+		// normal answer to every consumer (the ledger gate, the bench's
+		// insufficient metric) — the same missing-flag drift the recordUsage
+		// gate fixes on its side.
 		return fast.Answer{
-			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true,
+			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true, Refused: true,
 			Summary: insufficientSummary(query, tried, sources),
 		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 	}
@@ -1465,7 +1470,7 @@ func insufficientSummary(query string, tried map[string]bool, sources []source.S
 	var titles []string
 	for _, s := range sources {
 		if tried[s.ID] && len(titles) < 5 {
-			titles = append(titles, "《"+srcLabel(s)+"》")
+			titles = append(titles, srcLabel(s))
 		}
 	}
 	b := "深度检索仍证据不足。"
@@ -1475,7 +1480,7 @@ func insufficientSummary(query string, tried map[string]bool, sources []source.S
 	} else {
 		b += "语料中未检索到与「" + query + "」相关的原文依据。"
 	}
-	b += "这可能是因为：① 问法措辞与法条原文差异较大；② 该问题所需的法规本库未收录（例如罪名定义多见于《刑法》，概念定义多见于专门法律/司法解释）。补充相关法规或文档后再问。"
+	b += "这可能是因为：① 问法措辞与语料原文差异较大；② 该问题所需的内容本库未收录。补充相关文档后再问。"
 	return b
 }
 

@@ -507,7 +507,7 @@ func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn
 	// split so SearchTokens stays a pure retrieval cost line.
 	cbAns := ""
 	if chat != nil {
-		cbAns, _ = chat.Complete(ctx, "仅凭你自己的记忆回答下面的问题，不要编造；不知道就只回答「不知道」。问题："+it.Query)
+		cbAns, _ = chat.Complete(ctx, prompts.MustRender(prompts.ClosedBook, map[string]string{"query": it.Query}))
 	}
 	rec.CB = eval.ClosedBook(it, cbAns)
 	if judgeOn && chat != nil && strings.TrimSpace(cbAns) != "" {

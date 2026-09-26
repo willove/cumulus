@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/prior"
@@ -538,9 +539,19 @@ const (
 // mcs.Fields as the keyword cascade. Mechanism carrier, not a quality claim.
 type RuleAnalyzer struct{}
 
-var docVerbRe = regexp.MustCompile(`^(请|帮我|给我)?(总结|概括|通读|翻译)`)
-var docScopeRe = regexp.MustCompile(`(全文|整篇|整份|这份|文档|一下|the whole)`)
+var docVerbRe = regexp.MustCompile(`^(请|帮我|给我)?(总结|概括|通读|翻译)|^(please\s+)?(summarize|summarise|translate|recap)`)
+var docScopeRe = regexp.MustCompile(`(全文|整篇|整份|这份|文档|一下|the whole|this (doc|document|file)|this)`)
 var chatGreetWords = []string{"你好", "您好", "在吗", "hello", "hi", "thanks", "谢谢", "再见", "拜拜"}
+
+// wordsOf splits on non-alphanumeric runes — Latin token matching for the
+// gates below (substring matching a Latin word eats English questions:
+// "hi" inside "which?" is not a greeting, and a question eaten here never
+// reaches retrieval at all).
+func wordsOf(q string) []string {
+	return strings.FieldsFunc(q, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
 
 // LooksLikeChat is the deterministic chat gate: a SHORT greeting-shaped
 // query. It backs the chat verdict of the production analyzer — see
@@ -553,7 +564,18 @@ func LooksLikeChat(query string) bool {
 	if q == "" || len([]rune(q)) > 8 {
 		return false
 	}
+	words := wordsOf(q)
 	for _, w := range chatGreetWords {
+		// CJK greetings match as substrings (你好/在吗 are distinctive
+		// sequences); Latin greetings match whole words only.
+		if []rune(w)[0] < 0x80 {
+			for _, tok := range words {
+				if tok == w {
+					return true
+				}
+			}
+			continue
+		}
 		if strings.Contains(q, w) {
 			return true
 		}
@@ -568,6 +590,26 @@ func LooksLikeDocSummary(query string) bool {
 	q := strings.TrimSpace(strings.ToLower(query))
 	return len([]rune(strings.TrimSpace(query))) <= 16 &&
 		docVerbRe.MatchString(q) && docScopeRe.MatchString(q)
+}
+
+// questionShaped reports whether the query ASKS something rather than
+// naming a document (bare noun phrases go to the FILENAME_ONLY tier).
+// The character set covers CJK question characters; Latin questions are
+// recognised by their wh-words/auxiliaries — without them an English
+// "what is the max connection" (22 runes) looked like a filename lookup
+// and never reached keyword retrieval.
+func questionShaped(q string) bool {
+	if strings.ContainsAny(q, "吗多少什么如何怎么为什么?？") {
+		return true
+	}
+	for _, tok := range wordsOf(strings.ToLower(q)) {
+		switch tok {
+		case "what", "how", "why", "which", "when", "where", "who", "whom",
+			"does", "do", "is", "are", "can", "could", "should", "would", "will":
+			return true
+		}
+	}
+	return false
 }
 
 func (RuleAnalyzer) Analyze(_ context.Context, query string) (Analysis, error) {
@@ -605,7 +647,7 @@ func MatchFilename(query string, sources []source.Source) (Answer, bool) {
 				hits = append(hits, s)
 			}
 		}
-	} else if len([]rune(q)) <= 24 && !strings.ContainsAny(q, "吗多少什么如何怎么为什么?？") {
+	} else if len([]rune(q)) <= 24 && !questionShaped(q) {
 		for _, s := range sources {
 			if s.Status != source.StatusActive {
 				continue
