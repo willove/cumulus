@@ -43,14 +43,15 @@ const (
 
 // Edge is a directed weak semantic link between two clusters.
 type Edge struct {
-	ID     string  `json:"_id"`
-	From   string  `json:"_from"`
-	To     string  `json:"_to"`
-	Weight float64 `json:"weight"` // [0,1]
-	Source string  `json:"source"` // co_occur | query_seq | embed_sim
-	Kind   string  `json:"kind,omitempty"`
-	Reason string  `json:"reason,omitempty"` // human-readable derivation (UI/API)
-	Hits   int     `json:"hits,omitempty"`   // query_seq traversals so far
+	ID     string    `json:"_id"`
+	From   string    `json:"_from"`
+	To     string    `json:"_to"`
+	Weight float64   `json:"weight"` // [0,1]
+	Source string    `json:"source"` // co_occur | query_seq | embed_sim
+	Kind   string    `json:"kind,omitempty"`
+	Reason string    `json:"reason,omitempty"` // human-readable derivation (UI/API)
+	Hits   int       `json:"hits,omitempty"`   // query_seq traversals so far
+	TS     time.Time `json:"ts"`               // write timestamp (diagnostic read faces surface it)
 }
 
 // Store persists edges (clus_weak_edges in production).

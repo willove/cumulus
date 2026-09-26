@@ -13,6 +13,7 @@ import (
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/storedoc"
 )
 
 // RunDoc is one persisted eval run.
@@ -57,6 +58,7 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "clus_evals"
 	}
+	storedoc.DeclareShape(context.Background(), c, coll, RunDoc{})
 	return &CumuStore{c: c, coll: coll}
 }
 
@@ -77,27 +79,14 @@ func (s *CumuStore) SaveRun(ctx context.Context, d RunDoc) error {
 	if d.At == "" {
 		d.At = time.Now().UTC().Format(time.RFC3339)
 	}
-	doc := map[string]any{
-		"_id": d.ID, "tag": d.Tag, "at": d.At, "n": d.N, "judged": d.Judged,
-		"system": d.System, "closed_book": d.ClosedBook, "mcnemar": d.McNemar,
-		"modes": d.Modes, "search_tokens": d.SearchTokens, "judge_tokens": d.JudgeTokens,
-		"rejected_proposals": d.RejectedProposals,
-	}
-	if d.Frozen != nil {
-		doc["frozen"] = d.Frozen
-	}
-	if d.ConfigText != "" {
-		doc["config_text"] = d.ConfigText
-	}
-	if len(d.Extra) > 0 {
-		doc["extra"] = d.Extra
-	}
+	// Typed write: RunDoc's json tags ARE the document. The hand-maintained
+	// table this replaces is where a new RunDoc field would have vanished
+	// silently — the scoreboard's own shape must not drift from the type.
+	exists := false
 	if existing, err := s.c.GetDocument(ctx, s.coll, d.ID); err == nil && existing != nil {
-		_, err := s.c.ReplaceDocument(ctx, s.coll, d.ID, doc)
-		return err
+		exists = true
 	}
-	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
-	return err
+	return storedoc.WriteStruct(ctx, s.c, s.coll, d.ID, d, exists)
 }
 
 // ListRuns returns the newest runs first (bounded).

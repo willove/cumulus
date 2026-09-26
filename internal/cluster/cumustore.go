@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
-	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/storedoc"
 )
 
 // CumuStore persists clusters in a store collection (default clus_clusters).
@@ -27,61 +26,35 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "clus_clusters"
 	}
-	return &CumuStore{c: c, coll: coll}
+	s := &CumuStore{c: c, coll: coll}
+	// Declare the collection's canonical shape (cumulite ShapePort): the
+	// zero Cluster's json tags. Writes that reach storage through any
+	// other path (a patch, a future map) are then audited against the
+	// struct instead of trusted.
+	storedoc.DeclareShape(context.Background(), c, coll, Cluster{})
+	return s
 }
 
+// Save writes the cluster through cumulite's typed path (StructPort) when
+// the engine offers it, and through a doc DERIVED from the struct's json
+// tags otherwise — never through a hand-maintained field table. The table
+// this replaced is exactly where the C2 judge stamp vanished: a field
+// added to Cluster was dropped by the table while the in-memory store
+// (whole-struct marshal) kept it, and nothing on the write path errored.
 func (s *CumuStore) Save(ctx context.Context, c Cluster) error {
-	doc := map[string]any{
-		"_id":        c.ID,
-		"topic_key":  c.TopicKey,
-		"name":       c.Name,
-		"content":    c.Content,
-		"queries":    c.Queries,
-		"embed":      c.Embed,
-		"confidence": c.Confidence,
-		"hotness":    c.Hotness,
-		"lifecycle":  c.Lifecycle,
-		"version":    c.Version,
-		"source_id":  c.SourceID,
-		"evidence":   evidenceToAny(c.Evidence),
-		"flags":      c.Flags,
-		"created_at": c.CreatedAt.Format(time.RFC3339Nano),
-		"updated_at": c.UpdatedAt.Format(time.RFC3339Nano),
-	}
-	if len(c.TopicKeys) > 0 {
-		doc["topic_keys"] = c.TopicKeys
-	}
-	if len(c.LevelKeys) > 0 {
-		doc["level_keys"] = c.LevelKeys
-	}
-	if len(c.KeyEmbeds) > 0 {
-		doc["key_embeds"] = c.KeyEmbeds
-	}
-	// The persist judge's verdict (C2). Save writes an explicit field map,
-	// so a new Cluster field is dropped here unless it is listed — the
-	// stamp used to die at this boundary while the in-memory store (whole-
-	// struct marshal) kept it, which is exactly the kind of silent split
-	// the round-trip test pins.
-	if c.JudgeOK != nil {
-		doc["judge_ok"] = *c.JudgeOK
-	}
-	if c.JudgeWhy != "" {
-		doc["judge_why"] = c.JudgeWhy
-	}
 	// Insert-or-replace by _id (content-stable id) — but never silently
 	// across identities: two topic_keys colliding on one id must be loud,
 	// or the second Save quietly eats the first cluster.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	exists := false
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
 		if tk, _ := existing["topic_key"].(string); tk != "" && c.TopicKey != "" && tk != c.TopicKey {
 			return fmt.Errorf("cluster %s already holds topic_key %s, refusing to overwrite with %s", c.ID, tk, c.TopicKey)
 		}
-		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)
-		return err
+		exists = true
 	}
-	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
-	return err
+	return storedoc.WriteStruct(ctx, s.c, s.coll, c.ID, c, exists)
 }
 
 func (s *CumuStore) Get(ctx context.Context, id string) (*Cluster, error) {
@@ -153,25 +126,6 @@ func (s *CumuStore) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("cluster %s not found", id)
 	}
 	return nil
-}
-
-func evidenceToAny(ev []mcs.Sample) []any {
-	out := make([]any, 0, len(ev))
-	for _, s := range ev {
-		doc := map[string]any{
-			"start": s.Start, "end": s.End, "content": s.Content,
-			"source": s.Source, "score": s.Score, "reasoning": s.Reasoning,
-		}
-		// annotations ride along when present (omitempty shapes).
-		if s.Arm != "" {
-			doc["arm"] = s.Arm
-		}
-		if len(s.Covers) > 0 {
-			doc["covers"] = s.Covers
-		}
-		out = append(out, doc)
-	}
-	return out
 }
 
 func fromDoc(d map[string]any) (*Cluster, error) {

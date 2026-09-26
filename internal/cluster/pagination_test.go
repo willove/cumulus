@@ -3,12 +3,9 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/willove/cumulite"
-	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/mcs"
 )
 
@@ -109,16 +106,15 @@ func TestCumuStoreRoundTripKeepsJudgeVerdict(t *testing.T) {
 	}
 }
 
-// CumuStore.Save writes an explicit field map, NOT a whole-struct marshal
-// like the memory store — so a field added to Cluster is silently dropped
-// on the Badger path while every memory-store test stays green. The C2
-// judge stamp died at exactly this seam: in-memory tests passed, the
-// durable record came back empty, and nothing on the write path errored.
-// This walks the struct's json tags and fails when one is missing from the
-// document the store actually WROTE (read raw, not parsed — the parsed
-// form cannot reveal a field Save never wrote). The next added field is
-// now the gate's problem, not whoever-remembers'.
-func TestCumuStoreSaveCoversEveryClusterField(t *testing.T) {
+// The typed Save path (cumulite StructPort) makes a field-map drift
+// impossible by construction — json.Marshal of the struct IS the document,
+// so there is no table left to forget a field. This pins the guarantee
+// with the engine's own tools instead of a reflection copy of the same
+// idea: the declared shape's audit of what actually landed (ShapeReport),
+// a full round-trip proof (DocVerifier), and a parse-level read-back.
+// Before the typed path existed, a hand-maintained table dropped the C2
+// judge stamp here silently while every memory-store test stayed green.
+func TestCumuStoreTypedWriteIsShapeCleanAndRoundTrips(t *testing.T) {
 	ctx := context.Background()
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
 	if err != nil {
@@ -129,9 +125,8 @@ func TestCumuStoreSaveCoversEveryClusterField(t *testing.T) {
 	if err := engine.EnsureCollection(ctx, coll); err != nil {
 		t.Fatal(err)
 	}
-	st := NewCumuStore(engine, coll)
+	st := NewCumuStore(engine, coll) // declares the collection shape
 	yes := true
-	// Every field populated, so no conditional branch can hide a gap.
 	in := Cluster{
 		ID: "c1", TopicKey: "k", TopicKeys: []string{"k2"},
 		LevelKeys: []LevelKey{{Level: "scenario", Text: "t"}},
@@ -145,23 +140,38 @@ func TestCumuStoreSaveCoversEveryClusterField(t *testing.T) {
 	if err := st.Save(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	res, err := engine.Query(ctx, coll, contract.Query{Limit: 10})
+
+	// 1) The shape audit: what landed carries no missing/unknown keys.
+	raw, err := engine.GetDocument(ctx, coll, in.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Documents) != 1 {
-		t.Fatalf("stored docs = %d, want 1", len(res.Documents))
+	audit, err := engine.ShapeReport(coll, raw)
+	if err != nil {
+		t.Fatal(err)
 	}
-	doc := res.Documents[0]
-	typ := reflect.TypeOf(Cluster{})
-	for i := 0; i < typ.NumField(); i++ {
-		tag := typ.Field(i).Tag.Get("json")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		name := strings.Split(tag, ",")[0]
-		if _, ok := doc[name]; !ok {
-			t.Errorf("Cluster field %q is missing from the CumuStore document — Save's field map is out of sync with the struct (this is how the judge stamp vanished)", name)
-		}
+	if len(audit.Missing) > 0 || len(audit.Unknown) > 0 {
+		t.Fatalf("shape audit of the written document: missing=%v unknown=%v", audit.Missing, audit.Unknown)
+	}
+
+	// 2) The round-trip proof: storage holds exactly what was written.
+	diff, err := engine.VerifyDoc(ctx, coll, in.ID, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diff) > 0 {
+		t.Fatalf("round-trip diff: %v", diff)
+	}
+
+	// 3) Parse-level: a Get returns every field, judge verdict included.
+	out, err := st.Get(ctx, in.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.JudgeOK == nil || !*out.JudgeOK || out.JudgeWhy != "w" {
+		t.Fatalf("judge verdict lost: ok=%v why=%q", out.JudgeOK, out.JudgeWhy)
+	}
+	if out.Content != in.Content || len(out.Evidence) != 1 || out.Evidence[0].Content != "e" {
+		t.Fatalf("core fields lost: %+v", out)
 	}
 }

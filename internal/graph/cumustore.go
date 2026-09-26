@@ -8,6 +8,7 @@ import (
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/storedoc"
 )
 
 // CumuStore persists weak edges in clus_weak_edges and caches adjacency in
@@ -50,39 +51,31 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 		return s.(*CumuStore)
 	}
 	s := &CumuStore{c: c, coll: coll}
+	// Declare the collection's canonical shape (cumulite ShapePort) so any
+	// non-typed write to this collection is audited against Edge's tags.
+	storedoc.DeclareShape(context.Background(), c, coll, Edge{})
 	actual, _ := inner.LoadOrStore(coll, s)
 	return actual.(*CumuStore)
 }
 
+// Save writes through cumulite's typed path (StructPort) when available and
+// a tag-derived document otherwise — never a hand-maintained field table,
+// which is what used to drop new Edge fields silently. The write timestamp
+// rides as a real struct field (TS) so the stored shape is unchanged.
 func (s *CumuStore) Save(ctx context.Context, e Edge) error {
 	if e.ID == "" {
 		e.ID = edgeIDWithKind(e.From, e.To, e.Source, e.Kind)
 	}
-	doc := map[string]any{
-		"_id":    e.ID,
-		"_from":  e.From,
-		"_to":    e.To,
-		"weight": e.Weight,
-		"source": e.Source,
-		"ts":     time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	if e.Kind != "" {
-		doc["kind"] = e.Kind
-	}
-	if e.Reason != "" {
-		doc["reason"] = e.Reason
-	}
-	if e.Hits > 0 {
-		doc["hits"] = e.Hits
-	}
+	e.TS = time.Now().UTC()
+	exists := false
 	if existing, err := s.c.GetDocument(ctx, s.coll, e.ID); err == nil && existing != nil {
-		_, err := s.c.ReplaceDocument(ctx, s.coll, e.ID, doc)
-		s.invalidate(e.From, e.To)
+		exists = true
+	}
+	if err := storedoc.WriteStruct(ctx, s.c, s.coll, e.ID, e, exists); err != nil {
 		return err
 	}
-	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
 	s.invalidate(e.From, e.To)
-	return err
+	return nil
 }
 
 // From returns e's outbound edges (cache-first).

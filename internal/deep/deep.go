@@ -87,11 +87,12 @@ type CitationSet struct {
 
 // Conflict is a contested link between two clusters (clus_conflicts).
 type Conflict struct {
-	ID     string `json:"_id"`
-	A      string `json:"a"`
-	B      string `json:"b"`
-	Group  string `json:"group"`
-	Reason string `json:"reason"`
+	ID     string    `json:"_id"`
+	A      string    `json:"a"`
+	B      string    `json:"b"`
+	Group  string    `json:"group"`
+	Reason string    `json:"reason"`
+	Saved  time.Time `json:"saved"` // write timestamp (diagnostic read faces surface it)
 }
 
 // ConflictStore persists conflict edges.

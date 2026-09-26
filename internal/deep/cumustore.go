@@ -7,7 +7,22 @@ import (
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/storedoc"
 )
+
+// citeDoc is the stored shape of one citation edge — the same keys the
+// hand-maintained table used to write, now a struct so the typed path and
+// the shape audit speak one vocabulary.
+type citeDoc struct {
+	ID       string    `json:"_id"`
+	From     string    `json:"_from"`
+	To       string    `json:"_to"`
+	Start    int       `json:"start"`
+	End      int       `json:"end"`
+	Score    float64   `json:"score"`
+	Kind     string    `json:"kind"`
+	Recorded time.Time `json:"recorded"`
+}
 
 // CumuCiteStore persists cluster → source evidence edges (clus_cites).
 type CumuCiteStore struct {
@@ -19,28 +34,23 @@ func NewCumuCiteStore(c cumulite.Port, coll string) *CumuCiteStore {
 	if coll == "" {
 		coll = "clus_cites"
 	}
+	storedoc.DeclareShape(context.Background(), c, coll, citeDoc{})
 	return &CumuCiteStore{c: c, coll: coll}
 }
 
 // SaveCite records one citation edge; idempotent by (cluster, source, window).
 func (s *CumuCiteStore) SaveCite(ctx context.Context, clusterID, sourceID string, start, end int, score float64) error {
 	id := "cite:" + clusterID + ":" + sourceID + ":" + strconv.Itoa(start) + ":" + strconv.Itoa(end)
-	doc := map[string]any{
-		"_id":      id,
-		"_from":    clusterID,
-		"_to":      sourceID,
-		"start":    start,
-		"end":      end,
-		"score":    score,
-		"kind":     "evidence",
-		"recorded": time.Now().UTC().Format(time.RFC3339Nano),
+	doc := citeDoc{
+		ID: id, From: clusterID, To: sourceID,
+		Start: start, End: end, Score: score, Kind: "evidence",
+		Recorded: time.Now().UTC(),
 	}
+	exists := false
 	if existing, err := s.c.GetDocument(ctx, s.coll, id); err == nil && existing != nil {
-		_, err := s.c.ReplaceDocument(ctx, s.coll, id, doc)
-		return err
+		exists = true
 	}
-	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
-	return err
+	return storedoc.WriteStruct(ctx, s.c, s.coll, id, doc, exists)
 }
 
 // List returns all cite edges (read face for CLI/assertions). Paginated: a
@@ -70,6 +80,7 @@ func NewCumuStore(c cumulite.Port, coll string) *CumuStore {
 	if coll == "" {
 		coll = "clus_conflicts"
 	}
+	storedoc.DeclareShape(context.Background(), c, coll, Conflict{})
 	return &CumuStore{c: c, coll: coll}
 }
 
@@ -77,20 +88,12 @@ func (s *CumuStore) Save(ctx context.Context, c Conflict) error {
 	if c.ID == "" {
 		c.ID = "x:" + c.A + "-" + c.B + "-" + c.Group
 	}
-	doc := map[string]any{
-		"_id":    c.ID,
-		"a":      c.A,
-		"b":      c.B,
-		"group":  c.Group,
-		"reason": c.Reason,
-		"saved":  time.Now().UTC().Format(time.RFC3339Nano),
-	}
+	c.Saved = time.Now().UTC()
+	exists := false
 	if existing, err := s.c.GetDocument(ctx, s.coll, c.ID); err == nil && existing != nil {
-		_, err := s.c.ReplaceDocument(ctx, s.coll, c.ID, doc)
-		return err
+		exists = true
 	}
-	_, err := s.c.Insert(ctx, s.coll, []map[string]any{doc})
-	return err
+	return storedoc.WriteStruct(ctx, s.c, s.coll, c.ID, c, exists)
 }
 
 func (s *CumuStore) Between(ctx context.Context, a, b string) ([]Conflict, error) {

@@ -30,3 +30,5 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
 )
+
+replace github.com/willove/cumulite => ../db-works/cumulite

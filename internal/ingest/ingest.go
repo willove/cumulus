@@ -24,6 +24,7 @@ import (
 	"github.com/willove/cumulus/internal/adapt"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
+	"github.com/willove/cumulus/internal/storedoc"
 )
 
 // Result reports what a single put did.
@@ -58,6 +59,8 @@ func New(c cumulite.Port, sources, evidence, clusters, namespace string) *Store 
 	if clusters == "" {
 		clusters = "clus_clusters"
 	}
+	storedoc.DeclareShape(context.Background(), c, sources, source.Source{})
+	storedoc.DeclareShape(context.Background(), c, evidence, evDoc{})
 	return &Store{
 		c: c, sources: sources, evidence: evidence, clusters: clusters,
 		namespace: namespace, jobs: ns.KV(namespace, "clus:job:"),
@@ -132,7 +135,11 @@ func (s *Store) put(ctx context.Context, src source.Source, capBytes int) (Resul
 	src.Version = next
 	src.UpdatedAt = now
 
-	if _, err := s.c.Insert(ctx, s.sources, []map[string]any{toDoc(src)}); err != nil {
+	doc, derr := sourceDoc(src)
+	if derr != nil {
+		return Result{}, derr
+	}
+	if _, err := s.c.Insert(ctx, s.sources, []map[string]any{doc}); err != nil {
 		// A concurrent writer stored this revision first: that write is the
 		// state, so report it instead of failing the caller.
 		if existing, gerr := s.getSource(ctx, src.ID); gerr == nil && existing != nil {
@@ -256,7 +263,11 @@ func (b *BatchIngester) PutBatch(ctx context.Context, srcs []source.Source) (int
 		src.ID = source.RevisionID(identity, src.Title, src.Digest, next)
 		src.Version = next
 		src.UpdatedAt = now
-		if _, ierr := b.st.c.Insert(ctx, b.st.sources, []map[string]any{toDoc(src)}); ierr != nil {
+		bdoc, berr := sourceDoc(src)
+		if berr != nil {
+			return n, berr
+		}
+		if _, ierr := b.st.c.Insert(ctx, b.st.sources, []map[string]any{bdoc}); ierr != nil {
 			// Another writer stored this revision first: that write is the
 			// state, so skip rather than fail the whole batch.
 			if existing, gerr := b.st.getSource(ctx, src.ID); gerr == nil && existing != nil {
@@ -520,18 +531,15 @@ func (s *Store) MarkEvidence(ctx context.Context, docID string, start, end int, 
 		return "", fmt.Errorf("ingest: source %s not active", docID)
 	}
 	id := fmt.Sprintf("ev:%s:%d:%d", docID[4:], start, end)
-	doc := map[string]any{
-		"_id":       id,
-		"doc_id":    docID,
-		"start":     start,
-		"end":       end,
-		"score":     score,
-		"reasoning": reasoning,
-		"snippet":   snippet,
-		"status":    "live",
-		"created":   time.Now().UTC().Format(time.RFC3339Nano),
+	edoc, derr := storedoc.Doc(evDoc{
+		ID: id, DocID: docID, Start: start, End: end, Score: score,
+		Reasoning: reasoning, Snippet: snippet, Status: "live",
+		Created: time.Now().UTC(),
+	})
+	if derr != nil {
+		return "", derr
 	}
-	if _, err := s.c.Insert(ctx, s.evidence, []map[string]any{doc}); err != nil {
+	if _, err := s.c.Insert(ctx, s.evidence, []map[string]any{edoc}); err != nil {
 		if existing, gerr := s.getEvidence(ctx, id); gerr == nil && existing != nil {
 			return id, nil
 		}
@@ -1606,33 +1614,30 @@ func (s *Store) getEvidence(ctx context.Context, id string) (map[string]any, err
 	return d, nil
 }
 
-func toDoc(src source.Source) map[string]any {
-	return map[string]any{
-		"_id":          src.ID,
-		"body":         src.Body,
-		"title":        src.Title,
-		"source_type":  src.SourceType,
-		"source_uri":   src.SourceURI,
-		"digest":       src.Digest,
-		"structure":    structureToAny(src.Structure),
-		"meta":         src.Meta,
-		"lang":         src.Lang,
-		"version":      src.Version,
-		"status":       src.Status,
-		"ingested_at":  src.IngestedAt.Format(time.RFC3339Nano),
-		"updated_at":   src.UpdatedAt.Format(time.RFC3339Nano),
-		"business_key": src.BusinessKey,
-	}
+// evDoc is the stored shape of one evidence window — the keys the inline
+// table used to write, now a struct so the typed path and the shape audit
+// speak one vocabulary.
+type evDoc struct {
+	ID        string    `json:"_id"`
+	DocID     string    `json:"doc_id"`
+	Start     int       `json:"start"`
+	End       int       `json:"end"`
+	Score     float64   `json:"score"`
+	Reasoning string    `json:"reasoning"`
+	Snippet   string    `json:"snippet"`
+	Status    string    `json:"status"`
+	Created   time.Time `json:"created"`
 }
 
-func structureToAny(spans []source.Span) []any {
-	out := make([]any, 0, len(spans))
-	for _, s := range spans {
-		out = append(out, map[string]any{
-			"kind": s.Kind, "label": s.Label, "start": s.Start, "end": s.End,
-		})
-	}
-	return out
+// sourceDoc derives the stored document from source.Source's json tags —
+// the single source of truth. The hand-maintained table this replaces wrote
+// business_key UNCONDITIONALLY while the struct tag declares omitempty, a
+// small live example of the two-serializer drift the typed path ends (no
+// reader depends on the empty key: revisions() only ever filters a non-empty
+// business_key). structureToAny is gone too — Span's own tags emit the same
+// keys.
+func sourceDoc(src source.Source) (map[string]any, error) {
+	return storedoc.Doc(src)
 }
 
 func fromDoc(d map[string]any) (*source.Source, error) {
