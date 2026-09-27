@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"regexp"
@@ -496,7 +497,14 @@ func (a *AigateAnalyzer) Analyze(ctx context.Context, query string) (fast.Analys
 	}
 	an, err := ParseAnalyzeJSON(raw)
 	if err != nil {
-		return fast.Analysis{}, err
+		// The model emitted unparseable JSON even after the balanced-object
+		// extraction (observed on baike-058: trailing garbage). The cascade
+		// still gets deterministic keywords from the rule analyzer — a lost
+		// LLM weighting is cheap, a failed query is not (Search used to
+		// return this error and cost the whole item).
+		rule, _ := fast.RuleAnalyzer{}.Analyze(ctx, query)
+		log.Printf("[llm] analyze unparseable (%v) — degraded to rule analyzer for %q", err, query)
+		return rule, nil
 	}
 	if an.Intent == fast.IntentChat && !fast.LooksLikeChat(query) ||
 		an.Intent == fast.IntentDocSummary && !fast.LooksLikeDocSummary(query) {
@@ -550,8 +558,49 @@ type AnalyzeResult struct {
 	Keywords floatMap `json:"keywords_alt"`
 }
 
+// firstJSONObject returns the first brace-balanced {...} span in s,
+// string-aware (braces inside JSON strings don't count). Models decorate
+// their answers — trailing prose, a second copy of the object — and the
+// whole-string parse fails on any of it (baike-058: trailing garbage after
+// a complete object cost the item twice). Returns "" when no balanced
+// object exists.
+func firstJSONObject(s string) string {
+	start, depth := -1, 0
+	inStr, esc := false, false
+	for i, r := range s {
+		switch {
+		case esc:
+			esc = false
+		case inStr:
+			if r == '"' {
+				inStr = false
+			} else if r == '\\' {
+				esc = true
+			}
+		case r == '"':
+			inStr = true
+		case r == '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case r == '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					return s[start : i+1]
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // ParseAnalyzeJSON is exported for frozen prompt regression tests.
 func ParseAnalyzeJSON(raw string) (fast.Analysis, error) {
+	if obj := firstJSONObject(raw); obj != "" {
+		raw = obj
+	}
 	var parsed AnalyzeResult
 	if err := parseJSON(raw, &parsed); err != nil {
 		return fast.Analysis{}, err

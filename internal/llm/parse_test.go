@@ -87,3 +87,42 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// Models decorate structured answers: trailing prose, a duplicate object,
+// or — as baike-058 emitted — garbage after a complete object. The
+// balanced-object extraction must recover the payload instead of failing
+// the whole analysis.
+func TestParseAnalyzeJSONExtractsFirstBalancedObject(t *testing.T) {
+	// Trailing garbage after a complete object (the baike-058 failure shape).
+	raw := `{"intent":"search","primary":{"国王":0.9}}  "junk after the object"`
+	an, err := ParseAnalyzeJSON(raw)
+	if err != nil {
+		t.Fatalf("trailing garbage must not fail the parse: %v", err)
+	}
+	if an.Primary["国王"] != 0.9 {
+		t.Fatalf("payload lost: %v", an.Primary)
+	}
+	// A brace inside a string value must not confuse the depth counting.
+	raw2 := `{"intent":"search","primary":{"a}b":0.5},"tail":"x"}`
+	an2, err := ParseAnalyzeJSON(raw2)
+	if err != nil {
+		t.Fatalf("string braces must not break extraction: %v", err)
+	}
+	if an2.Primary["a}b"] != 0.5 {
+		t.Fatalf("string-brace key lost: %v", an2.Primary)
+	}
+	// Reasoning preamble before the object.
+	raw3 := "Let me think. {\"intent\":\"search\",\"primary\":{\"王\":0.3}}"
+	an3, err := ParseAnalyzeJSON(raw3)
+	if err != nil {
+		t.Fatalf("preamble must not fail the parse: %v", err)
+	}
+	if an3.Primary["王"] != 0.3 {
+		t.Fatalf("preamble case lost: %v", an3.Primary)
+	}
+	// Genuinely broken (no balanced object) still errors — the caller
+	// degrades to the rule analyzer rather than crashing the query.
+	if _, err := ParseAnalyzeJSON(`{"intent": "search"`); err == nil {
+		t.Fatal("unbalanced input must still error")
+	}
+}
