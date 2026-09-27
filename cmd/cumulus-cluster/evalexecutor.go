@@ -85,12 +85,13 @@ func (t *evalBudgetTransport) RoundTrip(r *http.Request) (*http.Response, error)
 }
 
 type evalExecutor struct {
-	engine *cumulite.Engine
-	stack  *searchStack
-	corpus []source.Source
-	keys   map[string]string
-	cfg    eval.Config
-	budget *evalBudgetTransport
+	engine     *cumulite.Engine
+	stack      *searchStack
+	corpus     []source.Source
+	keys       map[string]string
+	corpusKeys map[string]bool
+	cfg        eval.Config
+	budget     *evalBudgetTransport
 }
 
 func newEvalExecutor(ctx context.Context, rec eval.Record) (eval.Executor, error) {
@@ -112,6 +113,7 @@ func newEvalExecutor(ctx context.Context, rec eval.Record) (eval.Executor, error
 		return nil, err
 	}
 	keys := map[string]string{}
+	corpusKeys := map[string]bool{}
 	for _, src := range rec.Corpus {
 		raw, err := json.Marshal(src)
 		if err != nil {
@@ -127,6 +129,9 @@ func newEvalExecutor(ctx context.Context, rec eval.Record) (eval.Executor, error
 			return nil, err
 		}
 		keys[src.ID] = src.BusinessKey
+		if src.BusinessKey != "" {
+			corpusKeys[src.BusinessKey] = true
+		}
 	}
 	ps := prodStack{scorer: mcs.KeywordScorer{}, emb: cluster.Local{N: 64}}
 	var budget *evalBudgetTransport
@@ -153,7 +158,7 @@ func newEvalExecutor(ctx context.Context, rec eval.Record) (eval.Executor, error
 		}
 	}
 	success = true
-	return &evalExecutor{engine: c, stack: ss, corpus: rec.Corpus, keys: keys, cfg: rec.Run.Config, budget: budget}, nil
+	return &evalExecutor{engine: c, stack: ss, corpus: rec.Corpus, keys: keys, corpusKeys: corpusKeys, cfg: rec.Run.Config, budget: budget}, nil
 }
 func (e *evalExecutor) Close() error { return e.engine.Close() }
 func (e *evalExecutor) Execute(ctx context.Context, it eval.Item, remaining int64) (out eval.ItemResult) {
@@ -182,7 +187,7 @@ func (e *evalExecutor) Execute(ctx context.Context, it eval.Item, remaining int6
 			list = narrowed
 		}
 	}
-	rec, res := evalSearchOne(ctx, e.stack.dE, chat, list, e.keys, it)
+	rec, res := evalSearchOne(ctx, e.stack.dE, chat, list, e.keys, e.corpusKeys, it)
 	out.SearchTokens = rec.SearchTokens
 	out.Answer = res.Answer.Summary
 	out.Mode = res.Mode

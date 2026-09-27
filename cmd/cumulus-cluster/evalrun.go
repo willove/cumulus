@@ -130,8 +130,12 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		return err
 	}
 	keyByID := map[string]string{}
+	corpusKeys := map[string]bool{}
 	for _, s := range list {
 		keyByID[s.ID] = s.BusinessKey
+		if s.BusinessKey != "" {
+			corpusKeys[s.BusinessKey] = true
+		}
 	}
 	// L1 prefilter (D7): materialize the body_embed index once (bounded
 	// backfill), then narrow candidates per item by query-vector KNN.
@@ -234,7 +238,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 				runList = narrowed
 			}
 		}
-		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, it)
+		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, corpusKeys, it)
 		cancel()
 		line, err := json.Marshal(rec)
 		if err != nil {
@@ -415,7 +419,12 @@ func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn
 // evalSearchOne is the shared in-process per-item search and accounting
 // mechanism for CLI and GUI. The legacy wrapper below deliberately keeps the
 // historical judge-OR-rule scoring; eval-v2 scores its raw result separately.
-func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, list []source.Source, keyByID map[string]string, it eval.Item) (evalResult, deep.Result) {
+// corpusKeys is the FULL corpus's business-key set, built once from the
+// active list. It must not be derived from the (possibly l1pre-narrowed)
+// candidate list, or "gold_missing_from_corpus" reports a KNN top-8 miss as
+// a corpus miss — which is exactly what baike-baseline showed (4 false
+// gold-missing on a 20k corpus; all 64 gold keys audit-present).
+func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, list []source.Source, keyByID map[string]string, corpusKeys map[string]bool, it eval.Item) (evalResult, deep.Result) {
 	rec := evalResult{ID: it.ID}
 	var tokBefore int64
 	rejBefore := 0
@@ -439,12 +448,8 @@ func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, l
 		rec.AbstainAction = res.AbstainAction
 	}
 	// 1.5: was gold in the active corpus, and was it among scored sources?
-	corpusKeys := map[string]bool{}
-	for _, s := range list {
-		if s.BusinessKey != "" {
-			corpusKeys[s.BusinessKey] = true
-		}
-	}
+	// Corpus membership comes from the FULL list (parameter), never from
+	// the narrowed candidates — a KNN miss is "not admitted", not "missing".
 	admittedKeys := map[string]bool{}
 	for _, id := range res.Admitted {
 		if k := keyByID[id]; k != "" {
@@ -488,8 +493,8 @@ func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, l
 	return rec, res
 }
 
-func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, it eval.Item) evalResult {
-	rec, res := evalSearchOne(ctx, dE, chat, list, keyByID, it)
+func evalOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, judgeOn bool, list []source.Source, keyByID map[string]string, corpusKeys map[string]bool, it eval.Item) evalResult {
+	rec, res := evalSearchOne(ctx, dE, chat, list, keyByID, corpusKeys, it)
 	if judgeOn && chat != nil {
 		j0 := chat.TotalTokens()
 		if ok, why, jerr := judgeAnswer(ctx, chat, it.Query, it.Answer, res.Answer.Summary); jerr != nil {

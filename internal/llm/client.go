@@ -512,12 +512,42 @@ func (a *AigateAnalyzer) Analyze(ctx context.Context, query string) (fast.Analys
 	return an, nil
 }
 
+// floatMap is an LLM-authored fact-weight map that tolerates the shapes a
+// chat model actually emits: JSON numbers, numeric strings, and — from a
+// creative model — non-numeric text under an invented key. baike-baseline
+// item 058 died exactly there: the analyzer wrote the query term itself as
+// a key with a phrase value, and map[string]float64 failed the whole
+// unmarshal, costing the item. One skipped weight is cheap; one failed
+// analysis is not.
+type floatMap map[string]float64
+
+func (m *floatMap) UnmarshalJSON(b []byte) error {
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		*m = nil // not an object: the cascade loses this level, not the query
+		return nil
+	}
+	out := make(floatMap, len(raw))
+	for k, v := range raw {
+		switch t := v.(type) {
+		case float64:
+			out[k] = t
+		case string:
+			if f, err := strconv.ParseFloat(strings.TrimSpace(t), 64); err == nil {
+				out[k] = f
+			}
+		}
+	}
+	*m = out
+	return nil
+}
+
 // AnalyzeResult is the fast_analyze JSON shape.
 type AnalyzeResult struct {
-	Intent   string             `json:"intent"`
-	Primary  map[string]float64 `json:"primary"`
-	Fallback map[string]float64 `json:"fallback"`
-	Keywords map[string]float64 `json:"keywords_alt"`
+	Intent   string   `json:"intent"`
+	Primary  floatMap `json:"primary"`
+	Fallback floatMap `json:"fallback"`
+	Keywords floatMap `json:"keywords_alt"`
 }
 
 // ParseAnalyzeJSON is exported for frozen prompt regression tests.

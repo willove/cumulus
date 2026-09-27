@@ -175,3 +175,32 @@ func TestTruncate(t *testing.T) {
 		t.Fatalf("truncate: %q", s)
 	}
 }
+
+// The analyze weights arrive from a chat model, not a schema: values can be
+// numbers, numeric strings, or — as baike-baseline item 058 produced —
+// non-numeric text under a query-term key. A tolerant map keeps the usable
+// weights and drops the rest; the old map[string]float64 failed the whole
+// parse and cost the item.
+func TestParseAnalyzeJSONToleratesMixedWeightShapes(t *testing.T) {
+	raw := `{"intent":"search","primary":{"亚盖洛":"称号是短语","头盔":0.8,"长矛":"0.65","盾牌":"not-a-number"},
+	         "fallback":{"国王":"0.5"}}`
+	an, err := ParseAnalyzeJSON(raw)
+	if err != nil {
+		t.Fatalf("must not fail on mixed shapes: %v", err)
+	}
+	if an.Intent != "search" {
+		t.Fatalf("intent = %q", an.Intent)
+	}
+	if an.Primary["头盔"] != 0.8 || an.Primary["长矛"] != 0.65 {
+		t.Fatalf("numeric weights lost: %v", an.Primary)
+	}
+	if _, bad := an.Primary["亚盖洛"]; bad {
+		t.Fatalf("non-numeric weight must be dropped, got %v", an.Primary["亚盖洛"])
+	}
+	if _, bad := an.Primary["盾牌"]; bad {
+		t.Fatalf("non-numeric weight must be dropped: %v", an.Primary)
+	}
+	if an.Fallback["国王"] != 0.5 {
+		t.Fatalf("fallback weights: %v", an.Fallback)
+	}
+}
