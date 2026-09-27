@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/willove/cumulus/internal/abstain"
+	"github.com/willove/cumulus/internal/belief"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/fast"
@@ -1034,6 +1035,46 @@ func deepEvidenceRunes() int {
 	return 15000
 }
 
+// coveredFacts counts the facts a report marks covered — the marginal a
+// single file's observation is measured against.
+func coveredFacts(r facts.Report) int {
+	n := 0
+	for _, f := range r.Facts {
+		if f.Covered {
+			n++
+		}
+	}
+	return n
+}
+
+// beliefObserve is one file's observation strength on the loop's own
+// numbers: windows kept (saturating at 3), the best window score on the
+// 0-10 oracle scale, and this file's marginal fact coverage. The three
+// weights are UNPROVEN and env-adjacent; they join the θ family's
+// retune-per-domain discipline (docs/belief-update-design.md §2.3).
+func beliefObserve(kept int, best float64, newCovers, factsN int) float64 {
+	k := float64(kept) / 3
+	if k > 1 {
+		k = 1
+	}
+	b := best / 10
+	if b > 1 {
+		b = 1
+	}
+	c := 0.0
+	if factsN > 0 {
+		c = float64(newCovers) / float64(factsN)
+		if c > 1 {
+			c = 1
+		}
+	}
+	o := 0.5*k + 0.3*b + 0.2*c
+	if o > 1 {
+		o = 1
+	}
+	return o
+}
+
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
 	// Sampling telemetry: every admission/widen/self-correct SampleBody call
 	// accumulates here and is reported once on exit (any exit path). DEEP's
@@ -1096,6 +1137,26 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// the caller's fast engine carries the same cascade the FAST tier uses —
 	// then explore in relevance order (Sirchmunk Phase-1 对齐).
 	ranked := e.rankAdmission(ctx, query, sources, affinity)
+	// Candidate-region belief (CLUS_DEEP_BELIEF, default OFF): the DEEP
+	// loop's update half. Each file's observation (windows kept, best
+	// score, fact-cover marginal) folds into a posterior that reorders the
+	// widening pass — propose-observe-update instead of
+	// propose-propose-propose. Off until the paired A/B earns it
+	// (docs/belief-update-design.md); kappa is the observation strength.
+	var blf *belief.Belief
+	if os.Getenv("CLUS_DEEP_BELIEF") == "1" {
+		kappa := 0.5
+		if v := os.Getenv("CLUS_DEEP_BELIEF_KAPPA"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
+				kappa = f
+			}
+		}
+		ids := make([]string, len(ranked))
+		for i, s := range ranked {
+			ids[i] = s.ID
+		}
+		blf = belief.New(belief.PriorFromRank(ids), kappa)
+	}
 
 	// D1: widen excludes only files this run actually attempted — not the
 	// full candidate list (L1Pre=false used to pass the whole corpus in and
@@ -1122,6 +1183,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	prevP := 0.0
 	noImprove := 0
 	for _, s := range ranked {
+		coveredBefore := coveredFacts(rep)
 		if cancelled(ctx) {
 			break
 		}
@@ -1179,6 +1241,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			continue
 		}
 		localBest := 0.0
+		fileKept := 0
 		for _, sm := range samples {
 			if sm.Score > localBest {
 				localBest = sm.Score
@@ -1186,6 +1249,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if sm.Score >= 4 {
 				sm.Source = s.ID
 				kept = append(kept, sm)
+				fileKept++
 			}
 		}
 		if e.OnFile != nil {
@@ -1199,6 +1263,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestSrc = s
 		}
 		rep = report(kept)
+		if blf != nil {
+			blf.Observe(s.ID, beliefObserve(fileKept, localBest, coveredFacts(rep)-coveredBefore, len(fx)))
+		}
 		// Session-bridge early exit: an anchored document (the thread's own,
 		// weight ≥ 0.6) that only the fallback could sample is the answer.
 		// Continuing the crawl just burns budget on documents the session
@@ -1378,8 +1445,26 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			affinity[k] = true
 		}
 		if extra, err := e.Widen(ctx, query, widenExclude(), e.WidenBudget, affinity); err == nil && len(extra) > 0 {
+			if blf != nil {
+				// The widening budget (3 files) makes ORDER the whole
+				// mechanism: re-rank by the belief posterior so the slots
+				// go to the neighbours of productive files, not to the
+				// same static keyword ranking that just failed.
+				byID := make(map[string]source.Source, len(extra))
+				ids := make([]string, 0, len(extra))
+				for _, s := range extra {
+					byID[s.ID] = s
+					ids = append(ids, s.ID)
+				}
+				reordered := make([]source.Source, 0, len(extra))
+				for _, id := range blf.Order(ids) {
+					reordered = append(reordered, byID[id])
+				}
+				extra = reordered
+			}
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
+				coveredBeforeW := coveredFacts(rep)
 				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
@@ -1396,6 +1481,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					continue
 				}
 				localBest := 0.0
+				fileKept := 0
 				for _, sm := range samples {
 					if sm.Score > localBest {
 						localBest = sm.Score
@@ -1403,11 +1489,15 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					if sm.Score >= 4 {
 						sm.Source = s.ID
 						kept = append(kept, sm)
+						fileKept++
 					}
 				}
 				if localBest > bestScore {
 					bestScore = localBest
 					bestSrc = s
+				}
+				if blf != nil {
+					blf.Observe(s.ID, beliefObserve(fileKept, localBest, coveredFacts(rep)-coveredBeforeW, len(fx)))
 				}
 			}
 			rep = report(kept)

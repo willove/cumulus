@@ -111,6 +111,8 @@ def main():
     ap.add_argument("--set", help="frozen items jsonl (default: questions/<domain>.jsonl; the chinalaw golden sets under testdata/eval/ work here)")
     ap.add_argument("--manifest", help="manifest covering --set (default: questions/<domain>.manifest.sha256)")
     ap.add_argument("--env", action="append", default=[], help="K=V passed to the run")
+    ap.add_argument("--reset", action="store_true",
+                    help="clear derived learning state (clusters/cites/evidence/sessions) before the run, so every arm starts at the same temperature — without it arm 2 reuses arm 1's clusters (the mode-mix drift this prevents is visible in baike-baseline vs baike-baseline2: FAST 9 → 20)")
     args = ap.parse_args()
 
     qpath, man = verify_manifest(args.domain, args.set, args.manifest)
@@ -133,6 +135,13 @@ def main():
            "-judge", "-prior", "-l1pre", "-tag", args.tag]
     if args.limit:
         cmd += ["-limit", str(args.limit)]
+    if args.reset:
+        rst = [BIN, "-data", d["data"], "-ns", d["ns"], "-evidence", d["evidence"],
+               "reset", "learned", "-yes"]
+        print("+ " + " ".join(rst))
+        r = subprocess.run(rst, cwd=ROOT, env=env, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SystemExit(f"reset failed: {r.stderr[:300]}")
     print("+ " + " ".join(cmd))
     p = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
     sys.stderr.write(p.stderr[-2000:])
