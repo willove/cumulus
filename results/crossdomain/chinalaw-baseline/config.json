@@ -1,0 +1,43 @@
+{
+  "domain": "chinalaw",
+  "tag": "chinalaw-baseline",
+  "manifest": {
+    "domain": "chinalaw",
+    "seed": 20260927,
+    "items": 42,
+    "corpus": "/Users/willove/wil-works/cumubase-project/cumulus/var/crossdomain-corpora",
+    "kind": "law",
+    "quota": {
+      "general": 40,
+      "longdoc": 4
+    },
+    "sha256": {
+      "chinalaw.jsonl": "d7ee04ea3f242926c6c10268376749d64e7adb3579ec8fcda85fddad021d41c9",
+      "chinalaw.prov.jsonl": "b041e2129630d8fd7fb5fe9367df776180b3e5256e6054954214150aebcffcb1"
+    }
+  },
+  "env": {
+    "CLUS_EMBED": "minilm"
+  },
+  "argv": [
+    "/Users/willove/wil-works/cumubase-project/cumulus/bin/cumulus-cluster",
+    "-data",
+    "var/cumulus-cluster",
+    "-ns",
+    "chinalaw",
+    "-sources",
+    "clus_sources",
+    "-evidence",
+    "clus_evidence",
+    "eval-run",
+    "-file",
+    "/Users/willove/wil-works/cumubase-project/cumulus/scripts/crossdomain/questions/chinalaw.jsonl",
+    "-out",
+    "/Users/willove/wil-works/cumubase-project/cumulus/results/crossdomain/chinalaw-baseline/results.jsonl",
+    "-judge",
+    "-prior",
+    "-l1pre",
+    "-tag",
+    "chinalaw-baseline"
+  ]
+}

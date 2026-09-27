@@ -1,0 +1,46 @@
+{
+  "domain": "baike",
+  "tag": "baike-baseline2",
+  "manifest": {
+    "domain": "baike",
+    "seed": 20260927,
+    "items": 64,
+    "corpus": "/Users/willove/datasets/baidu_baike",
+    "quota": {
+      "village": 12,
+      "species": 12,
+      "book": 12,
+      "media": 12,
+      "general": 12,
+      "longdoc": 4
+    },
+    "sha256": {
+      "baike.jsonl": "7201282cbd01a8a9ad92e9bb8ceb267b3443f6e14afe715d39b9fea7c40b44f1",
+      "baike.prov.jsonl": "08bd26077a50b4138bf8cd8969e737b7d741dac21b5fff2b665cc7123ccbc536"
+    }
+  },
+  "env": {
+    "CLUS_EMBED": "minilm"
+  },
+  "argv": [
+    "/Users/willove/wil-works/cumubase-project/cumulus/bin/cumulus-cluster",
+    "-data",
+    "var/cumulus-baike",
+    "-ns",
+    "baike",
+    "-sources",
+    "clus_sources",
+    "-evidence",
+    "clus_evidence",
+    "eval-run",
+    "-file",
+    "/Users/willove/wil-works/cumubase-project/cumulus/scripts/crossdomain/questions/baike.jsonl",
+    "-out",
+    "/Users/willove/wil-works/cumubase-project/cumulus/results/crossdomain/baike-baseline2/results.jsonl",
+    "-judge",
+    "-prior",
+    "-l1pre",
+    "-tag",
+    "baike-baseline2"
+  ]
+}
