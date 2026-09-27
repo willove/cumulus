@@ -1,0 +1,54 @@
+{
+  "n": 64,
+  "system": {
+    "n": 64,
+    "em": 0.75,
+    "ev_rec": 0.75,
+    "ground": 0.90625,
+    "taxonomy": {
+      "correct": 48,
+      "retrieved_but_unanswered": 0,
+      "answered_but_wrong": 10,
+      "not_retrieved": 6
+    }
+  },
+  "closed_book": {
+    "n": 64,
+    "em": 0.140625,
+    "ev_rec": 0,
+    "ground": 0,
+    "taxonomy": {
+      "correct": 9,
+      "retrieved_but_unanswered": 0,
+      "answered_but_wrong": 0,
+      "not_retrieved": 55
+    }
+  },
+  "mcnemar": {
+    "b_only": 39,
+    "c_only": 0,
+    "p": 3.637978807091713e-12,
+    "n": 64
+  },
+  "modes": {
+    "DEEP": 55,
+    "FAST": 9
+  },
+  "resumed": 0,
+  "judged": true,
+  "frozen": {
+    "items_sha": "7201282cbd01a8a9ad92e9bb8ceb267b3443f6e14afe715d39b9fea7c40b44f1",
+    "corpus_sha": "14de05f1fc7e9ee3825bed89c6c4f9fb3e91b1dbce37b372c79227de6bd318a2",
+    "config_sha": "c6a20903e79d63341cba5711ed5fd586999afaed48285d54bba0d6ed8fd04478"
+  },
+  "config_text": "prior=true;l1pre=true;judge=true;ns=baike;chat_model=MiniMax-M3;base_url=https://api.minimaxi.com;embed_model=;embed_seat=minilm;reuse_theta=0.8500;merge_theta=0.5500;split_cap=1;max_loops=4;widen_budget=3;correct_budget=2;endpoint=live",
+  "search_tokens": 1306618,
+  "judge_tokens": 83832,
+  "rejected_proposals": 13,
+  "nr_breakdown": {
+    "not_retrieved": 6,
+    "gold_missing_from_corpus": 0,
+    "gold_not_admitted": 6,
+    "gold_admitted_no_cite": 0
+  }
+}
