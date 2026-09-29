@@ -38,7 +38,7 @@ func TestSourcesFaceListsActiveDocuments(t *testing.T) {
 	// storeFor mirrors runServe's scopedStore: empty ns answers the default store.
 	registerSourcesFace(mux, func(ctx context.Context, nsName string) (*ingest.Store, error) {
 		return st, nil
-	})
+	}, engine, "")
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -114,7 +114,7 @@ func TestSourceDetailActiveAndScoped(t *testing.T) {
 	base := ingest.New(engine, "serve:clus_sources", "serve:clus_evidence", "serve:clus_clusters", "serve")
 	ens := newNSEnsurer(engine, base, "serve", "serve:clus_sources")
 	mux := http.NewServeMux()
-	registerSourcesFace(mux, ens.store)
+	registerSourcesFace(mux, ens.store, engine, "serve")
 	put := func(namespace, key, body string) (*ingest.Store, ingest.Result) {
 		t.Helper()
 		st, err := ens.store(ctx, namespace)
@@ -208,7 +208,7 @@ func TestSourceDetailStorageError(t *testing.T) {
 	mux := http.NewServeMux()
 	registerSourcesFace(mux, func(context.Context, string) (*ingest.Store, error) {
 		return ingest.New(sourceReadErrorPort{}, "", "", "", ""), nil
-	})
+	}, nil, "")
 	w, out := serveJSON(t, mux, http.MethodGet, "/v1/sources/missing", nil)
 	if w.Code != http.StatusInternalServerError || out["error"] != "source storage unavailable" {
 		t.Fatalf("storage failure must not become 404: %d %v", w.Code, out)

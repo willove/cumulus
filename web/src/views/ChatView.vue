@@ -1,26 +1,22 @@
 <template>
   <div class="workspace" :class="{ 'history-open': historyOpen }">
     <aside class="session-rail" aria-label="历史会话">
-      <div class="rail-head"><span class="rail-title">历史会话</span><span class="tiny">{{ sessions.length }}</span></div>
-      <div v-if="sessionsBusy" class="tiny rail-note" role="status">正在加载会话…</div>
-      <div v-for="session in sessions" :key="session.id" class="session-item" :class="{ cur: session.id === current }">
-        <eb-button class="session-open" text :type="session.id === current ? 'primary' : 'default'" @click="selectSession(session)">
-          <span class="session-title">{{ session.title || '未命名会话' }}</span>
-          <span v-if="session.updated_at" class="tiny session-time">{{ fmtTime(session.updated_at) }}</span>
-        </eb-button>
-        <eb-popconfirm title="删除这段会话？文档不受影响。" confirm-button-text="删除" confirm-button-type="danger" @confirm="delSession(session.id)">
-          <eb-button text type="danger" size="small" icon="delete" :aria-label="'删除会话 ' + (session.title || session.id)" />
-        </eb-popconfirm>
-      </div>
-      <p v-if="!sessions.length && !sessionsBusy" class="tiny rail-note">提问后会自动保存会话，方便继续追问。</p>
+      <!-- 会话栏走库件 EbChatThreads：日期分组/悬停更多菜单/归档折叠都是它的本职。
+           置顶与归档是视图态（后端会话无此字段），按库存 localStorage；
+           后端没有改名接口，renamable 关掉，避免出现提交无效果的死菜单项。 -->
+      <EbChatThreads :threads="threadItems" :active="current" :searchable="false" :renamable="false"
+                     :time-format="fmtSessionTime"
+                     @select="pickSession" @create="startSession" @remove="delSession"
+                     @pin="(id, pinned) => setFlag(id, { pinned })" @archive="(id, archived) => setFlag(id, { archived })">
+        <template #empty><p class="tiny rail-note">提问后会自动保存会话，方便继续追问。</p></template>
+      </EbChatThreads>
     </aside>
     <section class="conversation">
       <header class="conversation-head">
         <div class="conversation-heading"><span class="status-dot" :class="{ ready: hasBucket && documents.length }"></span><strong>{{ libraryLabel }}</strong><span class="tiny">{{ documents.length }} 篇文档</span></div>
         <div class="form-actions">
           <eb-button class="history-toggle" type="primary" link size="small" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">历史会话</eb-button>
-          <eb-button size="small" :disabled="!hasBucket" @click="newSession">新会话</eb-button>
-          <eb-button size="small" @click="pane = 'documents'">管理文档</eb-button>
+          <eb-button size="small" @click="pane = 'library'">知识库</eb-button>
         </div>
       </header>
       <eb-alert v-if="error" class="conversation-error" type="error" :title="error" :closable="false" show-icon />
@@ -38,65 +34,55 @@
         <span class="welcome-eyebrow">知识库已就绪</span>
         <h2>添加文档，开始提问</h2>
         <p>当前知识库还没有文档。支持本地目录、候选扫描，以及 JSON、CSV、Parquet 等结构化文件。</p>
-        <eb-button type="primary" @click="pane = 'documents'">添加文档</eb-button>
+        <eb-button type="primary" @click="pane = 'library'">添加文档</eb-button>
       </div>
       <template v-else>
         <div class="conversation-stream">
-          <eb-chatbot v-model="messages" :loading="loading" height="100%" :show-tip="false"
-                      :allow-attachments="false" :allow-drop="false" :show-avatar="false"
-                      assistant-name="Cumulus" placeholder="向当前知识库提问，Enter 发送，Shift + Enter 换行"
-                      stoppable @send="onSend" @stop="stop" @regenerate="regenerate">
-            <template #empty>
-              <div class="welcome">
-                <span class="welcome-eyebrow">基于 {{ documents.length }} 篇文档</span>
-                <h2>你想从文档中了解什么？</h2>
-                <p>回答会附上证据窗口、分步耗时和可核对的原文引用。</p>
-                <div class="sample-questions"><eb-button v-for="question in samples" :key="question" size="small" @click="onSend(question)">{{ question }}</eb-button></div>
-              </div>
-            </template>
-            <!-- 只接管正文渲染：消息外壳（头像/思考/动作条）仍是组件默认的。
+          <!-- 会话区与输入台分开组合（组件规范方案）：消息列表用 EbChatList，
+               输入用编排层 EbAiPromptBox——eb-chatbot 的整体封装不透传
+               message-content，引用卡/运行卡没有渲染位，故走组合式。 -->
+          <div v-if="!messages.length" class="welcome">
+            <span class="welcome-eyebrow">基于 {{ documents.length }} 篇文档</span>
+            <h2>你想从文档中了解什么？</h2>
+            <p>回答会附上证据窗口、分步耗时和可核对的原文引用。</p>
+            <EbChatSuggestion class="sample-questions" layout="column" :items="samples" @pick="(s) => onSend(s.prompt)" />
+          </div>
+          <EbChatList v-show="messages.length" class="conv-list" :messages="messages"
+                      assistant-name="Cumulus" :show-avatar="false"
+                      @regenerate="regenerate">
+            <!-- 只接管正文渲染：消息外壳（思考/动作条）仍是组件默认的。
                  答案正文 + 分步时间轴 + 引用卡 + 运行卡都挂在本条消息下面，
                  随消息一起进历史、一起刷新恢复。 -->
             <template #message-content="{ message }">
               <div v-if="message.role === 'user'" class="user-body">{{ message.content }}</div>
               <template v-else>
                 <EbChatMarkdown :content="message.content || ''" :streaming="message.status === 'streaming'" />
-                <!-- 分步时间轴：实时阶段用事件流（每完成一段推一行），完成后用
-                     done 的权威分段（含每段耗时与累计）。用户看见的是"到哪了、
-                     每段多久"，而不是一个静止的转圈。 -->
-                <div v-if="!message.error && (message.stages?.length || Object.keys(message.stats?.stages || {}).length)" class="run-timeline" role="status">
+                <!-- 分步时间轴：进行中常驻（到哪了、每段多久），完成后收成一行
+                     可展开的注脚——检索过程是佐证材料，不是答案的一部分。 -->
+                <details v-if="!message.error && (message.stages?.length || Object.keys(message.stats?.stages || {}).length)" class="run-timeline" :open="message.status !== 'done' && message.status !== 'error'">
+                  <summary class="tl-summary">检索过程 · {{ timelineFor(message).length }} 段<template v-if="message.status === 'done'"> · {{ totalMsOf(message) }}</template></summary>
                   <div v-for="(st, i) in timelineFor(message)" :key="st.name + i" class="tl-step">
                     <span class="tl-dot" :class="{ live: st.ms === 0 && message.status !== 'done' }" />
                     <span class="tl-name">{{ stageText(st.name) }}</span>
                     <span class="tl-ms">{{ st.ms ? fmtMS(st.ms) : (message.status === 'done' ? '' : '进行中…') }}</span>
                   </div>
-                </div>
-                <!-- 引用卡：文件卡片式自适应网格——单张占满一行，多张一行两个，
-                     容器过窄（<~640px）自动回落单列。右侧「查看」开抽屉看原文。 -->
-                <div v-if="message.sources?.length" class="cite-block">
-                  <div class="cite-head tiny"><eb-icon name="links-line" /> 引用 {{ message.sources.length }} 个原文窗口</div>
-                  <div class="cite-grid" :class="{ single: message.sources.length === 1 }">
-                    <article v-for="source in message.sources" :key="source.index" class="cite-card">
-                      <span class="cite-glyph"><eb-icon name="file-text-line" /></span>
-                      <div class="cite-main">
-                        <span class="cite-title" :title="source.title">{{ source.title }}</span>
-                        <span v-if="source.resolved === false" class="tiny warn">未定位</span>
-                        <p class="quote" :title="source.snippet">{{ source.snippet }}</p>
-                      </div>
-                      <eb-button size="small" text type="primary" :disabled="!source.source" @click="preview(source.source, source.snippet)">查看</eb-button>
-                    </article>
-                  </div>
-                </div>
-                <!-- 运行卡：icon + 指标 + 数据的统计行，不用 tag。 -->
-                <div v-if="message.stats" class="run-card">
+                </details>
+                <!-- 引用：编号出处列表（EbChatSources），点条目开原文抽屉。
+                     未定位窗口在标题上标注，不藏进交互。 -->
+                <EbChatSources v-if="message.sources?.length" :items="message.sources"
+                               @item-click="(item) => item.source && preview(item.source, item.snippet)" />
+                <!-- 运行卡：icon + 指标 + 数据的统计行，不用 tag。簇 id 是内部
+                     机制标识，不上可见文案——挂在整行 title 上供排查悬停查看。 -->
+                <div v-if="message.stats" class="run-card" :title="message.stats.cluster_id ? '知识簇 ' + message.stats.cluster_id : undefined">
                   <span class="run-item"><eb-icon name="speed-line" /><b>{{ tierLabel(message.stats.mode) }}</b></span>
                   <span class="run-item"><eb-icon name="check-line" />置信度 <b>{{ Math.round((message.stats.conf || 0) * 100) }}%</b></span>
                   <span class="run-item"><eb-icon name="pie-chart-line" />覆盖率 <b>{{ Math.round((message.stats.coverage || 0) * 100) }}%</b></span>
                   <span class="run-item"><eb-icon name="stack-line" /><b>{{ message.stats.loops }}</b> 轮</span>
-                  <span class="run-item"><eb-icon name="database-2-line" /><b>{{ fmtTokens(message.stats.tokens) }}</b> tokens</span>
                   <span class="run-item"><eb-icon name="time-line" />总耗时 <b>{{ ((message.stats.latency || 0) / 1000).toFixed(1) }}s</b></span>
                   <span v-if="message.stats.reused" class="run-item"><eb-icon name="links-line" />复用已有知识</span>
-                  <span v-if="message.stats.cluster_id" class="run-item dim">簇 {{ message.stats.cluster_id }}</span>
+                  <!-- token 总量 + 去向：库件的披露阶梯（segments 跟在总量后，
+                       点击展开分段），顶替原先的手写 tokens 项与 token 行。 -->
+                  <EbChatUsage class="run-item" :usage="usageOf(message.stats)" size="compact" bare />
                 </div>
                 <eb-alert v-else-if="message.insufficient" type="warning" title="当前证据不足，建议补充文档或缩小问题范围。" :closable="false" show-icon />
                 <eb-alert v-else-if="message.stats?.refused || message.refused" type="warning" :closable="false" show-icon
@@ -105,8 +91,8 @@
                 </eb-alert>
               </template>
             </template>
-          </eb-chatbot>
-          <!-- 悬浮进度条：贴在输入框上方，一行交代「第几段/本段多久/总共多久」，
+          </EbChatList>
+          <!-- 悬浮进度条：贴在输入台上方，一行交代「第几段/本段多久/总共多久」，
                加载图标常转。完整分段仍留在答案下面的时间轴里。 -->
           <div v-if="loading && (liveStages.length || liveStage)" class="float-progress" role="status">
             <eb-icon name="loader-line" class="fp-spin" />
@@ -117,6 +103,11 @@
             <span class="fp-sep">·</span>
             <span class="fp-item">总耗时 <b>{{ fpTotal }}</b></span>
           </div>
+          <!-- 输入台：编排层组件（场景/能力/附件等开关面我们不开，保持
+               检索问答的单一动作）。send 载荷取 text；loading 时发钮即停钮。 -->
+          <EbAiPromptBox v-model="draft" :loading="loading" stoppable :allow-attachments="false"
+                         placeholder="向当前知识库提问，Enter 发送，Shift + Enter 换行"
+                         @send="(p) => onSend(p.text)" @stop="stop" />
         </div>
       </template>
     </section>
@@ -127,20 +118,25 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
-import { EbChatMarkdown } from "@wil-works/evoke-chat";
-import { useChatPane, timelineFor, stageText, fmtMS, STAGE_ORDER } from "../panes/chat.js";
-import { documents, documentsBusy, documentsError, hasBucket, libraryLabel, loadDocuments, pane } from "../state.js";
+import { EbChatThreads, EbChatList, EbChatMarkdown, EbChatSources, EbChatSuggestion, EbChatUsage, EbAiPromptBox } from "@wil-works/evoke-chat";
+import { useChatPane, timelineFor, stageText, fmtMS, usageOf, STAGE_ORDER } from "../panes/chat.js";
+import { documents, documentsBusy, documentsError, hasBucket, libraryLabel, loadDocuments, nsSel, pane } from "../state.js";
 import SourcePreview from "./SourcePreview.vue";
 
 defineEmits(["create-library"]);
-const { sessions, sessionsBusy, current, loading, error, messages, onSend, stop, openSession, newSession, delSession,
+const { sessions, current, loading, error, messages, onSend, stop, openSession, newSession, delSession,
   liveStages, liveStage, elapsed } = useChatPane();
 const historyOpen = ref(false);
+const draft = ref("");
 const previewSource = ref("");
 const previewQuote = ref("");
 const samples = ["有哪些关键要求？", "有哪些例外情形？", "总结文档中的注意事项"];
 function preview(sourceId, quote) { previewSource.value = sourceId; previewQuote.value = quote || ""; }
 function tierLabel(mode) { return mode === "DEEP" ? "深度检索" : mode === "FAST" ? "快速回答" : mode || "检索"; }
+function totalMsOf(message) {
+  const total = timelineFor(message).reduce((sum, st) => sum + (st.ms || 0), 0);
+  return fmtMS(total);
+}
 // 悬浮条的本地计时：服务端 elapsed 只在 stage 事件到达时跳变，条上要平滑走字。
 const startTs = ref(0), segTs = ref(0), nowTs = ref(0);
 watch(loading, (v) => {
@@ -159,13 +155,30 @@ watch(loading, (v) => {
   if (v) fpTimer = setInterval(() => { nowTs.value = Date.now(); }, 500);
 });
 onUnmounted(() => { if (fpTimer) clearInterval(fpTimer); });
-function fmtTokens(n) { return n >= 10000 ? (n / 1000).toFixed(1) + "K" : String(n || 0); }
-function fmtTime(at) {
-  if (!at) return "";
-  const d = new Date(typeof at === "number" && at < 1e12 ? at * 1000 : at);
+// 会话 → 线程条目：updated_at 归一成毫秒；置顶/归档是本机视图态，按库隔离存。
+const threadFlags = ref({});
+const flagsKey = computed(() => "cumulus-threads-" + (nsSel.value || ""));
+function loadFlags() {
+  try { threadFlags.value = JSON.parse(localStorage.getItem(flagsKey.value) || "{}"); }
+  catch { threadFlags.value = {}; }
+}
+function setFlag(id, patch) {
+  threadFlags.value = { ...threadFlags.value, [id]: { ...threadFlags.value[id], ...patch } };
+  try { localStorage.setItem(flagsKey.value, JSON.stringify(threadFlags.value)); } catch { /* 私密模式等存不了就算了 */ }
+}
+watch(flagsKey, loadFlags, { immediate: true });
+const threadItems = computed(() => sessions.value.map(session => {
+  const ts = Number(session.updated_at) || 0;
+  return { id: session.id, title: session.title || "", updatedAt: ts > 0 && ts < 1e12 ? ts * 1000 : ts, ...(threadFlags.value[session.id] || {}) };
+}));
+function pickSession(id) { const session = sessions.value.find(item => item.id === id); if (session) selectSession(session); }
+function startSession() { newSession(); historyOpen.value = false; }
+// 会话时间列：固定 YYYY-MM-DD HH:mm:ss，不跟浏览器 locale（en-US 会出 9/28/2026）。
+function fmtSessionTime(ts) {
+  const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return "";
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 function selectSession(session) { openSession(session); historyOpen.value = false; }
 function regenerate(message) {
@@ -178,55 +191,48 @@ onMounted(loadDocuments);
 
 <style scoped>
 .workspace { display: grid; grid-template-columns: 216px minmax(0, 1fr); min-height: 0; background: var(--eb-bg-color); }
-.session-rail { padding: 24px 12px; overflow: auto; border-right: 1px solid var(--eb-border-color-light); background: var(--eb-fill-color-light); }
+.session-rail { min-width: 0; overflow: hidden; border-right: 1px solid var(--eb-border-color-light); }
 .rail-note { padding: 12px; line-height: 1.8; }
-.session-item { display: flex; align-items: center; gap: var(--eb-space-1); margin: var(--eb-space-1) 0; }
-.session-open { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; justify-content: flex-start; flex-direction: column; align-items: flex-start; gap: 0; height: auto; padding: 6px 8px; }
-.session-title { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-time { color: var(--eb-text-color-placeholder); }
 .conversation { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .conversation-head { padding: 18px 24px; border-bottom: 1px solid var(--eb-border-color-light); display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .conversation-heading { display: flex; align-items: center; gap: 9px; font-size: 14px; min-width: 0; }
 .conversation-heading strong { overflow-wrap: anywhere; }
 .history-toggle { display: none; }
-.conversation-stream { flex: 1; min-height: 0; overflow: hidden; }
+/* stream 自身是 flex 列：conv-list 占满滚动、输入台钉底；横向 24px 与头部对齐
+   （EbAiPromptBox 是 width:100%，留白由宿主给，不给就贴视口边）。 */
+.conversation-stream { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 24px 12px; }
+.conv-list { flex: 1; min-height: 0; overflow: auto; }
 .welcome { flex: 1; max-width: 1000px; width: 100%; margin: auto; padding: 40px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .welcome-eyebrow { color: var(--eb-color-primary); font-size: 12px; font-weight: 600; letter-spacing: .08em; }
 .welcome h2 { margin: 16px 0 12px; font-size: clamp(22px, 2.5vw, 30px); line-height: 1.4; letter-spacing: -.7px; }
 .welcome p { margin: 0 0 24px; max-width: 440px; color: var(--eb-text-color-secondary); font-size: 14px; line-height: 1.9; }
-.sample-questions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.sample-questions { display: flex; justify-content: center; }
 .user-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 悬浮进度条：贴在输入区上方的一行胶囊——当前段 + 第几段/共几段 + 本段/
      总耗时，加载图标常转。 */
 .conversation-stream { position: relative; }
-.float-progress { position: absolute; left: 50%; transform: translateX(-50%); bottom: 140px; z-index: 5; display: flex; align-items: center; gap: 7px; max-width: min(92%, 640px); padding: 7px 14px; border: 1px solid var(--eb-border-color-lighter); border-radius: 999px; background: var(--eb-bg-color); box-shadow: 0 6px 24px rgba(0, 0, 0, .12); font-size: 12px; color: var(--eb-text-color-secondary); white-space: nowrap; overflow: hidden; }
+.float-progress { position: absolute; left: 50%; transform: translateX(-50%); bottom: 140px; z-index: 5; display: flex; align-items: center; gap: 7px; max-width: min(92%, 640px); padding: 7px 14px; border: 1px solid var(--eb-border-color-lighter); border-radius: 999px; background: var(--eb-bg-color); box-shadow: 0 6px 24px rgba(0, 0, 0, .12); font-size: 12px; color: var(--eb-text-color-secondary); white-space: nowrap; overflow: hidden; animation: fp-in var(--eb-duration-base, .2s) var(--eb-ease-out); }
+@keyframes fp-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translate(-50%, 0); } }
 .float-progress .fp-spin { color: var(--eb-color-primary); font-size: 14px; animation: lp-rotate 1.1s linear infinite; }
 @keyframes lp-rotate { to { transform: rotate(360deg); } }
 .fp-stage { font-weight: 600; color: var(--eb-text-color-regular); overflow: hidden; text-overflow: ellipsis; }
 .fp-num { font-variant-numeric: tabular-nums; color: var(--eb-color-primary); font-weight: 600; }
 .fp-sep { color: var(--eb-text-color-placeholder); }
 .fp-item b { font-variant-numeric: tabular-nums; color: var(--eb-text-color-regular); font-weight: 600; }
-/* 分步时间轴（消息内）：左侧竖线 + 圆点，完成段显示耗时，进行中的段呼吸闪烁。 */
-.run-timeline { margin: 10px 0 4px; padding: 8px 12px; border: 1px solid var(--eb-border-color-lighter); border-radius: 8px; background: var(--eb-fill-color-light); display: flex; flex-direction: column; gap: 4px; }
-.tl-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--eb-text-color-secondary); }
+/* 分步时间轴（消息内）：完成后是 <details> 折叠注脚——一行摘要常驻，
+     展开是圆点竖列；进行中默认展开，live 段呼吸闪烁。 */
+.run-timeline { margin: 10px 0 4px; padding: 6px 12px; border: 1px solid var(--eb-border-color-lighter); border-radius: 8px; background: var(--eb-fill-color-light); display: flex; flex-direction: column; gap: 4px; }
+.run-timeline[open] { padding-bottom: 10px; }
+.tl-summary { cursor: pointer; font-size: 12px; color: var(--eb-text-color-secondary); list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
+.tl-summary::-webkit-details-marker { display: none; }
+.tl-summary::before { content: ""; width: 0; height: 0; border-left: 4px solid var(--eb-text-color-placeholder); border-top: 3px solid transparent; border-bottom: 3px solid transparent; transition: transform .15s ease; }
+.run-timeline[open] .tl-summary::before { transform: rotate(90deg); }
+.tl-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--eb-text-color-secondary); padding-top: 4px; }
 .tl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--eb-color-primary); flex: none; }
 .tl-dot.live { background: var(--eb-text-color-placeholder); animation: tl-pulse 1.2s ease-in-out infinite; }
 @keyframes tl-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 .tl-name { flex: 1; min-width: 0; }
 .tl-ms { font-variant-numeric: tabular-nums; color: var(--eb-text-color-regular); }
-/* 引用卡：文件卡片式。auto-fill 网格天然满足三态——单张占满一行、多张
-     一行两个、容器 <~640px 回落单列，无需断点。 */
-.cite-block { margin: 8px 0 4px; display: flex; flex-direction: column; gap: 6px; }
-.cite-head { display: flex; align-items: center; gap: 5px; color: var(--eb-text-color-placeholder); }
-.cite-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; }
-/* 单张引用：铺满一行，不留半行空格。 */
-.cite-grid.single { grid-template-columns: 1fr; }
-.cite-card { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; background: var(--eb-fill-color-light); min-width: 0; }
-.cite-glyph { flex: none; width: 34px; height: 34px; border-radius: 8px; display: flex; align-items: center; justify-content: center; background: var(--eb-color-primary-light, rgba(64, 158, 255, .12)); color: var(--eb-color-primary); font-size: 18px; }
-.cite-main { flex: 1; min-width: 0; }
-.cite-title { font-size: 13px; font-weight: 600; color: var(--eb-text-color-regular); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cite-card .quote { margin: 2px 0 0; font-size: 12px; line-height: 1.6; color: var(--eb-text-color-placeholder); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.warn { color: var(--eb-color-warning); margin-left: 6px; }
 /* 运行卡：icon + 指标 + 数据 的一行统计（不用 tag）。 */
 .run-card { margin: 8px 0 2px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12px; color: var(--eb-text-color-secondary); }
 .run-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }

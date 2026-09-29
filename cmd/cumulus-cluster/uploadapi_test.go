@@ -44,7 +44,7 @@ func uploadFixture(t *testing.T) (*http.ServeMux, *nsEnsurer, string) {
 	}
 	mux := http.NewServeMux()
 	registerIngestFace(mux, ens, buckets)
-	registerSourcesFace(mux, ens.store)
+	registerSourcesFace(mux, ens.store, engine, "")
 	registerSearchFace(mux, engine, base, "clus_sources", "", false, ens, buckets, monitor.New())
 	return mux, ens, tmp
 }

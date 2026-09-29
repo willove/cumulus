@@ -67,6 +67,11 @@ type sessionStats struct {
 	StopReason string           `json:"stop_reason,omitempty"`
 	Refused    bool             `json:"refused"`
 	Stages     map[string]int64 `json:"stages,omitempty"` // per-stage microseconds
+	// StagesTokens is the per-stage token attribution (deep.StageTokens):
+	// the UI's token 去向 disclosure reads it after a session restore.
+	StagesTokens map[string]int64 `json:"stages_tokens,omitempty"`
+	// Model names the chat model that served the turn (消费追溯维度).
+	Model string `json:"model,omitempty"`
 }
 
 // turnExtras is what a search face attaches to the assistant turn it writes.
@@ -92,6 +97,23 @@ func statsFrom(m map[string]any) *sessionStats {
 		ClusterID:  str(m["cluster_id"]),
 		StopReason: str(m["stop_reason"]),
 		Refused:    m["refused"] == true,
+		Model:      str(m["model"]),
+	}
+	// stages_tokens 与 stages 同理：两种来路都吃，丢段就是刷新后 token
+	// 去向凭空消失。
+	switch raw := m["stages_tokens"].(type) {
+	case map[string]any:
+		st.StagesTokens = map[string]int64{}
+		for k, v := range raw {
+			st.StagesTokens[k] = int64(flt(v))
+		}
+	case map[string]int64:
+		if len(raw) > 0 {
+			st.StagesTokens = map[string]int64{}
+			for k, v := range raw {
+				st.StagesTokens[k] = v
+			}
+		}
 	}
 	// stages 有两种来路：serve 的 stages map（map[string]int64）与 SSE done
 	// 反序列化出的 map[string]any。只断言一种会静默丢整段——曾让时间轴在

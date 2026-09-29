@@ -4,18 +4,22 @@
 // 口径：簇 = 已答问题的主题归档，命中复用时是毫秒级、零 token 的；emerging
 // （待复核）= 簇的证据窗口还没对当前语料复核过。复核入口 POST review 会把
 // 每个窗口对当前原文逐一核对，通过则升 stable。
+//
+// 状态是模块级单例：知识库页的页签角标（待复核数）和「学得知识」页签里的
+// 列表必须读同一份数据——复核改动生命周期后角标即时同步，而不是各拉各的。
 import { ref, onMounted } from "vue";
 import { withNS } from "../state.js";
 import { requestJSON, jsonPost } from "../api.js";
 
+const clusters = ref([]);
+const clusterCur = ref(null);
+const clusterLoading = ref(false);
+const clusterError = ref("");
+const reviewBusy = ref(false);
+const reviewResult = ref(null);
+let detailRequest = 0;
+
 export function useClustersPane() {
-  const clusters = ref([]);
-  const clusterCur = ref(null);
-  const clusterLoading = ref(false);
-  const clusterError = ref("");
-  const reviewBusy = ref(false);
-  const reviewResult = ref(null);
-  let detailRequest = 0;
 
   async function loadClusters() {
     clusterLoading.value = true;
@@ -63,6 +67,7 @@ export function useClustersPane() {
   function resetForNs() {
     clusterCur.value = null;
     reviewResult.value = null;
+    clusters.value = [];
     loadClusters();
   }
 

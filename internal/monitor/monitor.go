@@ -40,6 +40,7 @@ type Query struct {
 	LatencyMS  int64     `json:"latency_ms"`
 	LatencyUS  int64     `json:"latency_us"`     // preferred: microsecond precision
 	Embedder   string    `json:"embedder"`       // which embedder actually served, e.g. minilm-384
+	Model      string    `json:"model,omitempty"` // which chat model served (消费追溯；离线桩为空)
 	SelfCorr   bool      `json:"self_corrected"` // bounded self-correction ran
 	Refused    bool      `json:"refused"`        // synthesis refused / insufficient evidence
 	// StopReason is why the DEEP loop ended: sufficient | utility | budget;
@@ -150,6 +151,15 @@ type LLM struct {
 	Tokens      int64   `json:"tokens"`
 	TokensPerQ  float64 `json:"tokens_per_query"`
 	CallsPerMin float64 `json:"calls_per_min"`
+	// ByModel aggregates the ring per chat model (消费追溯的内存快照；持久
+	// 台账在 serve 的 clus_usage collection)。
+	ByModel map[string]ModelUsage `json:"by_model,omitempty"`
+}
+
+// ModelUsage is one chat model's in-window consumption.
+type ModelUsage struct {
+	Queries int   `json:"queries"`
+	Tokens  int64 `json:"tokens"`
 }
 
 // Retrieval is the suite's own signal.
@@ -229,6 +239,7 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 	var confSum, covSum float64
 	nsAgg := map[string]*NSStat{}
 	nsLat := map[string][]int64{}
+	modelAgg := map[string]ModelUsage{}
 	for _, q := range t.queries {
 		failed := q.Error != ""
 		if q.Mode != "" {
@@ -261,6 +272,12 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 		if q.Embedder != "" {
 			out.Retrieval.Embedder = q.Embedder
 		}
+		if q.Model != "" {
+			mu := modelAgg[q.Model]
+			mu.Queries++
+			mu.Tokens += q.Tokens
+			modelAgg[q.Model] = mu
+		}
 		st := nsAgg[q.Namespace]
 		if st == nil {
 			st = &NSStat{Namespace: q.Namespace}
@@ -287,6 +304,9 @@ func (t *Tracker) Snapshot(storeBytes int64, storeDir string) Snapshot {
 	elapsed := time.Since(t.started).Minutes()
 	if elapsed > 0 {
 		out.LLM.CallsPerMin = float64(t.llmCalls) / elapsed
+	}
+	if len(modelAgg) > 0 {
+		out.LLM.ByModel = modelAgg
 	}
 	out.Retrieval.WarmCount = len(warm)
 	out.Retrieval.ColdCount = len(cold)

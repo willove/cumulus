@@ -7,16 +7,23 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
+	"github.com/willove/cumulus/internal/deep"
+	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
+	"github.com/willove/cumulus/internal/modelprofile"
 )
 
 // modelAPI owns the serve process's install state.
@@ -68,9 +75,11 @@ func modelDownloadBudget() time.Duration {
 }
 
 // registerModelFace mounts GET /v1/model, POST /v1/model/install,
-// POST /v1/model/verify and GET /v1/config.
-func registerModelFace(mux *http.ServeMux) {
+// POST /v1/model/verify, GET/POST /v1/config, the model-profile registry
+// (/v1/models*) and the usage ledger (/v1/usage).
+func registerModelFace(mux *http.ServeMux, c cumulite.Port) {
 	api := &modelAPI{}
+	profiles := modelprofile.New(c)
 
 	mux.HandleFunc("/v1/model", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -169,24 +178,43 @@ func registerModelFace(mux *http.ServeMux) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
 			return
 		}
-		ps := newProdStack()
-		if ps.chat == nil {
-			writeJSON(w, http.StatusBadRequest, map[string]any{
-				"error": "当前为离线规则模式（未配置端点），无法测试连接",
-				"hint":  "先填 Base URL 与 API Key 并保存",
-			})
-			return
+		// 可选 body {profile_id}：按已保存（未必激活）的 profile 建临时客户端
+		// 试连——激活前先验证，坏配置不进 .env。
+		var in struct {
+			ProfileID string `json:"profile_id"`
+		}
+		_ = decode(r, &in)
+		var client *llm.ChatClient
+		model := os.Getenv("AIGATE_CHAT_MODEL")
+		if in.ProfileID != "" {
+			p, err := profiles.Get(r.Context(), in.ProfileID)
+			if err != nil || p == nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "profile not found: " + in.ProfileID})
+				return
+			}
+			client = &llm.ChatClient{BaseURL: p.BaseURL, APIKey: p.APIKey, Model: p.ChatModel, HTTPClient: newPooledHTTPClient(defaultScorerWorkers()), ReasoningSplit: p.ReasoningSplit}
+			model = p.ChatModel
+		} else {
+			ps := newProdStack()
+			if ps.chat == nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"error": "当前为离线规则模式（未配置端点），无法测试连接",
+					"hint":  "先填 Base URL 与 API Key 并保存",
+				})
+				return
+			}
+			client = ps.chat
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		before := ps.chat.TotalTokens()
+		before := client.TotalTokens()
 		started := time.Now()
-		answer, err := ps.chat.Complete(ctx, "只回复两个字：可用")
+		answer, err := client.Complete(ctx, "只回复两个字：可用")
 		report := map[string]any{
 			"ok":         err == nil,
-			"model":      os.Getenv("AIGATE_CHAT_MODEL"),
+			"model":      model,
 			"latency_ms": time.Since(started).Milliseconds(),
-			"tokens":     ps.chat.TotalTokens() - before,
+			"tokens":     client.TotalTokens() - before,
 		}
 		if err != nil {
 			report["error"] = evalSafeError(err)
@@ -196,6 +224,217 @@ func registerModelFace(mux *http.ServeMux) {
 		report["answer"] = strings.TrimSpace(answer)
 		writeJSON(w, http.StatusOK, report)
 	})
+
+	// ── 模型配置档案：多条端点配置 + 激活一条。激活 = 物化（写 .env +
+	// os.Setenv），下一请求即用——栈每请求重建，天然热切。key 只存本地
+	// store、接口永不回显（与 /v1/config 同约）。 ──
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			list, err := profiles.List(r.Context())
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			active, _ := profiles.ActiveID(r.Context())
+			masked := make([]map[string]any, 0, len(list))
+			for _, p := range list {
+				masked = append(masked, maskedProfile(p))
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"profiles": masked, "active": active})
+		case http.MethodPost:
+			var p modelprofile.Profile
+			if err := decode(r, &p); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			p.ID = strings.TrimSpace(p.ID)
+			p.Label = strings.TrimSpace(p.Label)
+			p.BaseURL = strings.TrimSpace(p.BaseURL)
+			if parsed, err := url.Parse(p.BaseURL); p.BaseURL == "" || err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Base URL 必须是带主机名的 http(s) 地址"})
+				return
+			}
+			if len(p.ChatModel) > 200 || len(p.EmbedModel) > 200 {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "模型名过长"})
+				return
+			}
+			saved, err := profiles.Save(r.Context(), p)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			log.Printf("[models] saved profile %s (%s)", saved.ID, saved.Label)
+			writeJSON(w, http.StatusOK, maskedProfile(saved))
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET/POST only"})
+		}
+	})
+	mux.HandleFunc("/v1/models/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/models"), "/")
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "profile id required"})
+			return
+		}
+		// activate 自带一层路径（/v1/models/{id}/activate），先剥掉再校验。
+		if r.Method == http.MethodPost && strings.HasSuffix(id, "/activate") {
+			name := strings.TrimSuffix(id, "/activate")
+			if name == "" || strings.Contains(name, "/") {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "profile id required"})
+				return
+			}
+			p, err := profiles.Get(r.Context(), name)
+			if err != nil || p == nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "profile not found: " + name})
+				return
+			}
+			path, err := materializeProfile(*p)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			if err := profiles.SetActive(r.Context(), name); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			log.Printf("[models] activated profile %s (%s) → %s (hot-applied)", p.ID, p.Label, path)
+			writeJSON(w, http.StatusOK, map[string]any{"activated": name, "hot_applied": true, "env_file": path})
+			return
+		}
+		if strings.Contains(id, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "profile id required"})
+			return
+		}
+		if r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "DELETE or POST /activate only"})
+			return
+		}
+		if err := profiles.Remove(r.Context(), id); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"removed": id})
+	})
+
+	// ── 消费台账：每次检索一条持久记录，按模型/库可追溯。 ──
+	mux.HandleFunc("/v1/usage", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET only"})
+			return
+		}
+		limit := 100
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		wantModel := r.URL.Query().Get("model")
+		wantNS := r.URL.Query().Get("ns")
+		records, scanned, err := readUsage(r.Context(), c, limit, wantModel, wantNS)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"records": records, "scanned": scanned})
+	})
+}
+
+// maskedProfile strips the API key and reports its presence the /v1/config way.
+func maskedProfile(p modelprofile.Profile) map[string]any {
+	return map[string]any{
+		"id": p.ID, "label": firstNonEmpty(p.Label, p.ID), "base_url": p.BaseURL,
+		"chat_model": p.ChatModel, "embed_model": p.EmbedModel,
+		"api_key_set": p.APIKey != "", "api_key_len": len(p.APIKey),
+		"reasoning_split": p.ReasoningSplit,
+		"created_at": p.CreatedAt, "updated_at": p.UpdatedAt, "last_used_at": p.LastUsedAt,
+	}
+}
+
+// materializeProfile writes one profile through to .env (restart-durable) and
+// the process env (hot). Same alias discipline as saveConfig: LLM_* + AIGATE_*.
+func materializeProfile(p modelprofile.Profile) (string, error) {
+	rs := "0"
+	if p.ReasoningSplit {
+		rs = "1"
+	}
+	file := map[string]string{
+		"LLM_BASE_URL": p.BaseURL, "AIGATE_BASE_URL": p.BaseURL,
+		"LLM_MODEL_NAME": p.ChatModel, "AIGATE_CHAT_MODEL": p.ChatModel,
+		"AIGATE_EMBED_MODEL":     p.EmbedModel,
+		"AIGATE_REASONING_SPLIT": rs,
+	}
+	if p.APIKey != "" {
+		file["LLM_API_KEY"] = p.APIKey
+		file["AIGATE_API_KEY"] = p.APIKey
+	}
+	path := envFilePath()
+	if err := writeEnvValues(path, file); err != nil {
+		return "", err
+	}
+	for key, value := range file {
+		_ = os.Setenv(key, value)
+	}
+	return path, nil
+}
+
+// usageCollection is the persistent consumption ledger. One document per
+// finished search; the engine page reads it back per model / per library.
+const usageCollection = "clus_usage"
+
+// usageScanCap bounds the ledger read: the recent window is what the operator
+// audits; deep history belongs to an export, not a UI page load.
+const usageScanCap = 4000
+
+func recordConsumption(ctx context.Context, c cumulite.Port, namespace, model string, prompt, completion, total int64, res deep.Result) {
+	if c == nil {
+		return
+	}
+	doc := map[string]any{
+		"at": time.Now().UTC().Format(time.RFC3339Nano),
+		"ns": namespace, "model": model,
+		"tokens": total, "prompt_tokens": prompt, "completion_tokens": completion,
+		"mode": res.Mode, "reused": res.Reused, "latency_ms": res.LatencyMS,
+	}
+	_, _ = c.Insert(ctx, usageCollection, []map[string]any{doc})
+}
+
+func readUsage(ctx context.Context, c cumulite.Port, limit int, wantModel, wantNS string) ([]map[string]any, int, error) {
+	out := []map[string]any{}
+	scanned := 0
+	var skip int
+	for scanned < usageScanCap {
+		res, err := c.Query(ctx, usageCollection, contract.Query{Limit: 500, Skip: skip})
+		if err != nil {
+			if contract.IsNotFound(err) {
+				break
+			}
+			return nil, scanned, err
+		}
+		if len(res.Documents) == 0 {
+			break
+		}
+		scanned += len(res.Documents)
+		skip += len(res.Documents)
+		for _, d := range res.Documents {
+			if wantModel != "" && d["model"] != wantModel {
+				continue
+			}
+			if wantNS != "" && d["ns"] != wantNS {
+				continue
+			}
+			out = append(out, d)
+		}
+		if len(res.Documents) < 500 {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return fmt.Sprint(out[i]["at"]) > fmt.Sprint(out[j]["at"])
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, scanned, nil
 }
 
 // saveConfig persists the operator's endpoint/model settings and applies them to

@@ -87,7 +87,9 @@ test("app delegates tokens and controls to evoke-business-ui", async () => {
   assert.match(documents, /<eb-table\s/);
   assert.doesNotMatch(documents, /<table\s/);
   const evaluation = await readFile(new URL("./views/EvalsView.vue", import.meta.url), "utf8");
-  assert.match(evaluation, /<eb-steps\s/);
+  // 评测页已线性化：一行运行（题集+模式+运行）取代三步向导——eb-steps 断言随之退役。
+  assert.doesNotMatch(evaluation, /<eb-steps\s/);
+  assert.match(evaluation, /<eb-segmented\s/);
   assert.match(evaluation, /<eb-upload[^>]+:auto-upload="false"/);
   assert.match(evaluation, /<eb-form\s/);
   assert.match(evaluation, /<eb-table\s/);

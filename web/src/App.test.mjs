@@ -7,7 +7,7 @@ import { ref, computed, watch, effectScope } from "vue";
 // 在同一 VM 中执行真实 state/pane 代码：requestJSON 使用本用例的 fetch，
 // Vue ref/computed/watch 也用真身。挂载显式进行，避免无关面板 GET 污染断言。
 const strip = (src) => src.replace(/^import .*;$/gm, "").replace(/^export /gm, "");
-const names = ["chat", "clusters", "ingest", "settings", "evals", "monitor"];
+const names = ["chat", "clusters", "ingest", "library", "settings", "evals", "monitor"];
 const source = [strip(await readFile(new URL("./api.js", import.meta.url), "utf8")),
   strip(await readFile(new URL("./state.js", import.meta.url), "utf8")),
   ...await Promise.all(names.map(async (p) => strip(await readFile(new URL(`./panes/${p}.js`, import.meta.url), "utf8")))),
@@ -22,10 +22,16 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+// OpenAI 兼容 wire（与 /v1/chat/completions 一致）：role 块 + 内容增量 +
+// cumulus 扩展块（stage/citations/done）+ finish/usage + [DONE]。
 const answer = (text = "answer") => new Response(
-  `event: content\ndata: ${JSON.stringify({ text })}\n\n` +
-  'event: citations\ndata: {"refs":[{"index":1,"source_id":"src:a","quote":"evidence"}]}\n\n' +
-  'event: done\ndata: {"mode":"FAST","conf":0.8}\n\n',
+  'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+  `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text } }] })}\n\n` +
+  'data: {"cumulus":{"kind":"stage","payload":{"name":"analyze","ms":120,"elapsed_ms":200}}}\n\n' +
+  'data: {"cumulus":{"kind":"citations","payload":{"refs":[{"index":1,"source_id":"src:a","quote":"evidence"}]}}}\n\n' +
+  'data: {"cumulus":{"kind":"done","payload":{"mode":"FAST","conf":0.8,"stages_tokens":{"fast":7701,"score":7225,"synth":7818}}}}\n\n' +
+  'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":900}}\n\n' +
+  'data: [DONE]\n\n',
 );
 
 function app(fetch, thinkError, namespace = "t1") {
@@ -42,11 +48,117 @@ function app(fetch, thinkError, namespace = "t1") {
     setInterval: () => ++timerID, clearInterval: () => {},
     TextDecoder, AbortController, FormData, File,
     fetch: (url, options = {}) => fetch(url, options),
+    loading: { value: false },
+    useChatSession: ({ engine, transport }) => {
+      // 最小折叠：真实会话层的 log/游标不在单测范围内，这里只把标准事件
+      // 折进引擎（assistant/delta → 追加，turn/end → 收尾），与包内
+      // applySessionEvent 的可见语义一致。
+      const handle = (ev) => {
+        const d = ev?.data || {};
+        if (ev.type === "assistant/delta") {
+          if (d.messageId && !engine.messages.value.some((m) => m.id === d.messageId)) {
+            const created = engine.createAssistantMessage();
+            engine.updateMessage(created.id, { id: d.messageId });
+          }
+          if (d.think) engine.appendThinkContent(d.messageId, d.think);
+          if (d.text) engine.appendContent(d.messageId, d.text);
+        } else if (ev.type === "turn/end") {
+          const kind = d.reason?.kind;
+          if (kind === "error") engine.setMessageError(engine.messages.value[engine.messages.value.length - 1]?.id || "", d.error?.message || "error");
+          else if (kind === "aborted" || kind === "interrupted") engine.cancelMessage(d.messageId);
+          else engine.completeMessage(d.messageId);
+        }
+      };
+      transport.open?.({ onEvent: handle });
+      return {
+        submit: async (text) => {
+          try { await transport.send?.({ requestId: "req-t", content: [{ type: "text", text }] }); }
+          catch (err) {
+            engine.setMessageError(engine.messages.value[engine.messages.value.length - 1]?.id || "", err?.message || String(err));
+          }
+        },
+        stop: async () => { await transport.cancel?.({}); },
+      };
+    },
+    openai: {
+      createState: () => ({ text: "", usage: null, finishReason: null }),
+      frameToEvents: (frame, state, ctx) => {
+        try {
+          const chunk = JSON.parse(frame.data);
+          if (chunk?.usage) state.usage = chunk.usage;
+          const delta = chunk?.choices?.[0]?.delta || {};
+          if (chunk?.choices?.[0]?.finish_reason) state.finishReason = chunk.choices[0].finish_reason;
+          if (typeof delta.content === "string" && delta.content) {
+            return [{ type: "assistant/delta", transient: true, data: { messageId: ctx.messageId, text: delta.content } }];
+          }
+        } catch {}
+        return [];
+      },
+      finalize: (state, ctx) => [{ type: "turn/end", transient: true, data: { messageId: ctx.messageId, reason: { kind: "completed" } } }],
+    },
+    readSseFrames: async function* (body, { signal } = {}) {
+      // 增量读取：帧一到就交给调用方；abort 经 reader.cancel 解除挂起的 read
+      // （与库 0.4.0 的 readSseFrames(signal) 同语义——mock 不实现取消会把
+      // 依赖 signal 收流的用例挂死）。
+      const reader = body?.getReader?.();
+      const iterator = reader ? null : body?.[Symbol.asyncIterator]?.();
+      if (!reader && !iterator) return;
+      let aborted = false;
+      const onAbort = () => {
+        aborted = true;
+        try { reader?.cancel?.()?.catch?.(() => {}); } catch {}
+        try { iterator?.return?.()?.catch?.(() => {}); } catch {}
+      };
+      if (signal?.aborted) { onAbort(); return; }
+      signal?.addEventListener?.("abort", onAbort);
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const framesOf = (text) => {
+        const out = [];
+        let rest = text;
+        const frameEnd = (t) => {
+          const lf = t.indexOf("\n\n"), crlf = t.indexOf("\r\n\r\n");
+          if (lf < 0 && crlf < 0) return null;
+          if (lf < 0) return { at: crlf, next: crlf + 4 };
+          if (crlf < 0 || lf < crlf) return { at: lf, next: lf + 2 };
+          return { at: crlf, next: crlf + 4 };
+        };
+        let hit = frameEnd(rest);
+        while (hit) {
+          const raw = rest.slice(0, hit.at);
+          rest = rest.slice(hit.next);
+          hit = frameEnd(rest);
+          const dataLines = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).replace(/^ /, ""));
+          if (dataLines.length) out.push({ event: "message", data: dataLines.join("\n"), done: dataLines.join("\n").trim() === "[DONE]" });
+        }
+        return { out, rest };
+      };
+      try {
+      while (true) {
+        if (aborted) return;
+        const r = reader ? await reader.read() : await iterator.next();
+        if (r.done) break;
+        buffer += decoder.decode(r.value, { stream: true });
+        const { out, rest } = framesOf(buffer);
+        buffer = rest;
+        for (const frame of out) yield frame;
+      }
+      buffer += decoder.decode();
+      const { out } = framesOf(buffer + "\n\n");
+      for (const frame of out) yield frame;
+      } finally {
+        signal?.removeEventListener?.("abort", onAbort);
+        // 与库同语义：任何退出路径（break/return/abort）都取消 reader 并还锁。
+        if (reader) { try { reader.cancel?.()?.catch?.(() => {}); } catch {} try { reader.releaseLock?.(); } catch {} }
+        else { try { iterator?.return?.()?.catch?.(() => {}); } catch {} }
+      }
+    },
     useChatEngine: () => {
       const messages = ref([]);
       const find = (id) => messages.value.find((m) => m.id === id);
       return {
         messages,
+        loading: { value: false },
         addUserMessage(content) {
           const message = { id: `user-${++sequence}`, role: "user", content, status: "done" };
           messages.value.push(message);
@@ -62,18 +174,21 @@ function app(fetch, thinkError, namespace = "t1") {
           Object.assign(find(id), { thinkContent: text, thinking: true });
         },
         stopThinking(id) { if (find(id)) find(id).thinking = false; },
+        // 迟到轮次的事件可能落在已被替换的消息列表上：缺 id 容忍（与真实
+        // 引擎的 ensureMessage 语义对齐——不因迟到事件崩溃宿主）。
+        __noopGuard: true,
         appendContent(id, text) { find(id).content += text; find(id).status = "streaming"; },
         updateMessage(id, updates) { Object.assign(find(id), updates); },
         completeMessage(id) { completed.push(id); Object.assign(find(id), { status: "done", thinking: false }); },
         setMessageError(id, error) { Object.assign(find(id), { status: "error", error, thinking: false }); },
-        cancelMessage(id) { Object.assign(find(id), { status: "cancelled", thinking: false }); },
+        cancelMessage(id) { if (find(id)) Object.assign(find(id), { status: "cancelled", thinking: false }); },
       };
     },
   });
   root.run(() => vm.runInContext(source + `
     globalThis.factories = { chat: useChatPane, clusters: useClustersPane, ingest: useIngestPane,
-      settings: useSettingsPane, evals: useEvalsPane, monitor: useMonitorPane };
-    globalThis.shared = { nsSel, pane, withNS, requestJSON };
+      library: useLibraryPane, settings: useSettingsPane, evals: useEvalsPane, monitor: useMonitorPane };
+    globalThis.shared = { nsSel, pane, withNS, requestJSON, paneFromHash };
   `, context));
   context.shared.nsSel.value = namespace;
   function make(name) {
@@ -126,6 +241,14 @@ function chatBackend(override = () => {}) {
     }
     if (/^\/v1\/sessions(?:\?|$)/.test(url)) return json([...sessions.values()]);
     if (url.startsWith("/v1/sessions/")) return json(sessions.get(decodeURIComponent(url.split("/").pop().split("?")[0])));
+    if (url === "/v1/chat/completions") {
+      // 与 /v1/search/stream 同一套会话物化；query 取最后一条 user 消息。
+      const session = body.session || body.user;
+      const users = (body.messages || []).filter((m) => m.role === "user").map((m) => m.content);
+      if (!sessions.has(session)) sessions.set(session, { id: session, messages: [], ns: body.ns });
+      sessions.get(session).messages.push({ role: "user", content: users[users.length - 1] }, { role: "assistant", content: "answer" });
+      return answer();
+    }
     if (url === "/v1/search/stream") {
       // 后端在第一次成功落库时 ensure 建会话；前端不再预建，所以这里物化即可，
       // 且 id 由前端生成后应保持稳定（同一轮追问必须复用同一 id）。
@@ -151,15 +274,17 @@ test("send uses one lazily-materialized session, preserves two rounds and avoids
   assert.equal(state.messages.value[1].status, "done");
   assert.ok(state.messages.value[1].thinkContent);
   assert.equal(state.sources.value[0].source, "src:a");
+  // token 去向：done 事件的分段计量透传到运行卡（视图的 tokenTrailOf 读它）。
+  assert.deepEqual(plain(state.stats.value.stages_tokens), { fast: 7701, score: 7225, synth: 7818 });
   // eb-chatbot inserts the second user message before emitting send.
   state.messages.value.push({ id: "from-chatbot", role: "user", content: "follow-up", status: "done" });
   await state.onSend("follow-up");
   assert.equal(state.messages.value.length, 4);
   assert.equal(state.messages.value[2].id, "from-chatbot");
-  assert.deepEqual(server.calls.filter((c) => c.url === "/v1/search/stream").map((c) => [c.body.query, c.body.prior]),
+  assert.deepEqual(server.calls.filter((c) => c.url === "/v1/chat/completions").map((c) => [c.body.messages.at(-1).content, c.body.stream]),
     [["question", true], ["follow-up", true]]);
-  const firstID = server.calls.find((c) => c.url === "/v1/search/stream").body.session;
-  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").every((c) => c.body.session === firstID), true, "both rounds reuse one session");
+  const firstID = server.calls.find((c) => c.url === "/v1/chat/completions").body.session;
+  assert.equal(server.calls.filter((c) => c.url === "/v1/chat/completions").every((c) => c.body.session === firstID), true, "both rounds reuse one session");
   await state.openSession({ id: firstID });
   assert.equal(state.messages.value.length, 4, "both rounds can be reopened from server history");
   assert.equal(state.error.value, "");
@@ -181,7 +306,7 @@ test("the namespace selector scopes every face and explicit withNS uses its argu
   const server = chatBackend();
   const state = app(server.fetch);
   await state.onSend("question");
-  assert.equal(server.calls.find((c) => c.url === "/v1/search/stream").body.ns, "t1");
+  assert.equal(server.calls.find((c) => c.url === "/v1/chat/completions").body.ns, "t1");
   await state.loadClusters();
   assert.match(server.calls.at(-1).url, /\/v1\/clusters\?limit=200&ns=t1/);
   await state.loadSessions();
@@ -189,7 +314,7 @@ test("the namespace selector scopes every face and explicit withNS uses its argu
   assert.equal(state.withNS("/v1/jobs?x=1", "other /库"), "/v1/jobs?x=1&ns=other%20%2F%E5%BA%93");
   state.nsSel.value = "";
   await state.onSend("must select a library");
-  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").length, 1);
+  assert.equal(server.calls.filter((c) => c.url === "/v1/chat/completions").length, 1);
   assert.match(state.error.value, /知识库/);
 });
 
@@ -452,7 +577,7 @@ for (const [label, response, expected] of [
     await state.onSend("first question");
     // 只打检索面：不再有预建会话这一步，所以失败后列表里不会多出空会话——
     // 这正是「历史会话点进去打不开」的成因。
-    assert.deepEqual(calls, ["/v1/search/stream"]);
+    assert.deepEqual(calls, ["/v1/chat/completions"]);
     assert.equal(state.messages.value[0].role, "user");
     assert.equal(state.messages.value[1].status, "error");
     assert.match(state.error.value, expected);
@@ -465,7 +590,7 @@ for (const [label, response, expected] of [
 
 test("an aborted first question keeps a reusable id and leaves nothing behind", async () => {
   const state = app(async (url, options) => {
-    if (url === "/v1/search/stream") return new Promise((resolve, reject) => {
+    if (url === "/v1/chat/completions") return new Promise((resolve, reject) => {
       options.signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
     });
     return json([]);
@@ -548,9 +673,10 @@ test("late session open/list responses cannot replace the new namespace", async 
 
 test("SSE handles byte-split UTF-8, CRLF, multiline data and done without waiting for EOF", async () => {
   let cancelled = false;
-  const text = ': keepalive\r\nevent:content\r\ndata: {\r\ndata: "text":"中文回答"}\r\n\r\n' +
-    'event:done\r\ndata:{"mode":"FAST","tokens":9}\r\n\r\n';
-  const state = app(async (url) => url === "/v1/search/stream" ? new Response(new ReadableStream({
+  const text = ': keepalive\r\ndata: {"choices":[{"index":0,"delta":\r\ndata: {"content":"中文回答"}}]}\r\n\r\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"FAST","tokens":9}}}\r\n\r\n' +
+    'data: [DONE]\r\n\r\n';
+  const state = app(async (url) => url === "/v1/chat/completions" ? new Response(new ReadableStream({
     start(controller) { for (const byte of new TextEncoder().encode(text)) controller.enqueue(Uint8Array.of(byte)); },
     cancel() { cancelled = true; },
   })) : json([]));
@@ -565,10 +691,10 @@ test("SSE handles byte-split UTF-8, CRLF, multiline data and done without waitin
 });
 
 for (const [label, response, expected] of [
-  ["event error", () => new Response('event: content\ndata: {"text":"partial"}\n\nevent:error\ndata:{"error":"search failed","hint":"try another bucket"}\n\nevent:done\ndata:{}\n\n'), /search failed.*try another bucket/],
-  ["EOF without done", () => new Response('event: content\ndata: {"text":"partial"}\n\n'), /done/],
-  ["truncated done frame", () => new Response('event: done\ndata: {"mode":"FAST"}'), /done/],
-  ["malformed event JSON", () => new Response('event: content\ndata: {nope}\n\n'), /JSON|Unexpected|property/],
+  ["cumulus error frame", () => new Response('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"cumulus":{"kind":"error","payload":{"error":"search failed","hint":"try another bucket"}}}\n\n'), /search failed.*try another bucket/],
+  ["EOF without done", () => new Response('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n'), /done/],
+  ["truncated stream", () => new Response('data: {"cumulus":{"kind":"done","payload":{"mode":"FAST"}}}'), /done/],
+  ["malformed chunk JSON", () => new Response('data: {nope}\n\n'), /JSON/],
   ["JSON rejection", () => json({ error: "wrong bucket", hint: "select one" }, 400), /wrong bucket.*select one/],
   ["JSON instead of SSE", () => json({ error: "gateway error", hint: "retry" }), /gateway error.*retry/],
   ["unlabelled JSON error", () => new Response('{"error":"gateway error","hint":"retry"}'), /gateway error.*retry/],
@@ -589,11 +715,11 @@ for (const [label, response, expected] of [
 
 test("a refused answer is surfaced as such, not as a normal answer", async () => {
   const state = app(async (url) => {
-    if (url === "/v1/search/stream") {
+    if (url === "/v1/chat/completions") {
       return new Response(
-        'event: status\ndata: {"stage":"refused"}\n\n' +
-        'event: content\ndata: {"text":"【DEEP 摘要】工伤是如何认定的\\n⚠ 证据不足：……"}\n\n' +
-        'event: done\ndata: {"mode":"DEEP","conf":0.45,"refused":true}\n\n',
+        'data: {"choices":[{"index":0,"delta":{"content":"【DEEP 摘要】工伤是如何认定的\\n⚠ 证据不足：……"}}]}\n\n' +
+        'data: {"cumulus":{"kind":"done","payload":{"mode":"DEEP","conf":0.45,"refused":true}}}\n\n' +
+        'data: [DONE]\n\n',
       );
     }
     return json([]);
@@ -613,7 +739,7 @@ test("stop aborts a pending SSE read and retains partial text as cancelled", asy
   const state = app(async (_url, options) => {
     signal = options.signal;
     return new Response(new ReadableStream({
-      start(controller) { controller.enqueue(new TextEncoder().encode('event: content\ndata: {"text":"partial"}\n\n')); },
+      start(controller) { controller.enqueue(new TextEncoder().encode('data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n')); },
       cancel() { cancelled = true; },
     }));
   });
@@ -637,7 +763,7 @@ test("cancelled first send cannot overwrite a newer send", async () => {
   const gate = deferred();
   let firstSignal;
   const server = chatBackend((url, options, body) => {
-    if (url === "/v1/search/stream" && body?.query === "old") { firstSignal = options.signal; return gate.promise; }
+    if (url === "/v1/chat/completions" && body?.messages?.at(-1)?.content === "old") { firstSignal = options.signal; return gate.promise; }
   });
   const state = app(server.fetch);
   const old = state.onSend("old");
@@ -650,7 +776,7 @@ test("cancelled first send cannot overwrite a newer send", async () => {
   await old;
   assert.match(state.messages.value[1].status, /cancelled/);
   assert.equal(state.messages.value[3].status, "done");
-  assert.equal(server.calls.filter((c) => c.url === "/v1/search/stream").length, 2);
+  assert.equal(server.calls.filter((c) => c.url === "/v1/chat/completions").length, 2);
   assert.equal(state.error.value, "");
 });
 
@@ -659,7 +785,7 @@ for (const action of ["open", "new", "namespace", "unmount"]) {
     const gate = deferred();
     let signal;
     const server = chatBackend((url, options) => {
-      if (url === "/v1/search/stream") { signal = options.signal; return gate.promise; }
+      if (url === "/v1/chat/completions") { signal = options.signal; return gate.promise; }
       if (url.startsWith("/v1/sessions/target")) return json({ messages: [{ role: "user", content: "target history" }] });
     });
     const state = app(server.fetch);
@@ -1075,10 +1201,11 @@ test("late upload stays in its original library and cannot clear the next librar
 });
 
 test("search retains complete backend metrics and surfaces insufficient evidence", async () => {
-  const server = chatBackend(url => url === "/v1/search/stream" ? new Response(
-    'event: status\ndata: {"stage":"insufficient-evidence"}\n\n' +
-    'event: content\ndata: {"text":"证据不足"}\n\n' +
-    'event: done\ndata: {"mode":"DEEP","coverage":0.25,"reused":true,"cluster_id":"c1","stop_reason":"budget","conf":0.3}\n\n'
+  const server = chatBackend(url => url === "/v1/chat/completions" ? new Response(
+    'data: {"cumulus":{"kind":"flag","payload":{"insufficient":true}}}\n\n' +
+    'data: {"choices":[{"index":0,"delta":{"content":"证据不足"}}]}\n\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"DEEP","coverage":0.25,"reused":true,"cluster_id":"c1","stop_reason":"budget","conf":0.3}}}\n\n' +
+    'data: [DONE]\n\n'
   ) : undefined);
   const state = app(server.fetch);
   await state.onSend("question");
@@ -1122,14 +1249,15 @@ test("file chooser additions accumulate and duplicate paths are excluded", () =>
 // 流式合成：content 是增量，replace 事件整段替换（流式失败回退时屏幕不叠加），
 // stage 状态事件实时累积成时间轴，done 的权威分段落到消息上。
 test("streaming synthesis, stage timeline and replace semantics", async () => {
-  const server = chatBackend(url => url === "/v1/search/stream" ? new Response(
-    'event: status\ndata: {"stage":"stage","name":"analyze","stage_ms":1151,"elapsed_ms":1152}\n\n' +
-    'event: status\ndata: {"stage":"stage","name":"cascade","stage_ms":340,"elapsed_ms":1492}\n\n' +
-    'event: content\ndata: {"text":"# 标题\\n"}\n\n' +
-    'event: content\ndata: {"text":"第一段。"}\n\n' +
-    'event: content\ndata: {"text":"# 完整答案","replace":true}\n\n' +
-    'event: citations\ndata: {"refs":[{"index":1,"title":"法.txt","source_id":"src:法","quote":"条文","resolved":true}]}\n\n' +
-    'event: done\ndata: {"mode":"DEEP","conf":0.7,"coverage":0.5,"loops":3,"tokens":1234,"latency_ms":5000,"reused":false,"cluster_id":"c9","stop_reason":"sufficient","stages":{"analyze":1151000,"cascade":340000,"deep_sample":900000,"deep_synth":600000}}\n\n'
+  const server = chatBackend(url => url === "/v1/chat/completions" ? new Response(
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"analyze","ms":1151,"elapsed_ms":1152}}}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"cascade","ms":340,"elapsed_ms":1492}}}\n\n' +
+    'data: {"choices":[{"index":0,"delta":{"content":"# 标题\\n"}}]}\n\n' +
+    'data: {"choices":[{"index":0,"delta":{"content":"第一段。"}}]}\n\n' +
+    'data: {"cumulus":{"kind":"replace","payload":{"text":"# 完整答案"}}}\n\n' +
+    'data: {"cumulus":{"kind":"citations","payload":{"refs":[{"index":1,"title":"法.txt","source_id":"src:法","quote":"条文","resolved":true}]}}}\n\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"DEEP","conf":0.7,"coverage":0.5,"loops":3,"tokens":1234,"latency_ms":5000,"reused":false,"cluster_id":"c9","stop_reason":"sufficient","stages":{"analyze":1151000,"cascade":340000,"deep_sample":900000,"deep_synth":600000}}}}\n\n' +
+    'data: [DONE]\n\n'
   ) : undefined);
   const state = app(server.fetch);
   await state.onSend("问题");
@@ -1153,19 +1281,115 @@ test("history restore carries citations, stats and stage timeline", async () => 
   const state = app(server.fetch);
   await state.onSend("第一问");
   await state.onSend("第二问");
-  const firstID = server.calls.find(c => c.url === "/v1/search/stream").body.session;
+  const firstID = server.calls.find(c => c.url === "/v1/chat/completions").body.session;
   // 模拟服务端会话文档已随答案存下引用与运行卡（sessionMessage 的 sources/stats）。
   const doc = server.sessions.get(firstID);
   doc.messages[1].at = 1700000000000;
-  doc.messages[1].sources = [{ index: 1, title: "源.txt", source_id: "src:a", quote: "条文一", resolved: true }];
+  doc.messages[1].sources = [{ index: 1, title: "源.txt", source_id: "src:a", quote: "条文一", resolved: true },
+    { index: 2, title: "失佚.txt", source_id: "src:b", quote: "条文二", resolved: false }];
   doc.messages[1].stats = { mode: "FAST", conf: 0.8, coverage: 0.6, loops: 0, tokens: 900, latency: 3200, reused: true, cluster_id: "cx", stages: { analyze: 1200000, cascade: 300000, sample: 800000, synth: 900000 } };
   await state.openSession({ id: firstID });
   const restored = state.messages.value[1];
-  assert.equal(restored.sources.length, 1);
+  assert.equal(restored.sources.length, 2);
   assert.equal(restored.sources[0].source, "src:a");
+  // 未定位窗口：status 字段（库 0.4.0 起与域名同行的元信息），标题保持干净。
+  assert.equal(restored.sources[1].title, "失佚.txt");
+  assert.equal(restored.sources[1].status, "未定位");
   assert.equal(restored.stats.mode, "FAST");
   assert.equal(restored.stats.reused, true);
   // 时间轴从 stats.stages 还原（微秒 → 毫秒）。
   assert.deepEqual(plain(restored.stages.map(s => [s.name, s.ms])), [["analyze", 1200], ["cascade", 300], ["sample", 800], ["synth", 900]]);
   assert.equal(restored.createdAt, 1700000000000);
+});
+
+// —— 四导航整顿：旧 hash 归并与知识库概览面板 ————————————————
+
+test("paneFromHash folds the legacy six-nav hashes into the four new panes", () => {
+  const state = app(() => json({}));
+  assert.equal(state.paneFromHash("documents"), "library");
+  assert.equal(state.paneFromHash("ingest"), "library");
+  assert.equal(state.paneFromHash("clusters"), "library");
+  assert.equal(state.paneFromHash("monitor"), "engine");
+  assert.equal(state.paneFromHash("settings"), "engine");
+  assert.equal(state.paneFromHash("chat"), "chat");
+  assert.equal(state.paneFromHash("evals"), "evals");
+  // 未知与空 hash 回落主路径，不会把路由打死。
+  assert.equal(state.paneFromHash("nope"), "chat");
+  assert.equal(state.paneFromHash(""), "chat");
+});
+
+test("library overview aggregates learning counts and the latest eval run", async () => {
+  const calls = [];
+  const state = app(async (url) => {
+    calls.push(url);
+    if (url.startsWith("/v1/learning?")) return json({ namespace: "t1", docs: { "t1:clus_clusters": 3, "t1:clus_evidence": 7 }, total: 10, clean: false });
+    if (url.startsWith("/v1/eval/runs")) return json({ runs: [{ id: "r1", name: "回归", state: "completed", done: 5, total: 5, summary: { rule_match: 0.8, evidence_hit: 0.9 } }] });
+    return json({});
+  });
+  await state.mount("library");
+  await state.loadOverview();
+  assert.equal(state.learning.value.docs["t1:clus_clusters"], 3);
+  assert.equal(state.learning.value.total, 10);
+  assert.equal(state.lastRun.value.name, "回归");
+  assert.ok(calls.some(u => u.startsWith("/v1/learning?")) && calls.some(u => u.startsWith("/v1/eval/runs")));
+  // 评测端点不可用时概览不整页失败——learning 读数仍在。
+  const state2 = app(async (url) => {
+    if (url.startsWith("/v1/eval/runs")) return new Response("boom", { status: 500 });
+    if (url.startsWith("/v1/learning?")) return json({ docs: {}, total: 0, clean: true });
+    return json({});
+  });
+  await state2.mount("library");
+  await state2.loadOverview();
+  assert.equal(state2.learning.value.clean, true);
+  assert.equal(state2.lastRun.value, null);
+  assert.equal(state2.overviewError.value, "");
+});
+
+test("learning reset posts the typed confirm and surfaces the server report", async () => {
+  const posts = [];
+  const state = app(async (url, options) => {
+    if (url.startsWith("/v1/learning/reset")) {
+      posts.push({ url, body: JSON.parse(options.body) });
+      if (JSON.parse(options.body).confirm !== "t1") return json({ error: "confirm mismatch" }, 400);
+      return json({ namespace: "t1", dry_run: false, docs: { "t1:clus_clusters": 2, "t1:clus_evidence": 4 }, kv_keys: 1, total: 7 });
+    }
+    if (url.startsWith("/v1/learning?")) return json({ docs: {}, total: 0, clean: true });
+    return json({});
+  });
+  await state.mount("library");
+  // 服务端拒绝（confirm 不匹配）→ 错误上屏，不产报告。
+  assert.equal(await state.resetLearned("别的库"), false);
+  assert.match(state.resetError.value, /mismatch/);
+  assert.equal(state.resetReport.value, null);
+  // 匹配 → 报告计数可见。
+  assert.equal(await state.resetLearned("t1"), true);
+  assert.equal(posts.length, 2);
+  assert.equal(state.resetReport.value.total, 7);
+  assert.equal(state.resetReport.value.docs["t1:clus_clusters"], 2);
+  assert.equal(state.resetError.value, "");
+});
+
+test("removeBucket unregisters then falls back to another library", async () => {
+  const deleted = [];
+  const state = app(async (url, options) => {
+    if (url.startsWith("/v1/buckets/") && options.method === "DELETE") { deleted.push(url); return json({ removed: "t1" }); }
+    if (url === "/v1/buckets") return json({ buckets: [{ name: "law", label: "法律语料", sources: 1 }], default_ns: "law" });
+    return json({});
+  });
+  // 当前库 t1 已不在服务端列表里：注销后应切到剩下的 law。
+  await state.mount("library");
+  assert.equal(await state.removeBucket(), true);
+  assert.equal(deleted.length, 1);
+  assert.ok(deleted[0].endsWith("/v1/buckets/t1"));
+  assert.equal(state.nsSel.value, "law");
+  // 注销失败（服务端 500）→ 错误上屏，选择器不动。
+  const state2 = app(async (url, options) => {
+    if (url.startsWith("/v1/buckets/") && options.method === "DELETE") return json({ error: "boom" }, 500);
+    return json({});
+  });
+  state2.nsSel.value = "t1";
+  await state2.mount("library");
+  assert.equal(await state2.removeBucket(), false);
+  assert.match(state2.deleteError.value, /boom/);
+  assert.equal(state2.nsSel.value, "t1");
 });

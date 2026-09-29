@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: all fmt check test build e2e browser-check browser-live clean help
+.PHONY: all fmt check test build e2e browser-check browser-live score-probe clean help
 
 all: check build
 
@@ -32,6 +32,14 @@ browser-check:
 ## browser-live: 真实模型付费面检查——只读一次已完成的 live 运行，不提交、不产生费用
 browser-live:
 	EVAL_BASE="$(EVAL_BASE)" EVAL_NS="$(EVAL_NS)" node scripts/browser/eval-live-surfaces.mjs
+
+## score-probe: 打分器可靠性探针（真实模型，只记录不设门）——同一窗口重复打分 N 次，
+## 报告决策稳定性 / 阈值模糊带 / 金标分离度。P1-2 与 P1-3 的验收都靠它。
+score-probe:
+	go run ./cmd/scoreprobe \
+	  -items "$(SCORE_ITEMS)" -corpus "$(SCORE_CORPUS)" \
+	  -repeats "$(or $(REPEATS),5)" $(if $(THINKING_OFF),-thinking-off) \
+	  -detail -json "$(or $(OUT),var/scoreprobe.json)"
 
 ## clean: 清理构建产物
 clean:

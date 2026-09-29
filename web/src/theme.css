@@ -21,3 +21,13 @@
   --ev-border-color-dark: var(--eb-border-color-dark);
   --ev-font-family: var(--eb-font-family);
 }
+
+/* 主容器底色：浅色模式用白（区块靠描边与浅填充分层，不要整页灰）；
+   暗色还原库的页面令牌。只消费既有 --eb-* 令牌、不定义新值——
+   theme.css 后于库样式加载，同特异性下这里获胜。 */
+.eb-app-layout,
+.eb-layout__content,
+body { background: var(--eb-bg-color); }
+html.dark .eb-app-layout,
+html.dark .eb-layout__content,
+html.dark body { background: var(--eb-bg-color-page); }

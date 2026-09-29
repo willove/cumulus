@@ -1,13 +1,8 @@
 <template>
   <div class="pane">
-    <div class="page-heading" style="margin-bottom: 20px">
-      <div>
-        <h2>运行监控</h2>
-        <p class="sub">检索与系统指标为整个服务的累计值；知识层为当前知识库。每 5 秒自动刷新。</p>
-      </div>
-      <eb-button :loading="monBusy" @click="loadMonitor">
-        <eb-icon name="refresh" :size="14" style="margin-right: 4px" />刷新
-      </eb-button>
+    <div class="mon-toolbar">
+      <span class="tiny">检索与系统指标为整个服务的累计值；知识层为当前知识库。每 5 秒自动刷新。</span>
+      <eb-button :loading="monBusy" size="small" @click="loadMonitor">刷新</eb-button>
     </div>
     <eb-alert v-if="monError" type="error" :title="monError" :closable="false" show-icon />
     <eb-skeleton v-if="!mon" :rows="4" animated />
@@ -245,6 +240,7 @@ const lifecycleOptions = computed(() => ({ type: "doughnut", pieData: lifecycleD
 
 <style src="./common.css"></style>
 <style>
+.mon-toolbar { display: flex; justify-content: space-between; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; margin-bottom: var(--eb-space-4); }
 .chart-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--eb-space-5); }
 .chart-cap { font-size: var(--eb-font-size-xs); color: var(--eb-text-color-secondary); margin-bottom: var(--eb-space-2); }
 .ratio-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--eb-space-4); }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/mcs"
@@ -24,6 +25,7 @@ type prodStack struct {
 	synth    fast.Synthesizer
 	expander fast.KeywordExpander
 	rewriter deep.HistoryRewriter
+	facts    facts.Decomposer
 	chat     *llm.ChatClient
 	// embErr carries a strict-mode failure (CLUS_MINILM_REQUIRE=1 with the
 	// weights absent): the stack still builds with the offline fallback, but
@@ -75,13 +77,38 @@ func newProdStack() prodStack {
 		Model:          envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
 		Caller:         "cumulus-cluster",
 		ReasoningSplit: split,
+		// One pooled client for the process. ChatClient.http() builds a fresh
+		// http.Client on every call when this is nil, so leaving it unset cost
+		// a TCP+TLS handshake per LLM call and kept no idle connections —
+		// waste when serial, a connection storm once the scorer runs
+		// concurrent. MaxIdleConnsPerHost is sized above the scorer's default
+		// worker cap so a concurrent round does not serialise on the pool.
+		HTTPClient: newPooledHTTPClient(defaultScorerWorkers()),
 	}
 	ps.chat = chat
-	ps.scorer = &llm.AigateScorer{Client: chat}
+	// CLUS_SCORER_NOTHINK is the A/B switch for evaluate_sample: route it
+	// through CompleteStructured (private thinking off). Measured by
+	// cmd/scoreprobe: 2.28x faster, score_gap 5.70 → 5.52, top_gold_stable
+	// 100% either way. The mid-band stability question is now ANSWERED and
+	// the answer is negative (var/scoreprobe-trial{,-nothink}.json, 5 items
+	// × 3 repeats): decision_stable_rate 0.64 thinking-on vs 0.52 off,
+	// mean_stddev 0.64 vs 0.73 — nothink wobbles MORE in the [4,8) band the
+	// early-stop arm decides in, so the speed win cannot be banked by waiting
+	// for the model to settle. The stop decision is already two-factor
+	// (score line × rep.Complete keyword cover), which is what keeps either
+	// mode's wobble from fabricating a stop; flipping this default would need
+	// a hysteresis/confirm design on the stop line itself, not more patience.
+	ps.scorer = &llm.AigateScorer{Client: chat, NoThink: envFlag("CLUS_SCORER_NOTHINK")}
 	ps.analyzer = &llm.AigateAnalyzer{Client: chat}
 	ps.synth = &llm.AigateSynthesizer{Client: chat}
 	ps.expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
 	ps.rewriter = &llm.AigateHistoryRewriter{Client: chat}
+	// Atomic-fact decomposer (P1-4). The offline heuristic is measurably bad:
+	// K=1 for 124/136 real queries, and all 12 K>1 splits are miscuts inside a
+	// title / defined term / enumeration, which become phantom requirements the
+	// DEEP loop can never satisfy. Wired ONLY when a live endpoint is present,
+	// so every offline gate keeps the deterministic path byte-for-byte (D6).
+	ps.facts = &llm.AigateFactBuilder{Client: chat}
 	// Embeddings switch only on an explicit AIGATE_EMBED_MODEL: the gateway's
 	// chat surface is the proven path, and a silent embed probe against a
 	// chat-only gateway would fail every search.

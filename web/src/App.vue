@@ -26,7 +26,12 @@
       <eb-alert v-if="bucketsError" type="error" :closable="false" :title="'无法加载知识库：' + bucketsError" show-icon>
         <eb-button type="primary" link @click="loadBuckets">重试</eb-button>
       </eb-alert>
-      <component :is="views[pane]" :key="pane + '|' + nsSel" @create-library="createOpen = true" />
+      <!-- 面板切换用 keyed 容器 + 纯 CSS 入场动画：Vue Transition 的离场推进
+           依赖 requestAnimationFrame，webview 被遮挡时 rAF 暂停会让 out-in
+           切换永久死锁（实测：后台页签里 hash 切换后主区卡在旧面板）。 -->
+      <div :key="pane + '|' + nsSel" class="pane-swap">
+        <component :is="views[pane]" @create-library="createOpen = true" />
+      </div>
     </div>
   </eb-app-layout>
   <eb-dialog v-model="createOpen" title="新建知识库" :width="480" align-center
@@ -48,24 +53,19 @@
 import { computed, watch, ref, onMounted, onUnmounted, provide } from "vue";
 import { useAppearance } from "./theme.js";
 import ThemePicker from "./views/ThemePicker.vue";
-import { pane, nsSel, buckets, bucketsBusy, bucketsError, loadBuckets, createBucket } from "./state.js";
+import { pane, paneFromHash, nsSel, buckets, bucketsBusy, bucketsError, loadBuckets, createBucket } from "./state.js";
 import "./views/common.css";
 import ChatView from "./views/ChatView.vue";
-import DocumentsPanel from "./views/DocumentsPanel.vue";
-import ClustersView from "./views/ClustersView.vue";
-import SettingsView from "./views/SettingsView.vue";
+import LibraryView from "./views/LibraryView.vue";
 import EvalsView from "./views/EvalsView.vue";
-import MonitorView from "./views/MonitorView.vue";
+import EngineView from "./views/EngineView.vue";
 
-const views = { chat: ChatView, documents: DocumentsPanel, clusters: ClustersView,
-  settings: SettingsView, evals: EvalsView, monitor: MonitorView };
+const views = { chat: ChatView, library: LibraryView, evals: EvalsView, engine: EngineView };
 const navigation = [
   { id: "chat", title: "检索问答", icon: "question-answer" },
-  { id: "documents", title: "文档与导入", icon: "file-text" },
-  { id: "clusters", title: "知识簇", icon: "database" },
-  { id: "monitor", title: "运行监控", icon: "dashboard" },
-  { id: "evals", title: "评测工作台", icon: "bar-chart-h" },
-  { id: "settings", title: "系统配置", icon: "setting" },
+  { id: "library", title: "知识库", icon: "database" },
+  { id: "evals", title: "评测", icon: "bar-chart-h" },
+  { id: "engine", title: "引擎", icon: "dashboard" },
 ];
 const { primary, semantic, isDark, setDark, toggleDark, selectPrimary } = useAppearance();
 // 库的深色导航固定为蓝色，改为关联同一套运行时主色阶。
@@ -95,7 +95,7 @@ provide("router", { push(id) { if (Object.hasOwn(views, id)) pane.value = id; } 
 
 function fromHash() {
   const id = location.hash.replace(/^#\//, "").split("/")[0];
-  pane.value = id === "ingest" ? "documents" : Object.hasOwn(views, id) ? id : "chat";
+  pane.value = paneFromHash(id);
 }
 watch(pane, id => { if (location.hash !== "#/" + id) location.hash = "/" + id; });
 onMounted(() => {
@@ -111,6 +111,11 @@ html, body, #app { height: 100%; margin: 0; }
 * { box-sizing: border-box; }
 .eb-layout__content { padding: 0; overflow: hidden; min-width: 0; }
 .eb-layout__content > * { height: 100%; }
+/* 侧栏默认宽度收窄一档（库默认 224px）；折叠宽 64 保持库默认。
+   theme.css 有"不得定义 --eb-* 令牌值"的门禁，宿主覆盖放这里。 */
+:root { --eb-sidebar-width: 200px; }
+.app-content .pane-swap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.app-content .pane-swap > * { flex: 1; min-height: 0; }
 .eb-layout__sidebar .eb-menu-item { display: flex; align-items: center; gap: 12px; }
 .topbar-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--eb-text-color-primary); white-space: nowrap; }
 .topbar-actions, .library-selector { display: flex; align-items: center; gap: var(--eb-space-3); }

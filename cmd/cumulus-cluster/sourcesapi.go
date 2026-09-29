@@ -11,11 +11,14 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/ingest"
+	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
 )
 
-func registerSourcesFace(mux *http.ServeMux, storeFor func(context.Context, string) (*ingest.Store, error)) {
+func registerSourcesFace(mux *http.ServeMux, storeFor func(context.Context, string) (*ingest.Store, error), c cumulite.Port, serveNS string) {
 	mux.HandleFunc("/v1/sources", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET only"})
@@ -33,12 +36,24 @@ func registerSourcesFace(mux *http.ServeMux, storeFor func(context.Context, stri
 		}
 		// Newest first: the document column reads top-down as "latest additions".
 		sort.Slice(srcs, func(i, j int) bool { return srcs[i].IngestedAt.After(srcs[j].IngestedAt) })
+		// 被引用计数：该库 clus_cites 里指向每篇文档的证据边数（Dify 式
+		// “召回次数”列的最小版本）。读失败静默降级为不带该列。
+		cited := map[string]int{}
+		reqNS := firstNonEmpty(r.URL.Query().Get("ns"), serveNS)
+		if all, cerr := deep.NewCumuCiteStore(c, ns.Coll(reqNS, "clus_cites")).List(r.Context()); cerr == nil {
+			for _, e := range all {
+				if to, _ := e["_to"].(string); to != "" {
+					cited[to]++
+				}
+			}
+		}
 		docs := make([]map[string]any, 0, len(srcs))
 		for _, s := range srcs {
 			docs = append(docs, map[string]any{
 				"id": s.ID, "title": s.Title, "type": s.SourceType,
 				"uri": s.SourceURI, "bytes": len(s.Body),
 				"ingested_at": s.IngestedAt, "version": s.Version,
+				"cited": cited[s.ID],
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sources": docs})

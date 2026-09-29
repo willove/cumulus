@@ -6,11 +6,11 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/willove/cumulus/internal/envcfg"
 )
 
 // checkEnvPath rejects traversal elements in an operator-supplied env-file
@@ -18,65 +18,29 @@ import (
 // gates set CLUS_ENV=/dev/null). The file is the operator's own local config
 // on their own machine: the only content ever interpreted is KEY=VALUE lines,
 // so the worst case is a wrong config value, never code execution.
-func checkEnvPath(p string) error {
-	for _, part := range strings.Split(filepath.Clean(p), string(os.PathSeparator)) {
-		if part == ".." {
-			return fmt.Errorf("env file path must not contain ..: %s", p)
-		}
-	}
-	return nil
-}
+//
+// The implementation is shared with cmd/scoreprobe via internal/envcfg, so a
+// probe measures the same endpoint the search stack uses.
+func checkEnvPath(p string) error { return envcfg.CheckPath(p) }
 
 // envFilePath resolves the suite .env location: $CLUS_ENV or ./.env.
-func envFilePath() string {
-	if p := os.Getenv("CLUS_ENV"); p != "" {
-		return p
-	}
-	return ".env"
+func envFilePath() string { return envcfg.FilePath() }
+
+// envFlag reads an opt-in boolean. Absent, empty, "0" and "false" are off;
+// "1" and "true" are on, case-insensitively. Anything else is off, so a typo
+// degrades to the cheaper/default path instead of silently enabling a paying
+// or behaviour-changing mechanism.
+func envFlag(key string) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // loadDotEnv reads KEY=VALUE lines from the suite .env selected by CLUS_ENV
 // (default ./.env) into the process environment without overriding anything
 // that is already set. Missing file is not an error (offline gates run with
-// no endpoint config at all).
-func loadDotEnv() error {
-	p := envFilePath()
-	if err := checkEnvPath(p); err != nil {
-		return err
-	}
-	// Reads are capped so a mispointed variable cannot pull in an arbitrary
-	// file at full size.
-	f, err := os.Open(p)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("reading %s: %w", p, err)
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 1<<20))
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", p, err)
-	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.Trim(strings.TrimSpace(v), `"'`)
-		if k == "" || os.Getenv(k) != "" {
-			continue
-		}
-		_ = os.Setenv(k, v)
-	}
-	return nil
-}
+// no endpoint config at all). Implementation: internal/envcfg, shared with
+// cmd/scoreprobe so both faces resolve the endpoint identically.
+func loadDotEnv() error { return envcfg.Load() }
 
 // offlineForced reports whether this process is pinned to the offline stubs
 // (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_BASE_URL / AIGATE_*
@@ -84,25 +48,11 @@ func loadDotEnv() error {
 // deterministic gates at a live endpoint: each search would spend real tokens
 // and the assertions would flake (D6: mechanism gates must be reproducible).
 // It only ever removes collaborators; it never invents an endpoint.
-func offlineForced() bool {
-	v := strings.TrimSpace(os.Getenv("CLUS_OFFLINE"))
-	return v == "1" || strings.EqualFold(v, "true")
-}
+func offlineForced() bool { return envcfg.OfflineForced() }
 
 // applyLLMAliases maps the operator's LLM_* convention onto the suite's
 // AIGATE_* variables (AIGATE_* wins if both are present).
-func applyLLMAliases() {
-	pairs := [][2]string{
-		{"LLM_BASE_URL", "AIGATE_BASE_URL"},
-		{"LLM_API_KEY", "AIGATE_API_KEY"},
-		{"LLM_MODEL_NAME", "AIGATE_CHAT_MODEL"},
-	}
-	for _, p := range pairs {
-		if os.Getenv(p[1]) == "" && os.Getenv(p[0]) != "" {
-			_ = os.Setenv(p[1], os.Getenv(p[0]))
-		}
-	}
-}
+func applyLLMAliases() { envcfg.ApplyLLMAliases() }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

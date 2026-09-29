@@ -217,7 +217,7 @@ func TestHTTPIngestRequiresRegisteredBucket(t *testing.T) {
 				registerAdaptFace(mux, engine, base, sourcesColl, serveNS, ens, buckets)
 				registerSearchFace(mux, engine, base, sourcesColl, serveNS, false, ens, buckets, monitor.New())
 				registerBucketFace(mux, buckets, serveNS)
-				registerSourcesFace(mux, ens.store)
+				registerSourcesFace(mux, ens.store, engine, serveNS)
 
 				w, _ := serveJSON(t, mux, http.MethodGet, "/v1/buckets", nil)
 				if w.Code != http.StatusOK {
@@ -486,7 +486,7 @@ func TestLearningFaceCountsOnlyTenantEvidence(t *testing.T) {
 	}
 	st := ingest.New(engine, "clus_sources", "clus_evidence", "clus_clusters", "")
 	mux := http.NewServeMux()
-	registerClusterFace(mux, engine, st, "", "clus_evidence")
+	registerClusterFace(mux, engine, st, bucket.New(engine), "", "clus_evidence")
 	w, out := serveJSON(t, mux, http.MethodGet, "/v1/learning?ns=tenant", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("learning: %d %v", w.Code, out)
@@ -497,5 +497,73 @@ func TestLearningFaceCountsOnlyTenantEvidence(t *testing.T) {
 	}
 	if n, ok := docs["clus_evidence"]; ok && n != float64(0) {
 		t.Fatalf("default library leaked into the tenant report: clus_evidence=%v", n)
+	}
+}
+
+// The HTTP reset face must refuse anything that does not literally name the
+// namespace it clears, gate on the bucket registry, and clear ONLY derived
+// learning state — the corpus row count before and after must be identical.
+func TestLearningResetFaceRequiresExactConfirm(t *testing.T) {
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	ctx := context.Background()
+	if err := engine.EnsureCollection(ctx, "scratch:clus_sources"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Insert(ctx, "scratch:clus_sources", []map[string]any{{"_id": "doc1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.EnsureCollection(ctx, "scratch:clus_evidence"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Insert(ctx, "scratch:clus_evidence", []map[string]any{{"_id": "e1"}}); err != nil {
+		t.Fatal(err)
+	}
+	buckets := bucket.New(engine)
+	if _, err := buckets.Create(ctx, "scratch", "临时库", ""); err != nil {
+		t.Fatal(err)
+	}
+	st := ingest.New(engine, "clus_sources", "clus_evidence", "clus_clusters", "")
+	mux := http.NewServeMux()
+	registerClusterFace(mux, engine, st, buckets, "", "clus_evidence")
+	countDocs := func(coll string) int {
+		res, err := engine.Query(ctx, coll, contract.Query{Limit: 100})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(res.Documents)
+	}
+
+	// 未注册库：bucket 门禁先拒。
+	if w, _ := serveJSON(t, mux, http.MethodPost, "/v1/learning/reset?ns=ghost", map[string]any{"confirm": "ghost"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("unregistered bucket must be refused, got %d", w.Code)
+	}
+	// confirm 不逐字匹配：拒绝且不动任何东西。
+	if w, _ := serveJSON(t, mux, http.MethodPost, "/v1/learning/reset?ns=scratch", map[string]any{"confirm": "别的库"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("confirm mismatch must be refused, got %d", w.Code)
+	}
+	if n := countDocs("scratch:clus_evidence"); n != 1 {
+		t.Fatalf("a refused reset must not delete: evidence=%d", n)
+	}
+	// 匹配：清学得物、语料仍在、报告带计数。
+	w, out := serveJSON(t, mux, http.MethodPost, "/v1/learning/reset?ns=scratch", map[string]any{"confirm": "scratch"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("reset: %d %v", w.Code, out)
+	}
+	if n := countDocs("scratch:clus_evidence"); n != 0 {
+		t.Fatalf("evidence must be cleared, got %d", n)
+	}
+	if n := countDocs("scratch:clus_sources"); n != 1 {
+		t.Fatalf("corpus must survive the reset, got %d", n)
+	}
+	if out["namespace"] != "scratch" || out["dry_run"] != false {
+		t.Fatalf("reset report identity: %v", out)
+	}
+	docs, _ := out["docs"].(map[string]any)
+	if n, _ := docs["scratch:clus_evidence"].(float64); n != 1 {
+		t.Fatalf("report must count what it removed: %v", docs)
 	}
 }

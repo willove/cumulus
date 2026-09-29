@@ -231,7 +231,8 @@ export function useEvaluationWorkbench() {
   async function startRun() {
     if (busy.value.submit) return;
     if (!nsSel.value) { formError.value = "请先选择知识库"; return; }
-    if (!canStart.value || step.value !== 2) { formError.value = "请完成配置并确认运行条件"; return; }
+    // 向导已退役（线性流：题集+模式+运行），step 门槛随之移除——canStart 即全部前置。
+    if (!canStart.value) { formError.value = "请选择题集并完成运行条件"; return; }
     const body = { dataset_id: datasetID.value, name: runName.value.trim() || datasetPreview.value?.name, config: { ...config.value } };
     const signature = JSON.stringify([nsSel.value, body]);
     if (signature !== submissionSignature) { submissionKey = crypto.randomUUID(); submissionSignature = signature; }

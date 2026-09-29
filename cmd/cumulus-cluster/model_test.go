@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/willove/cumulite"
+	"github.com/willove/cumulus/internal/deep"
 )
 
 func TestConfirmDownload(t *testing.T) {
@@ -86,8 +89,13 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 			t.Setenv("CLUS_EMBED", tc.embed)
 			t.Setenv("AIGATE_EMBED_MODEL", tc.remoteEmbed)
 			t.Setenv("CLUS_MINILM_REQUIRE", tc.required)
+			engine, err := cumulite.Open("", cumulite.WithInMemory())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = engine.Close() })
 			mux := http.NewServeMux()
-			registerModelFace(mux)
+			registerModelFace(mux, engine)
 			w, out := serveJSON(t, mux, http.MethodGet, "/v1/config", nil)
 			if w.Code != http.StatusOK || out["offline"] != tc.wantOffline || out["reasoning_split"] != tc.wantSplit || out["effective_embedder"] != tc.wantEmbed {
 				t.Fatalf("effective config: %d %v", w.Code, out)
@@ -99,5 +107,90 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 				t.Fatalf("configured fields or key masking changed: %v", out)
 			}
 		})
+	}
+}
+
+// The model-profile face: CRUD masking, activation materializing to .env, and
+// the usage ledger round-trip. CLUS_ENV points the .env write at a temp file so
+// the test never touches the developer's real config.
+func TestModelProfileFaceAndUsageLedger(t *testing.T) {
+	for _, key := range []string{"AIGATE_BASE_URL", "AIGATE_CHAT_MODEL", "AIGATE_EMBED_MODEL", "AIGATE_API_KEY", "AIGATE_REASONING_SPLIT", "LLM_BASE_URL", "LLM_MODEL_NAME", "LLM_API_KEY"} {
+		t.Setenv(key, os.Getenv(key)) // register restore; materialize mutates these
+	}
+	envFile := filepath.Join(t.TempDir(), ".env")
+	t.Setenv("CLUS_ENV", envFile)
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = engine.Close() })
+	mux := http.NewServeMux()
+	registerModelFace(mux, engine)
+
+	// 创建两个 profile；key 不得回显。
+	w, out := serveJSON(t, mux, http.MethodPost, "/v1/models", map[string]any{
+		"id": "mm", "label": "MiniMax", "base_url": "https://api.minimaxi.com/v1", "chat_model": "MiniMax-M3", "api_key": "sk-secret"})
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: %d %v", w.Code, out)
+	}
+	if out["api_key_set"] != true || strings.Contains(w.Body.String(), "sk-secret") {
+		t.Fatalf("key must be masked: %v", out)
+	}
+	if w, _ := serveJSON(t, mux, http.MethodPost, "/v1/models", map[string]any{"id": "alt", "base_url": "http://model.invalid/v1", "chat_model": "other"}); w.Code != http.StatusOK {
+		t.Fatal("second create failed")
+	}
+	w, out = serveJSON(t, mux, http.MethodGet, "/v1/models", nil)
+	if w.Code != http.StatusOK || out["active"] != "" {
+		t.Fatalf("list: %d %v", w.Code, out)
+	}
+	if profiles, _ := out["profiles"].([]any); len(profiles) != 2 {
+		t.Fatalf("profiles = %d, want 2", len(profiles))
+	}
+
+	// 激活：物化 .env + 热生效 + 指针落位。
+	w, out = serveJSON(t, mux, http.MethodPost, "/v1/models/mm/activate", nil)
+	if w.Code != http.StatusOK || out["hot_applied"] != true {
+		t.Fatalf("activate: %d %v", w.Code, out)
+	}
+	if os.Getenv("AIGATE_CHAT_MODEL") != "MiniMax-M3" {
+		t.Fatalf("activation not hot-applied: %q", os.Getenv("AIGATE_CHAT_MODEL"))
+	}
+	raw, rerr := os.ReadFile(envFile)
+	if rerr != nil || !strings.Contains(string(raw), "AIGATE_BASE_URL=https://api.minimaxi.com/v1") {
+		t.Fatalf("activation must materialize .env: %v %s", rerr, raw)
+	}
+	w, out = serveJSON(t, mux, http.MethodGet, "/v1/models", nil)
+	if out["active"] != "mm" {
+		t.Fatalf("active pointer: %v", out["active"])
+	}
+	// 激活中的 profile 不可删除。
+	if w, _ := serveJSON(t, mux, http.MethodDelete, "/v1/models/mm", nil); w.Code != http.StatusBadRequest {
+		t.Fatalf("deleting the active profile must be refused, got %d", w.Code)
+	}
+
+	// 消费台账：一条记录写入后按模型过滤可读回。
+	if err := engine.EnsureCollection(context.Background(), "clus_usage"); err != nil {
+		t.Fatal(err)
+	}
+	recordConsumption(context.Background(), engine, "law", "MiniMax-M3", 100, 50, 150, deep.Result{Mode: "FAST", Tokens: 150})
+	w, out = serveJSON(t, mux, http.MethodGet, "/v1/usage?model=MiniMax-M3", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("usage: %d %v", w.Code, out)
+	}
+	records, _ := out["records"].([]any)
+	if len(records) != 1 {
+		t.Fatalf("usage records = %d, want 1", len(records))
+	}
+	rec, _ := records[0].(map[string]any)
+	if rec["model"] != "MiniMax-M3" || rec["prompt_tokens"] != float64(100) || rec["completion_tokens"] != float64(50) {
+		t.Fatalf("usage record fields: %v", rec)
+	}
+	// 按不存在的模型过滤 → 空列表而非报错。
+	w, out = serveJSON(t, mux, http.MethodGet, "/v1/usage?model=nope", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("filtered usage failed: %d", w.Code)
+	}
+	if empty, _ := out["records"].([]any); len(empty) != 0 {
+		t.Fatalf("filtered usage must be empty: %v", empty)
 	}
 }

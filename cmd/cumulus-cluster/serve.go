@@ -135,13 +135,17 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	ensure := newNSEnsurer(c, st, serveNS, sourcesColl)
 	buckets := bucket.New(c)
 	tracker := monitor.New()
+	// 消费台账：启动即声明（引擎对未声明集合的写入 fail-closed）。
+	if err := c.EnsureCollection(ctx, "clus_usage"); err != nil {
+		fatal(err)
+	}
 
 	registerSearchFace(mux, c, st, sourcesColl, serveNS, verbose, ensure, buckets, tracker)
 	registerMonitorFace(mux, tracker, storeDirArg, serveNS, func(ctx context.Context, nsName string) *monitor.Knowledge {
 		return clusterKnowledge(ctx, c, nsName)
 	})
 	registerSessionFace(mux, c, serveNS)
-	registerClusterFace(mux, c, st, serveNS, evidenceColl)
+	registerClusterFace(mux, c, st, buckets, serveNS, evidenceColl)
 	registerMCPFace(mux, c, st, sourcesColl, serveNS, verbose, ensure)
 	registerScanFace(mux, serveNS)
 	registerAdaptFace(mux, c, st, sourcesColl, serveNS, ensure, buckets)
@@ -149,13 +153,13 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	evalService := eval.NewService(ctx, c, newEvalExecutor, evalFingerprint)
 	defer evalService.Close()
 	registerEvalV2Face(mux, c, buckets, evalService, serveNS, sourcesColl)
-	registerModelFace(mux)
+	registerModelFace(mux, c)
 	logModelReminder()
 	registerWebFace(mux)
 
 	registerIngestFace(mux, ensure, buckets)
 	registerBucketFace(mux, buckets, serveNS)
-	registerSourcesFace(mux, ensure.store)
+	registerSourcesFace(mux, ensure.store, c, serveNS)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		h, err := c.Health(r.Context())

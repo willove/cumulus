@@ -1,11 +1,16 @@
 // 会话、请求和 SSE 的生命周期都在此管理；各输入入口只需调用 onSend。
 //
+// 传输层走组件规范：后端 /v1/chat/completions 说 OpenAI Chat Completions 流
+// （evoke-chat 的 openai 适配器直接可吃），本文件按包的推荐接法用
+// useChatSession + 自定义 transport 组装——openai 适配器的纯函数负责标准块
+// （delta.content / finish / usage），cumulus 扩展块（stage/citations/done）
+// 由 foldExtension 折进消息附属数据。
+//
 // 每条 assistant 消息自带四份随答案持久化的附属数据（刷新后从服务端会话
-// 文档恢复）：sources（引用窗口）、stats（运行卡：模式/置信度/token/耗时）、
-// stages（分步时间轴：实时事件流 + done 的权威分段）、createdAt（时间戳）。
-// 这些曾经只活在浏览器内存里——刷新即丢，正是「历史问答的引用和数据看不见」。
+// 文档恢复）：sources（引用窗口）、stats（运行卡）、stages（分步时间轴）、
+// createdAt（时间戳）。
 import { ref, onMounted, onUnmounted, nextTick, watch } from "vue";
-import { useChatEngine } from "@wil-works/evoke-chat";
+import { useChatEngine, useChatSession, openai, readSseFrames } from "@wil-works/evoke-chat";
 import { nsSel, pane, withNS } from "../state.js";
 import { api, requestJSON, jsonPost } from "../api.js";
 
@@ -26,6 +31,50 @@ const STAGE_TEXT = {
 };
 export function stageText(name) { return STAGE_TEXT[name] || name; }
 export function fmtMS(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms"; }
+
+// token 去向的分段名 → 人话（引擎侧键：rewrite/fast/decompose/rank/score/
+// widen/synth）。只列出现的段；这段是注脚级数据，标签必须自解释。
+const TOKEN_STAGE_TEXT = {
+  rewrite: "改写", fast: "快答", decompose: "拆解", rank: "排序",
+  score: "评分", widen: "扩展", synth: "合成",
+};
+export function fmtTokens(n) { return n >= 10000 ? (n / 1000).toFixed(1) + "K" : String(n || 0); }
+export function tokenSegmentsOf(stats) {
+  const st = stats?.stages_tokens;
+  if (!st || typeof st !== "object") return undefined;
+  const segments = [];
+  for (const [key, label] of Object.entries(TOKEN_STAGE_TEXT)) {
+    if (st[key] > 0) segments.push({ label, tokens: st[key] });
+  }
+  return segments.length ? segments : undefined;
+}
+
+// usageOf 把运行卡折成 EbChatUsage 的形状：总量 + 分段（披露阶梯），并给
+// 输入/输出一个诚实映射——合成是输出侧，其余（检索/评分/排序…）是输入侧。
+// 没有分段数据时输入/输出留 0（只显示总量），不编造拆分。
+export function usageOf(stats) {
+  if (!stats) return null;
+  const total = Number(stats.tokens) || 0;
+  const st = stats.stages_tokens;
+  const completion = st && typeof st === "object" ? Math.min(Number(st.synth) || 0, total) : 0;
+  return {
+    totalTokens: total,
+    promptTokens: st ? total - completion : 0,
+    completionTokens: st ? completion : 0,
+    segments: tokenSegmentsOf(stats),
+  };
+}
+
+// SSE citations 事件与会话恢复共用一条引用映射：EbChatSources 吃
+// {index, title, snippet, source}；未定位的窗口在标题上明说，不藏在交互里。
+export function mapRef(r) {
+  return {
+    index: r.index,
+    title: (r.title || r.source_id || "") + (r.span ? " · " + r.span : ""),
+    snippet: r.quote, source: r.source_id, resolved: r.resolved,
+    status: r.resolved === false ? "未定位" : undefined,
+  };
+}
 
 // 一条消息的时间轴视图：live 阶段（正在跑）以 status=streaming 的消息为准，
 // 用实时事件累积；完成后用 done 事件里的权威分段（微秒 → 毫秒）重算。
@@ -55,28 +104,21 @@ export function useChatPane() {
   // sources 是最后一次回答的引用全集：消息级 sources 负责展示与历史恢复，
   // 这份全局副本供程序化消费（门测试契约：引用一条不丢）。
   const sources = ref([]);
-  // 实时检索进度：stage 事件一边完成一边推到这里，头部进度面板直接读——
+  // 实时检索进度：stage 事件一边完成一边推到这里，悬浮进度条直接读——
   // 消息本体在 pending 阶段只渲染 loading（内容槽没挂载），进度必须活在这。
   const liveStages = ref([]);
   const liveStage = ref(""); // 正在进行的阶段（上一段完成后的推论）
+  const engine = useChatEngine();
   const { messages, addUserMessage, createAssistantMessage, appendContent, appendThinkContent,
-    updateMessage, completeMessage, stopThinking, setMessageError, cancelMessage } = useChatEngine();
+    updateMessage, completeMessage, stopThinking, setMessageError, cancelMessage } = engine;
   const box = ref(null);
   let disposed = false;
   let epoch = 0;
-  let active = null;
-  let listRequest = null;
   let viewRequest = null;
   const sessionRequests = new Set();
 
   function scroll() {
     nextTick(() => { if (!disposed && box.value) box.value.scrollTop = box.value.scrollHeight; });
-  }
-  function valid(op) {
-    return !disposed && op.epoch === epoch && op.ns === nsSel.value && !op.controller.signal.aborted;
-  }
-  function operation() {
-    return { epoch, ns: nsSel.value, controller: new AbortController() };
   }
   async function sessionJSON(op, url, options = {}) {
     sessionRequests.add(op);
@@ -88,27 +130,19 @@ export function useChatPane() {
       sessionsBusy.value = sessionRequests.size > 0;
     }
   }
-  function closeReader(op) {
-    if (op.reader) {
-      // cancel also releases a pending read when the server stops sending bytes.
-      void op.reader.cancel().catch(() => {});
-    }
+  function operation() {
+    return { epoch, ns: nsSel.value, controller: new AbortController() };
   }
+  function valid(op) {
+    return !disposed && op.epoch === epoch && op.ns === nsSel.value && !op.controller.signal.aborted;
+  }
+  let sending = false;
   function stop() {
-    const op = active;
-    if (!op) return;
-    active = null;
-    op.controller.abort();
-    closeReader(op);
-    sessionRequests.delete(op);
-    sessionsBusy.value = sessionRequests.size > 0;
-    if (op.message) {
-      stopThinking(op.message.id);
-      cancelMessage(op.message.id);
-    }
-    loading.value = false;
+    if (!sending) return; // 切视图/开旧会话时无在飞请求：静默清场，不写「已取消」
+    void chatSession.stop();
     elapsed.value = 0; meta.value = ""; stats.value = null; sources.value = [];
     liveStages.value = []; liveStage.value = "";
+    loading.value = false;
     error.value = "已取消";
   }
   function switchView() {
@@ -118,8 +152,6 @@ export function useChatPane() {
     sessionRequests.clear();
     sessionsBusy.value = false;
     listRequest = viewRequest = null;
-    elapsed.value = 0; meta.value = ""; stats.value = null; sources.value = [];
-    liveStages.value = []; liveStage.value = "";
   }
   function clearConversation() {
     current.value = "";
@@ -136,6 +168,207 @@ export function useChatPane() {
     if (!bytes.some(Boolean)) for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
     return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+  function backendError(d, fallback) {
+    return d?.error ? String(d.error) + (d.hint ? "（" + d.hint + "）" : "") : fallback;
+  }
+  // 扩展块落点：cumulus wire 扩展（stage/citations/replace/done）不是会话层
+  // 的事件类型，直接折进消息附属数据与全局副本。返回 error 字符串时由
+  // transport 抛给会话层的错误路径。
+  function ensureWireMessage(id) {
+    if (messages.value.some((m) => m.id === id)) return id;
+    const created = createAssistantMessage();
+    updateMessage(created.id, { id });
+    return id;
+  }
+  function foldExtension(ext, messageId) {
+    const p = ext?.payload || {};
+    const m = () => messages.value.find((x) => x.id === messageId);
+    switch (ext?.kind) {
+      case "stage": {
+        const row = { name: p.name || "", ms: p.ms || p.stage_ms || 0, elapsed_ms: p.elapsed_ms || 0 };
+        liveStages.value = [...liveStages.value, row];
+        const idx = STAGE_ORDER.indexOf(row.name);
+        liveStage.value = idx >= 0 && idx + 1 < STAGE_ORDER.length ? STAGE_ORDER[idx + 1] : "";
+        ensureWireMessage(messageId);
+        const msg = m();
+        if (msg) {
+          msg.stages = [...(msg.stages || []), row];
+          if (msg.thinking || msg.status === "pending") {
+            updateMessage(msg.id, { thinkContent: stageText(row.name) + " 完成" + (row.ms ? " · " + fmtMS(row.ms) : "") });
+          }
+        }
+        if (p.elapsed_ms) elapsed.value = Math.round(p.elapsed_ms / 1000);
+        return "";
+      }
+      case "citations": {
+        const refs = (p.refs || []).map(mapRef);
+        sources.value = refs;
+        ensureWireMessage(messageId);
+        const msg = m();
+        if (msg) msg.sources = refs;
+        return "";
+      }
+      case "replace": {
+        updateMessage(ensureWireMessage(messageId), { content: p.text || "" });
+        scroll();
+        return "";
+      }
+      case "done":
+        return p; // 运行卡延迟落：[DONE] 哨兵到达前流仍可能截断，截断不留半套数据
+      case "flag":
+        if (p.insufficient) insufficientSeen = true;
+        return "";
+      case "error":
+        return backendError(p, "流式检索失败");
+      default:
+        return "";
+    }
+  }
+  function foldDone(p, messageId) {
+    const card = {
+      mode: p.mode || "", conf: p.conf ?? 0, coverage: p.coverage ?? 0,
+      loops: p.loops || 0, widened: p.widened || 0, tokens: p.tokens || 0,
+      latency: p.latency_ms || 0, reused: !!p.reused,
+      cluster_id: p.cluster_id || "", stop_reason: p.stop_reason || "",
+      refused: !!p.refused, insufficient: !!insufficientSeen,
+      stages: p.stages || null,
+      stages_tokens: p.stages_tokens || null,
+    };
+    ensureWireMessage(messageId);
+    const msg = messages.value.find((x) => x.id === messageId);
+    if (msg) msg.stats = card;
+    stats.value = card;
+    if (p.session_error) error.value = "答案已生成，但这一轮未写入会话历史：" + p.session_error;
+  }
+  let insufficientSeen = false;
+  // 兼容旧 wire 的标志（insufficient-evidence 在 chat wire 上并成 done 前置位）
+  // ——chatwire 的 done payload 不带它时保持 false。
+
+  // 组件规范 transport：openai 适配器纯函数吃标准块，cumulus 扩展块走
+  // foldExtension；abort 统一发 turn/end(aborted)，让会话层收干净尾。
+  let wireAbort = null;
+  let wireMessageId = "";
+  function makeTransport() {
+    let sink = null;
+    return {
+      open({ onEvent } = {}) {
+        sink = onEvent || null;
+        return () => { sink = null; };
+      },
+      async page() { return []; },
+      async send({ requestId, content }) {
+        const text = (content || []).map((part) => part.text || "").join("");
+        const messageId = wireMessageId || "m-" + requestId;
+        insufficientSeen = false;
+        const ctl = wireAbort = new AbortController();
+        // 轮次守卫：发送一刻的 epoch/库。切视图、换库、停止之后，迟到的
+        // 响应与帧一律按中止处理——它们属于已经翻篇的一问。
+        const myEpoch = epoch, myNs = nsSel.value;
+        const stale = () => myEpoch !== epoch || myNs !== nsSel.value || ctl.signal.aborted;
+        // 用户主动停止（同轮次内 abort）要广播 aborted 让气泡收尾；切视图/
+        // 换库导致的迟到轮次静默丢弃——消息列表已被替换，事件无处安放。
+        const bail = () => {
+          if (ctl.signal.aborted && myEpoch === epoch && myNs === nsSel.value) {
+            sink?.({ type: "turn/end", transient: true, data: { messageId, reason: { kind: "aborted" } } });
+          }
+        };
+        // wire 上的历史：本会话此前的 user 轮（不含刚追加的本问）。
+        const priorUsers = messages.value.filter((m2) => m2.role === "user" && m2.status === "done").map((m2) => m2.content);
+        const history = priorUsers.slice(0, -1).slice(-6);
+        let resp;
+        try {
+          resp = await api.chatCompletions({
+            model: "cumulus",
+            messages: [...history.map((c) => ({ role: "user", content: c })), { role: "user", content: text }],
+            stream: true,
+            session: current.value || undefined,
+            ns: nsSel.value || undefined,
+          }, wireAbort.signal);
+        } catch (e) {
+          if (e?.name === "AbortError" || wireAbort?.signal.aborted) {
+            sink?.({ type: "turn/end", transient: true, data: { messageId, reason: { kind: "aborted" } } });
+            return;
+          }
+          throw e;
+        }
+        if (!resp.ok || !resp.body || /\bjson\b/i.test(resp.headers.get("content-type") || "")) {
+          let d;
+          try { d = await resp.json(); } catch {}
+          throw new Error(backendError(d, !resp.ok ? "HTTP " + resp.status : "响应不是 SSE 流"));
+        }
+        // 中止必须同时解开阻塞中的 reader.read()：abort 信号叫不醒它，
+        // cancel 要走自持的 reader（流一旦 getReader 即锁定，body.cancel
+        // 会抛 Invalid state）。监听器晚于中止挂上的竞态用即时分支兜住。
+        // 打捞体：截断且一帧未收时，网关可能整包回了 JSON 错误对象。克隆
+        // 必须在流被读取之前做（getReader 即锁定），但只在截断（流已尽）
+        // 时才读——流式响应会一直等到流结束。tee 的源 cancel 要两条分支都
+        // 取消：readSseFrames 经 signal 管主分支，克隆分支在这里补。
+        const salvageClone = typeof resp.clone === "function" ? resp.clone() : null;
+        const cancelClone = () => { try { salvageClone?.body?.cancel?.()?.catch?.(() => {}); } catch {} };
+        if (ctl.signal.aborted) cancelClone();
+        else ctl.signal.addEventListener("abort", cancelClone);
+        let sawDone = false; // 终结哨兵只认 [DONE]：done 扩展块是数据，不是终止符
+        let rawText = "";
+        let pendingDone = null;
+        try {
+          const state = openai.createState();
+          for await (const frame of readSseFrames(resp.body, { signal: ctl.signal })) {
+            if (stale()) { bail(); return; }
+            if (frame.done) { sawDone = true; break; }
+            rawText += frame.data + "\n";
+            let chunk = null;
+            try { chunk = JSON.parse(frame.data); } catch { throw new Error("响应帧不是合法 JSON"); }
+            for (const ev of openai.frameToEvents(frame, state, { messageId })) sink?.(ev);
+            if (chunk?.cumulus) {
+              const out = foldExtension(chunk.cumulus, messageId);
+              if (typeof out === "string" && out) throw new Error(out);
+              if (out && typeof out === "object") pendingDone = out;
+            }
+            scroll();
+          }
+          // [DONE] 早退：生成器归还后取消剩余响应体（tee 源 cancel 需两条
+          // 分支——reader 一条已随生成器结束，克隆分支在 abort 监听里，这里
+          // 再兜主 body；已锁定/已结束时是静默空操作）。
+          try { await resp.body.cancel?.(); } catch {}
+          if (stale()) { bail(); return; }
+          if (!sawDone) {
+            // 网关有时不带 JSON content-type、也没有帧结构，直接回错误对象：
+            // 截断报错前先打捞（帧内残文与克隆体两条路都试）。
+            let salvageText = "";
+            if (salvageClone) { try { salvageText = await salvageClone.text(); } catch {} }
+            for (const salvage of [rawText.trim(), salvageText.trim()]) {
+              if (!salvage || !salvage.startsWith("{")) continue;
+              try {
+                const d = JSON.parse(salvage);
+                if (d?.error) throw new Error(backendError(d, "响应流已截断"));
+              } catch (e) { if (!(e instanceof SyntaxError) && e?.message && !e.message.includes("截断")) throw e; }
+            }
+            throw new Error("响应流已截断：未收到 done 哨兵（[DONE]）");
+          }
+          // 成功收尾才取消克隆分支（tee 源要双分支取消）；截断路径上方
+          // 还要读它打捞错误体，先读后弃。
+          cancelClone();
+          if (pendingDone) foldDone(pendingDone, messageId);
+          for (const ev of openai.finalize(state, { messageId })) sink?.(ev);
+        } catch (e) {
+          if (e?.name === "AbortError" || wireAbort?.signal.aborted) {
+            sink?.({ type: "turn/end", transient: true, data: { messageId, reason: { kind: "aborted" } } });
+            return;
+          }
+          throw e;
+        } finally {
+          if (wireAbort === ctl) wireAbort = null; // 迟到的旧请求不得摘掉新请求的控制器
+        }
+      },
+      async cancel() { wireAbort?.abort(); },
+    };
+  }
+  const chatSession = useChatSession({ engine, transport: makeTransport() });
+  // open() 把会话层的事件出口接进 transport——不调它，sink 永远是 null，
+  // 标准事件（增量/收尾）全部落空，只有直改引擎的扩展折叠会生效。
+  chatSession.open?.();
+
+  let listRequest = null;
 
   async function loadSessions() {
     if (disposed) return;
@@ -176,10 +409,7 @@ export function useChatPane() {
       messages.value = (d.messages || []).map((m, i) => ({
         id: s.id + "-" + i, role: m.role, content: m.content, status: "done",
         createdAt: m.at || undefined,
-        sources: Array.isArray(m.sources) ? m.sources.map((r) => ({
-          index: r.index, title: r.title || r.source_id, snippet: r.quote,
-          source: r.source_id, resolved: r.resolved,
-        })) : [],
+        sources: Array.isArray(m.sources) ? m.sources.map(mapRef) : [],
         // 持久化字段是 latency_ms，界面运行卡读 latency：归一化，别让刷新后
         // 总耗时变成 0.0s。
         stats: m.stats ? { ...m.stats, latency: m.stats.latency ?? m.stats.latency_ms ?? 0 } : null,
@@ -219,127 +449,10 @@ export function useChatPane() {
       if (!valid(op)) return;
       if (current.value === id) clearConversation();
       await loadSessions();
-    } catch (e) {
-      if (valid(op)) showError(e);
+    } catch (err) {
+      if (valid(op)) showError(err);
     } finally {
       if (viewRequest === op) viewRequest = null;
-    }
-  }
-  function assertActive(op) {
-    if (!valid(op) || active !== op) {
-      const e = new Error("已取消");
-      e.name = "AbortError";
-      throw e;
-    }
-  }
-  function backendError(d, fallback) {
-    return d?.error ? String(d.error) + (d.hint ? "（" + d.hint + "）" : "") : fallback;
-  }
-  async function readAnswer(op, resp) {
-    if (!resp.ok || !resp.body || /\bjson\b/i.test(resp.headers.get("content-type") || "")) {
-      let d;
-      try { d = await resp.json(); } catch {}
-      throw new Error(backendError(d, !resp.ok ? "HTTP " + resp.status : "响应不是 SSE 流"));
-    }
-    const reader = op.reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "", lines = [], finished = false;
-    function frame() {
-      let event = "message";
-      const data = [];
-      for (const line of lines) {
-        if (line.startsWith(":")) continue;
-        const colon = line.indexOf(":");
-        const field = colon < 0 ? line : line.slice(0, colon);
-        const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
-        if (field === "event") event = value;
-        else if (field === "data") data.push(value);
-      }
-      lines = [];
-      if (!data.length) return;
-      const m = JSON.parse(data.join("\n"));
-      if (event === "error") throw new Error(backendError(m, "流式检索失败"));
-      if (event === "content") {
-        // 合成token是流式增量；replace=true 表示这是权威全文（流式失败回退
-        // 到非流式重合成时出现），整段替换而非追加，避免屏幕上出现残段+全文。
-        if (m.replace) updateMessage(op.message.id, { content: m.text || "" });
-        else appendContent(op.message.id, m.text || "");
-        scroll();
-      } else if (event === "citations") {
-        // 引用挂到本条消息上（历史恢复靠它），全局副本同步维护。
-        const refs = (m.refs || []).map((r) => ({
-          index: r.index, title: (r.title || r.source_id) + (r.span ? " · " + r.span : ""),
-          snippet: r.quote, source: r.source_id, resolved: r.resolved,
-        }));
-        sources.value = refs;
-        if (op.message) op.message.sources = refs;
-      } else if (event === "status" && m.stage === "stage") {
-        // 实时时间轴：每个 stage 完成时推一行（名 + 本段耗时 + 累计 elapsed）。
-        const row = { name: m.name || "", ms: m.stage_ms || 0, elapsed_ms: m.elapsed_ms || 0 };
-        liveStages.value = [...liveStages.value, row];
-        // 下一段（规范序）推论为进行中；思考块文案跟着它走，不再静止占位。
-        const idx = STAGE_ORDER.indexOf(row.name);
-        liveStage.value = idx >= 0 && idx + 1 < STAGE_ORDER.length ? STAGE_ORDER[idx + 1] : "";
-        if (op.message) {
-          op.message.stages = [...(op.message.stages || []), row];
-          if (op.message.thinking || op.message.status === "pending") {
-            updateMessage(op.message.id, { thinkContent: stageText(row.name) + " 完成" + (row.ms ? " · " + fmtMS(row.ms) : "") });
-          }
-        }
-        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
-      } else if (event === "status" && m.stage === "file") {
-        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
-      } else if (event === "status" && m.stage === "working") {
-        // 心跳：只推进计时，不冲掉当前阶段文案
-        if (m.elapsed_ms) elapsed.value = Math.round(m.elapsed_ms / 1000);
-      } else if (event === "status" && m.stage === "insufficient-evidence") {
-        op.insufficient = true;
-        if (op.message) op.message.insufficient = true;
-      } else if (event === "status" && m.stage === "refused") {
-        if (op.message) op.message.refused = true;
-      } else if (event === "done") {
-        finished = true;
-        // done 携带权威分段（微秒）与完整运行卡，落到本条消息上。
-        const card = {
-          mode: m.mode || "", conf: m.conf ?? 0, coverage: m.coverage ?? 0,
-          loops: m.loops || 0, widened: m.widened || 0, tokens: m.tokens || 0,
-          latency: m.latency_ms || 0, reused: !!m.reused,
-          cluster_id: m.cluster_id || "", stop_reason: m.stop_reason || "",
-          refused: !!m.refused, insufficient: !!op.insufficient,
-          stages: m.stages || null,
-        };
-        if (op.message) op.message.stats = card;
-        stats.value = card;
-        // 服务端明确说了这一轮没写进会话：必须让用户看见，而不是下次点开才发现
-        // 历史里少了这一问。
-        if (m.session_error) error.value = "答案已生成，但这一轮未写入会话历史：" + m.session_error;
-      }
-    }
-    try {
-      while (!finished) {
-        const { value, done } = await reader.read();
-        assertActive(op);
-        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-        let i;
-        while (!finished && (i = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, i).replace(/\r$/, "");
-          buffer = buffer.slice(i + 1);
-          if (line === "") frame(); else lines.push(line);
-        }
-        if (done) {
-          if (!finished) {
-            // Some gateways return JSON without a JSON content-type.
-            let d;
-            try { d = JSON.parse([...lines, buffer].join("\n")); } catch {}
-            throw new Error(backendError(d, "响应流已截断：未收到 done 事件"));
-          }
-          break;
-        }
-      }
-    } finally {
-      closeReader(op);
-      reader.releaseLock();
-      op.reader = null;
     }
   }
 
@@ -347,53 +460,43 @@ export function useChatPane() {
     text = String(text ?? "").trim();
     if (!text || loading.value || viewRequest || disposed) return;
     if (!nsSel.value) { error.value = "请先创建或选择知识库"; return; }
-    const op = operation();
-    active = op;
-    loading.value = true;
+    error.value = "";
     elapsed.value = 0; meta.value = ""; stats.value = null; sources.value = [];
     liveStages.value = [];
-    // 请求一发出去，第一段（分析）就已在进行——首段完成事件到达前也要有进度。
-    liveStage.value = "analyze";
-    error.value = "";
+    liveStage.value = "analyze"; // 首段完成事件到达前也要有进度
+    // eb-chatbot 已经写入用户消息；首页/示例按钮则没有。只去重末条同文 user。
+    const last = messages.value[messages.value.length - 1];
+    if (last?.role !== "user" || last.content !== text) addUserMessage(text);
+    // 惰性会话 id：检索中断不会留下谁也打不开的空会话。
+    if (!current.value) current.value = newClientSessionID();
+    loading.value = true;
+    sending = true;
     try {
-      // eb-chatbot 已经写入用户消息；首页/示例按钮则没有。只去重末条同文 user。
-      const last = messages.value[messages.value.length - 1];
-      if (last?.role !== "user" || last.content !== text) addUserMessage(text);
-      op.message = createAssistantMessage();
-      // 附属数据挂在本条消息上：引用/运行卡/时间轴随答案走（刷新后可恢复）。
-      op.message.sources = [];
-      op.message.stats = null;
-      op.message.stages = [];
-      // 思考占位：时间轴建起来之前的气泡内容；失败路径也要看见它。
-      appendThinkContent(op.message.id, "检索私域语料并评分证据窗口……");
-      sources.value = [];
-      scroll();
-      // 会话 id 本地生成：服务端在第一次成功落库时 ensure 建会话。这样中断的
-      // 提问不会留下谁也打不开的空会话。
-      if (!current.value) current.value = newClientSessionID();
-      const resp = await api.searchStream({ query: text, session: current.value, prior: true, ns: op.ns || undefined }, op.controller.signal);
-      assertActive(op);
-      await readAnswer(op, resp);
-      assertActive(op);
-      completeMessage(op.message.id);
-      void loadSessions();
+      // 预建本问的 assistant 消息：wire 事件（stage/增量）都指向它，思考占位
+      // 让首帧到达前就有可见进度；附属数据随答案走（刷新后可恢复）。
+      wireMessageId = createAssistantMessage().id;
+      const m0 = messages.value.find((m) => m.id === wireMessageId);
+      if (m0) { m0.sources = []; m0.stats = null; m0.stages = []; }
+      appendThinkContent(wireMessageId, "检索私域语料并评分证据窗口……");
+      await chatSession.submit(text);
+      // 会话层把错误记在消息上而不抛出（幂等重发的契约）——从消息态回捞，
+      // 让全局 error 说明与消息状态一致。
+      const m = messages.value.find((x) => x.id === wireMessageId);
+      if (m?.status === "error" && m.error) showError({ message: m.error });
+      if (m?.status !== "error") void loadSessions();
     } catch (e) {
-      if (active === op && valid(op)) {
-        showError(e);
-        meta.value = ""; stats.value = null; sources.value = [];
-        if (op.message) {
-          stopThinking(op.message.id);
-          if (e.name === "AbortError") cancelMessage(op.message.id);
-          else setMessageError(op.message.id, e.message);
-        }
+      showError(e);
+      meta.value = ""; stats.value = null; sources.value = [];
+      if (wireMessageId) {
+        stopThinking(wireMessageId);
+        if (e.name === "AbortError") cancelMessage(wireMessageId);
+        else setMessageError(wireMessageId, e.message);
       }
     } finally {
-      if (active === op) {
-        active = null;
-        loading.value = false;
-        liveStages.value = []; liveStage.value = "";
-        scroll();
-      }
+      sending = false;
+      loading.value = false;
+      wireMessageId = "";
+      scroll();
     }
   }
 
@@ -407,6 +510,7 @@ export function useChatPane() {
   onMounted(loadSessions);
   onUnmounted(() => {
     switchView();
+    chatSession.dispose?.();
     disposed = true;
   });
 

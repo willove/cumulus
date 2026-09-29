@@ -7,7 +7,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -162,7 +161,15 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		kbE.Judge = func(ctx context.Context, query, answer string) (bool, string, error) {
 			return chat.JudgeAnswer(ctx, query, answer)
 		}
-		kbE.JudgeGates = os.Getenv("CLUS_PERSIST_JUDGE") == "1"
+		// "gates" blocks persistence on a negative verdict; "record" only files it.
+		// Default is neither — the judge is a model call per answer, and paying it
+		// for a field nothing reads is how a 27,000-token budget loses 4,000.
+		switch strings.ToLower(strings.TrimSpace(os.Getenv("CLUS_PERSIST_JUDGE"))) {
+		case "1", "true", "gates":
+			kbE.JudgeGates = true
+		case "record":
+			kbE.JudgeRecord = true
+		}
 		if os.Getenv("CLUS_VERBOSE") == "1" {
 			fmt.Fprintf(os.Stderr, "[stack] persist judge wired (gates=%v)\n", kbE.JudgeGates)
 		}
@@ -202,6 +209,13 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
 	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, ss.usage)
+	// Atomic-fact decomposer (P1-4). Opt-in via CLUS_DECOMPOSE so an operator
+	// pays one extra call per query deliberately, and so the offline/off stubs
+	// keep the deterministic heuristic.
+	if stack.facts != nil && envFlag("CLUS_DECOMPOSE") {
+		dE.Decompose = stack.facts
+		dE.DecomposeBudget = 1
+	}
 	// Independent search token budget (3.2): judge never draws from this.
 	if stack.chat != nil {
 		// Per-STACK budget: serve builds one stack per request, eval one
@@ -215,6 +229,11 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		// direction for a burn cap.
 		base := stack.chat.TotalTokens()
 		dE.TokensUsed = func() int64 { return stack.chat.TotalTokens() - base }
+		// Stage attribution rides the same base: each bucket is a delta of the
+		// stack's own spend (a neighbour request's tokens can bleed into a
+		// bucket the same way they can into the budget — attribution, not
+		// billing, so the imprecision is disclosed rather than locked away).
+		dE.Meter = func() int64 { return stack.chat.TotalTokens() - base }
 		if v := os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 				dE.TokenBudget = n
@@ -296,6 +315,7 @@ func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result,
 	}
 	if ss.chat != nil {
 		res.Tokens = ss.chat.TotalTokens()
+		res.Model = ss.chat.Model
 	}
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("done mode=%s conf=%.2f loops=%d widened=%d tokens=%d latency=%dms reused=%v",
@@ -437,26 +457,14 @@ func registerSessionFace(mux *http.ServeMux, c cumulite.Port, serveNS string) {
 // collections: the search path persists clusters, so a namespace that was only
 // ever searched in must not die on the first write.
 func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, sourcesColl, serveNS string, verbose bool, ensure *nsEnsurer, buckets *bucket.Store, tracker *monitor.Tracker) {
-	handle := func(stream bool) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
-				return
-			}
-			var in searchIn
-			if err := decode(r, &in); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-				return
-			}
-			if in.Query == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "query required"})
-				return
-			}
-			// No implicit fallback: ingest and retrieval must select the same
-			// explicitly registered bucket.
-			if !requireHTTPBucket(w, r, buckets, in.NS) {
-				return
-			}
+	// serveSearchRequest runs one decoded search on any wire: the JSON and
+	// SSE faces pass identityWire, the OpenAI chat face passes newChatWire().
+	serveSearchRequest := func(w http.ResponseWriter, r *http.Request, in searchIn, stream bool, wire wireFunc) {
+		// No implicit fallback: ingest and retrieval must select the same
+		// explicitly registered bucket.
+		if !requireHTTPBucket(w, r, buckets, in.NS) {
+			return
+		}
 			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
 			// collections and KV keys all move to the request's namespace.
 			// Declaring it here (not only on the ingest faces) keeps the
@@ -573,6 +581,10 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 					}
 				}
 				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Answer, res.Citations.Refs)
+				if ss.chat != nil {
+					prompt, completion, total := ss.chat.SnapshotUsage()
+					recordConsumption(r.Context(), c, in.NS, res.Model, prompt, completion, total, res)
+				}
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
 				bumpBucket(r.Context(), buckets, in.NS, ss)
@@ -581,19 +593,49 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				return
 			}
 			bumpBucket(r.Context(), buckets, in.NS, ss)
-			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt)
+			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt, wire)
 			if serr == nil {
 				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Answer, sres.Citations.Refs)
+				if ss.chat != nil {
+					prompt, completion, total := ss.chat.SnapshotUsage()
+					recordConsumption(r.Context(), c, in.NS, sres.Model, prompt, completion, total, sres)
+				}
 			}
 			errMsg := ""
 			if serr != nil {
 				errMsg = serr.Error()
 			}
 			trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg, stages)
+	}
+	handle := func(stream bool, wire wireFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
+				return
+			}
+			var in searchIn
+			if err := decode(r, &in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+			if in.Query == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "query required"})
+				return
+			}
+			serveSearchRequest(w, r, in, stream, wire)
 		}
 	}
-	mux.HandleFunc("/v1/search", handle(false))
-	mux.HandleFunc("/v1/search/stream", handle(true))
+	mux.HandleFunc("/v1/search", handle(false, identityWire))
+	mux.HandleFunc("/v1/search/stream", handle(true, identityWire))
+	// OpenAI 兼容聊天面：组件规范（evoke-chat openai 适配器 / 通用 SDK）直连。
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		in, ok := parseChatCompletions(w, r)
+		if !ok {
+			return
+		}
+		sin, _ := in.toSearchIn()
+		serveSearchRequest(w, r, sin, true, newChatWire())
+	})
 }
 
 // turnExtrasFrom builds the persisted turn extras: the answer's evidence
@@ -617,13 +659,17 @@ func turnExtrasFrom(refs []deep.Ref, stats *sessionStats) *turnExtras {
 // statsFromDone is the bridge from a finished run (deep.Result + the stage
 // map) to the persisted run card.
 func statsFromDone(res deep.Result, stages map[string]int64) *sessionStats {
-	return statsFrom(map[string]any{
+	m := map[string]any{
 		"mode": res.Mode, "conf": res.Answer.Confidence, "coverage": res.Answer.Coverage,
 		"loops": res.Loops, "widened": res.Widened, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS, "reused": res.Reused,
 		"cluster_id": res.ClusterID, "stop_reason": res.StopReason,
-		"refused": res.Answer.Refused, "stages": stages,
-	})
+		"refused": res.Answer.Refused, "stages": stages, "model": res.Model,
+	}
+	if res.StagesTokens != nil {
+		m["stages_tokens"] = res.StagesTokens
+	}
+	return statsFrom(m)
 }
 
 // bumpBucket records a query against the bucket that served it. Best effort:
@@ -654,6 +700,7 @@ func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMs
 		Confidence: a.Confidence, Coverage: a.Coverage, Samples: len(a.Samples),
 		Loops: res.Loops, Widened: res.Widened, LLMCalls: a.LLMCalls,
 		Tokens: res.Tokens, LatencyMS: res.LatencyMS, LatencyUS: res.LatencyUS, Embedder: embedder,
+		Model: res.Model,
 		SelfCorr: res.SelfCorrected, Refused: a.Refused, Error: errMsg,
 		StopReason: res.StopReason, Stages: stages,
 	})
@@ -676,7 +723,7 @@ type streamState struct {
 	onStage  func(name string, d time.Duration)
 }
 
-func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool, stages map[string]int64, st *streamState) (deep.Result, error) {
+func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool, stages map[string]int64, st *streamState, wire wireFunc) (deep.Result, error) {
 	if verbose {
 		vlog := func(f string, a ...any) {
 			log.Printf("[search %s] %s", query, fmt.Sprintf(f, a...))
@@ -698,9 +745,10 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	emit := func(event string, data any) {
 		mu.Lock()
 		defer mu.Unlock()
-		b, _ := json.Marshal(data)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-		flusher.Flush()
+		if frame := wire(event, data); frame != "" {
+			fmt.Fprint(w, frame)
+			flusher.Flush()
+		}
 	}
 	started := time.Now()
 	if st != nil {
@@ -788,6 +836,12 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		"cluster_id": res.ClusterID, "tokens": res.Tokens,
 		"latency_ms": res.LatencyMS, "widened": res.Widened,
 		"stop_reason": res.StopReason, "refused": ans.Refused, "skipped": ans.Skipped,
+	}
+	// Per-stage token attribution (stages_tokens on deep.Result): the UI's
+	// "token 去向" footnote reads this. Nil (offline/hermetic runs) stays
+	// absent rather than an explicit null.
+	if res.StagesTokens != nil {
+		done["stages_tokens"] = res.StagesTokens
 	}
 	if sess != nil {
 		extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))

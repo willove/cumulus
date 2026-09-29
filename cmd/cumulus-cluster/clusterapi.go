@@ -6,6 +6,7 @@ package main
 // links without a second round trip.
 
 import (
+	"encoding/json"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/affinity"
+	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/ingest"
@@ -26,7 +28,7 @@ import (
 // 待复核 entry point: it re-validates a cluster's evidence windows against
 // the CURRENT corpus (the same rune-exact rule the warm-reuse path applies)
 // and promotes a valid emerging cluster to stable.
-func registerClusterFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, serveNS, evidenceColl string) {
+func registerClusterFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, buckets *bucket.Store, serveNS, evidenceColl string) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		if err := ns.Validate(r.URL.Query().Get("ns")); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -132,6 +134,48 @@ func registerClusterFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, 
 			return
 		}
 		writeJSON(w, http.StatusOK, st)
+	})
+
+	// 重学入口：POST /v1/learning/reset?ns= —— CLI `reset learned` 的 HTTP 面。
+	// 防误触是双层的：注册库门禁 + 请求体 confirm 必须逐字等于库名（比 CLI 的
+	// -yes 更强，因为它证明调用者知道自己在清哪个库）。语料不在清除集合里，
+	// 由构造保证而非开关。
+	mux.HandleFunc("/v1/learning/reset", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST only"})
+			return
+		}
+		reqNS := firstNonEmpty(r.URL.Query().Get("ns"), serveNS)
+		if !requireHTTPBucket(w, r, buckets, reqNS) {
+			return
+		}
+		var body struct {
+			Confirm string `json:"confirm"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "json body with confirm field required"})
+			return
+		}
+		if body.Confirm != reqNS {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": "confirm mismatch",
+				"hint":  "confirm 必须逐字等于要清空的库名（ns）",
+			})
+			return
+		}
+		// Evidence identity follows the same sources-identity rule as the GET
+		// face above — resetting a tenant must clear the tenant's evidence,
+		// not the default library's.
+		evidence := evidenceColl
+		if reqNS != serveNS {
+			evidence = ns.Coll(reqNS, "clus_evidence")
+		}
+		rep, err := ResetLearned(r.Context(), c, reqNS, evidence, false)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rep)
 	})
 
 	// 账本诊断面：GET /v1/affinity?token=宠物 → 该词元下衰减后的文档权重。

@@ -2,29 +2,23 @@
   <div class="pane">
     <eb-alert v-if="clusterError" type="error" :title="clusterError" :closable="false" show-icon><eb-button type="primary" link @click="loadClusters">重试列表</eb-button></eb-alert>
 
-    <!-- 这个面板过去最大的问题是「不知道它是干什么的」：先讲清楚口径再用。
-         知识簇 = 问过的问题按主题归档的答案缓存；同类问题再问命中簇时是
-         毫秒级、不再调模型。待复核 = 簇的证据窗口尚未对当前语料复核。 -->
-    <div class="intro">
-      <div class="intro-text">
-        <b>知识簇是什么</b>
+    <!-- 这个面板过去最大的问题是「不知道它是干什么的」：口径解释收进
+         帮助折叠（默认收起，占屏的是数据不是说明书）。统计数字只在右上
+         一行，与概览段口径一致。知识簇 = 问过的问题按主题归档的答案缓存。 -->
+    <details class="intro-help">
+      <summary>知识簇是什么</summary>
+      <div class="intro-help-body">
         <p>系统把问过的问题按主题自动归并：同一个主题再问，直接复用已合成好的答案——<b>毫秒级返回、不再调用模型、不烧 token</b>。每个簇记着它依据的原文窗口，可逐条核对。</p>
         <p class="tiny">待复核 = 该簇的证据窗口还没对当前语料验证过（语料可能已更新）；选中后点「复核」即可以当前原文逐窗校验，通过则转为稳定。</p>
       </div>
-      <div class="intro-stats">
-        <div class="stat"><span class="stat-num">{{ stats.total }}</span><span class="stat-label">簇</span></div>
-        <div class="stat"><span class="stat-num warn">{{ stats.emerging }}</span><span class="stat-label">待复核</span></div>
-        <div class="stat"><span class="stat-num ok">{{ stats.stable }}</span><span class="stat-label">稳定</span></div>
-        <div class="stat"><span class="stat-num bad">{{ stats.contested }}</span><span class="stat-label">有争议</span></div>
-      </div>
-    </div>
+    </details>
 
     <div class="split">
       <aside class="rail">
         <div class="rail-head"><span class="rail-title">知识簇 · {{ clusters.length }}</span></div>
-        <div class="filter-row">
-          <eb-button v-for="f in filters" :key="f.value" size="small" :type="activeFilter === f.value ? 'primary' : 'default'" text @click="activeFilter = f.value">{{ f.label }}</eb-button>
-        </div>
+        <!-- 生命周期筛选：segmented small+block（等分撑满单行）。原文字钮行
+             在 264px 窄栏里会折成两行（"已退役"掉行）。 -->
+        <eb-segmented v-model="activeFilter" :options="filterOptions" size="small" block />
         <div v-for="c in visibleClusters" :key="c._id" class="rail-item" :class="{ cur: clusterCur && clusterCur.cluster._id === c._id }"
              @click="openCluster(c._id)">
           <span class="t">{{ (c.queries && c.queries[0]) || c.name || c._id }}</span>
@@ -104,13 +98,14 @@ const lifecycleStatuses = [
   { value: "deprecated", label: lifecycleLabel.deprecated, type: "info" },
 ];
 
+// 生命周期口径给概览段（LibraryView）复用；本段自身不再渲染统计卡。
 const stats = computed(() => clusterStats(clusters.value));
-const filters = [
-  { value: "", label: "全部" },
-  { value: "emerging", label: "待复核" },
-  { value: "stable", label: "稳定" },
-  { value: "contested", label: "有争议" },
-  { value: "deprecated", label: "已退役" },
+const filterOptions = [
+  { label: "全部", value: "" },
+  { label: "待复核", value: "emerging" },
+  { label: "稳定", value: "stable" },
+  { label: "有争议", value: "contested" },
+  { label: "已退役", value: "deprecated" },
 ];
 const activeFilter = ref("");
 const visibleClusters = computed(() =>
@@ -122,17 +117,11 @@ function scorePct(score) { return Math.max(4, Math.min(100, ((score ?? 0) / 10) 
 
 <style scoped src="./common.css"></style>
 <style scoped>
-.intro { display: flex; gap: 20px; align-items: flex-start; padding: 14px 16px; margin-bottom: 12px; border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; background: var(--eb-fill-color-light); }
-.intro-text { flex: 1; min-width: 0; }
-.intro-text p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.8; color: var(--eb-text-color-secondary); }
-.intro-stats { display: flex; gap: 14px; flex: none; }
-.stat { display: flex; flex-direction: column; align-items: center; min-width: 44px; }
-.stat-num { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; }
-.stat-num.ok { color: var(--eb-color-success); }
-.stat-num.warn { color: var(--eb-color-warning); }
-.stat-num.bad { color: var(--eb-color-danger); }
-.stat-label { font-size: 11px; color: var(--eb-text-color-placeholder); margin-top: 2px; }
-.filter-row { display: flex; flex-wrap: wrap; gap: 2px; padding: 0 8px 8px; }
+.intro-help { border: 1px dashed var(--eb-border-color-lighter); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; }
+.intro-help summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--eb-text-color-regular); user-select: none; }
+.intro-help-body p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.8; color: var(--eb-text-color-secondary); }
+/* segmented 筛选行贴栏宽，条目留呼吸位后即列表。 */
+.rail :deep(.eb-segmented) { width: 100%; margin: 0 0 8px; }
 .review-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
 .review-row .ok { color: var(--eb-color-success); }
 .review-row .warn { color: var(--eb-color-warning); }

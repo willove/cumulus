@@ -6,20 +6,22 @@
 //      password 输入框，只是视觉掩码；这里不照抄）。
 //   2. 验证报告不再压成一行字符串：dims/ms/norm/probe 分开呈现，并写清这次验证
 //      证明了什么、没证明什么。
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted } from "vue";
 import { requestJSON, jsonPost } from "../api.js";
 
-export function useSettingsPane() {
-  const settingsModel = ref(null);
-  const settingsConfig = ref(null);
-  const settingsBusy = ref(false);
-  const settingsMsg = ref("");
-  const settingsVerify = ref(null); // { ok, dims, ms, norm, probe } 或 { error }
-  const settingsTest = ref(null);   // { ok, model, latency_ms, tokens, answer } 或 { error }
-  const settingsForm = ref({ base_url: "", chat_model: "", embed_model: "", api_key: "", reasoning_split: false });
-  const settingsSaving = ref(false);
-  let timer = null;
+// 状态为模块级单例：引擎页把配置与本地权重拆成了两个页签，两处必须共享
+// 同一份表单/权重状态——否则在「服务配置」里保存后切到「本地模型」又读旧值。
+const settingsModel = ref(null);
+const settingsConfig = ref(null);
+const settingsBusy = ref(false);
+const settingsMsg = ref("");
+const settingsVerify = ref(null); // { ok, dims, ms, norm, probe } 或 { error }
+const settingsTest = ref(null);   // { ok, model, latency_ms, tokens, answer } 或 { error }
+const settingsForm = ref({ base_url: "", chat_model: "", embed_model: "", api_key: "", reasoning_split: false });
+const settingsSaving = ref(false);
+let timer = null;
 
+export function useSettingsPane() {
   function fillForm(config) {
     if (!config) return;
     settingsForm.value = {
@@ -121,7 +123,6 @@ export function useSettingsPane() {
     }, 1500);
   }
 
-  onUnmounted(() => { if (timer) { clearInterval(timer); timer = null; } });
   onMounted(loadSettings);
 
   return {

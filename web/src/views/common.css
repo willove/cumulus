@@ -12,7 +12,7 @@ body { font-family: var(--cul-sans); color: var(--eb-text-color-primary); backgr
 .split { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: var(--eb-space-6); height: 100%; }
 .split > * { min-width: 0; }
 .rail { overflow: auto; padding-right: var(--eb-space-2); border-right: 1px solid var(--eb-border-color-lighter); }
-.rail-item { display: flex; align-items: center; justify-content: space-between; gap: var(--eb-space-2); padding: var(--eb-space-2) var(--eb-space-3); border-radius: var(--eb-radius-md); cursor: pointer; color: var(--eb-text-color-regular); }
+.rail-item { display: flex; align-items: center; justify-content: space-between; gap: var(--eb-space-2); padding: var(--eb-space-2) var(--eb-space-3); border-radius: var(--eb-radius-md); cursor: pointer; color: var(--eb-text-color-regular); transition: background-color var(--eb-duration-fast) var(--eb-ease-out), color var(--eb-duration-fast) var(--eb-ease-out); }
 .rail-item:hover { background: var(--eb-fill-color-light); }
 .rail-item.cur { background: var(--eb-color-primary-light-9); color: var(--eb-color-primary); }
 .rail-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--eb-font-size-sm); }
@@ -49,6 +49,10 @@ body { font-family: var(--cul-sans); color: var(--eb-text-color-primary); backgr
 .graph-wrap { border: 1px solid var(--eb-border-color-lighter); border-radius: var(--eb-radius-lg); background: var(--eb-fill-color-light); padding: var(--eb-space-2); }
 .status-dot { width: 7px; height: 7px; border-radius: var(--eb-radius-full); background: var(--eb-text-color-placeholder); flex: none; }
 .status-dot.ready { background: var(--eb-color-success); }
+/* 面板/页签切换的统一入场：纯 CSS 动画（挂载即播），不经过 Vue Transition——
+   后者的帧推进依赖 rAF，webview 被遮挡时会死锁切换。时长与缓动消费库令牌。 */
+.pane-swap, .tab-swap { animation: pane-in var(--eb-duration-base, .2s) var(--eb-ease-out); }
+@keyframes pane-in { from { opacity: 0; } }
 @media (max-width: 760px) {
   .pane { padding: var(--eb-space-5) var(--eb-space-4); }
   .split { grid-template-columns: minmax(0, 1fr); height: auto; }

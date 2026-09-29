@@ -2,6 +2,14 @@ import { ref, watch, computed } from "vue";
 import { requestJSON, jsonPost } from "./api.js";
 
 export const pane = ref("chat");
+export const PANES = ["chat", "library", "evals", "engine"];
+// 旧六导航 hash 归并到新四页：文档/知识簇是知识库的页签，监控/配置是引擎的页签。
+// 旧链不断——外部脚本与收藏里可能还带着 #/documents、#/monitor。
+const HASH_FOLD = { documents: "library", ingest: "library", clusters: "library", monitor: "engine", settings: "engine" };
+export function paneFromHash(id) {
+  const mapped = HASH_FOLD[id] || id;
+  return PANES.includes(mapped) ? mapped : "chat";
+}
 export const nsSel = ref("");
 export const buckets = ref([]);
 export const bucketsBusy = ref(false);
@@ -39,7 +47,7 @@ export async function createBucket(name, label) {
   await loadBuckets();
   if (bucketsError.value) throw new Error("知识库已创建，但刷新失败：" + bucketsError.value);
   nsSel.value = created.name;
-  pane.value = "documents";
+  pane.value = "library";
 }
 
 export async function loadDocuments() {
