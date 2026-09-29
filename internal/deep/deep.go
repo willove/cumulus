@@ -29,6 +29,29 @@ import (
 // (plan D5: 置信不足 → DEEP / ReAct).
 const EscalateBelow = 0.35
 
+// escalateBelowLine is the runtime escalation line: the historical constant
+// unless CLUS_ESCALATE_BELOW overrides it (calibration knob, 2026-09-29).
+//
+// Why the knob exists: 95 archived FAST rows measure the answer-confidence
+// distribution at 0.45–0.91 — nothing ever lands under the 0.35 line, so on
+// single-fact queries the confidence arm of the escalate condition is dead
+// and the whole mid-band leaks through as served FAST answers. The measured
+// correct-rate by band: <0.65 → 0/9, 0.65–0.75 → 9/31, 0.75–0.85 → 20/41,
+// ≥0.85 → 13/14. DEEP performs ~0.80 on the same corpora, so escalating the
+// sub-0.85 band trades tokens for correctness. The default stays 0.35
+// (byte-identical) until the paired A/B earns a new one.
+func escalateBelowLine() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_ESCALATE_BELOW"))
+	if v == "" {
+		return EscalateBelow
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 0.95 {
+		return EscalateBelow
+	}
+	return f
+}
+
 // MaxLoops bounds the DEEP tool loop (Sirchmunk max_loops analogue).
 // 4, down from 6: measured answerable queries converge on the utility stop
 // long before the cap (a cross-law criminal query finished in 2 loops), so
@@ -376,7 +399,7 @@ func (e *Engine) effectiveQuery(ctx context.Context, query string) string {
 
 func New(k *kb.Engine, conflicts ConflictStore) *Engine {
 	return &Engine{
-		KB: k, Conflicts: conflicts, EscalateBelow: EscalateBelow,
+		KB: k, Conflicts: conflicts, EscalateBelow: escalateBelowLine(),
 		MaxLoops: MaxLoops, WidenBudget: WidenBudget, CorrectBudget: CorrectBudget,
 		// The per-query cap is ON by default (see DefaultTokenBudget for the
 		// derivation). A caller that wants the old uncapped loop sets
@@ -540,19 +563,26 @@ const gammaStep = 0.05
 
 // thresholdFor modulates the escalation line by intent shape (B10 γ(I)):
 // single-fact lookups stop at the base line, multi-fact comparisons demand
-// proportionally more (capped at 0.6 so DEEP stays reachable).
+// proportionally more. The cap is RELATIVE to the base (base + 3 γ-steps,
+// bounded by 0.95 so DEEP stays reachable): the old absolute 0.6 cap never
+// bound at the 0.35 default (0.35+0.15 < 0.6), and an absolute cap under a
+// raised base would silently LOWER the line below it.
 func (e *Engine) thresholdFor(fx []facts.Fact) float64 {
 	thr := e.EscalateBelow
 	if thr <= 0 {
 		thr = EscalateBelow
+	}
+	cap := thr + 3*gammaStep
+	if cap > 0.95 {
+		cap = 0.95
 	}
 	extra := len(fx) - 1
 	if extra > 3 {
 		extra = 3
 	}
 	thr += gammaStep * float64(extra)
-	if thr > 0.6 {
-		thr = 0.6
+	if thr > cap {
+		thr = cap
 	}
 	return thr
 }

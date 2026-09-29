@@ -333,7 +333,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		return Answer{
 			Query: query, Mode: ModeFAST, LLMCalls: calls,
 			SourceID: best.ID, Samples: kept, Coverage: cov,
-			Confidence: conf, Skipped: conf < SkipBelow,
+			Confidence: conf, Skipped: conf < skipBelowLine(),
 			SynthDeferred: true,
 		}, nil
 	}
@@ -352,7 +352,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		// A bridged answer stands even under the confidence floor: the
 		// session's own document carried it, and escalating cannot find
 		// wording the statute does not contain.
-		Skipped: conf < SkipBelow && !bridged,
+		Skipped: conf < skipBelowLine() && !bridged,
 		Bridged: bridged,
 		Refused: RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
 	}, nil
@@ -437,6 +437,21 @@ func maxUsageDoc(usage map[string]float64, sources []source.Source) (string, flo
 // skipped. It mirrors deep.EscalateBelow so tuning one line cannot desynchronize
 // the FAST skip flag from the DEEP escalation line.
 const SkipBelow = 0.35
+
+// skipBelowLine is SkipBelow at runtime: the same CLUS_ESCALATE_BELOW knob
+// that moves the DEEP escalation line moves this floor with it (the mirror
+// is the whole point — a skipped answer is itself an escalation trigger).
+func skipBelowLine() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_ESCALATE_BELOW"))
+	if v == "" {
+		return SkipBelow
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 0.95 {
+		return SkipBelow
+	}
+	return f
+}
 
 // AdmitByFields admits up to m active sources matching the given fields
 // directly (the widen loop's refinement round: keywords regenerated after a
