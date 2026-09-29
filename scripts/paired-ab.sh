@@ -39,7 +39,21 @@ export CLUS_EMBED=minilm
 # One frozen item set + corpus, built once and shared by every arm of this tag.
 # Deterministic: realeval.sh prep draws the same first N triples from the same
 # dataset, so a later re-run reproduces the same questions.
-if [ ! -s "$BASE/items.jsonl" ]; then
+#
+# AB_FROZEN overrides the prep entirely: point it at a directory holding an
+# already-sealed items.jsonl + corpus.jsonl (e.g. var/poetry-adversarial) and
+# the pair runs on THAT exam, manifest and all.
+if [ -n "${AB_FROZEN:-}" ]; then
+	BASE="$(pwd)/var/ab-$TAG"
+	[ -s "$AB_FROZEN/items.jsonl" ] && [ -s "$AB_FROZEN/corpus.jsonl" ] || {
+		echo "ab: AB_FROZEN=$AB_FROZEN lacks items.jsonl/corpus.jsonl" >&2; exit 1; }
+	mkdir -p "$BASE"
+	if [ ! -s "$BASE/items.jsonl" ]; then
+		cp "$AB_FROZEN/items.jsonl" "$BASE/items.jsonl"
+		cp "$AB_FROZEN/corpus.jsonl" "$BASE/corpus.jsonl"
+		echo "ab: frozen set from $AB_FROZEN items=$(wc -l < "$BASE/items.jsonl" | tr -d ' ') docs=$(wc -l < "$BASE/corpus.jsonl" | tr -d ' ')"
+	fi
+elif [ ! -s "$BASE/items.jsonl" ]; then
 	CNLAW_DIR="${CNLAW_DIR:-$HOME/datasets/cn-law-rag/finetune_dataset.jsonl}" \
 		REALEVAL_N=30 scripts/realeval.sh prep
 	cp var/realeval/items.jsonl "$BASE/items.jsonl"
