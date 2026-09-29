@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -876,6 +877,8 @@ func main() {
 		fs := flag.NewFlagSet("calib", flag.ExitOnError)
 		rows := fs.String("rows", "", "result rows jsonl to mine (conf/mode/eval.correct)")
 		usage := fs.Bool("usage", false, "mine production episodes from the clus_usage ledger instead of a rows file")
+		auto := fs.Bool("auto", false, "R3: run the whole loop — mine, propose, SELF-RUN the paired test (paired-ab.sh), decide, optionally apply")
+		set := fs.String("set", "", "frozen set dir (items.jsonl+corpus.jsonl) the self-test runs on")
 		rowsB := fs.String("rows-b", "", "paired arm rows jsonl: with -rows becomes the self-test verdict")
 		target := fs.Float64("target", 0.75, "serve-band correct-rate target for a proposal")
 		minN := fs.Int("min-n", 10, "minimum band support to propose")
@@ -883,6 +886,58 @@ func main() {
 		line := fs.Float64("line", 0, "the proposal's line to apply (refuses blind applies)")
 		apply := fs.Bool("apply", false, "write -line into the store takeover point (requires a winning verdict)")
 		_ = fs.Parse(rest)
+		if *auto {
+			// R3: the loop runs its own experiment. The pair discipline is
+			// scripts/paired-ab.sh's (fresh stores, frozen set, judge) — the
+			// orchestrator shells to it rather than duplicating the harness.
+			if *set == "" {
+				fatal(fmt.Errorf("calib -auto: -set (frozen set dir) required for the self-test"))
+			}
+			var eps []calib.Episode
+			var err error
+			if *usage {
+				eps, err = calib.ReadUsage(ctx, c, 0)
+			} else if *rows != "" {
+				eps, err = calib.ReadEpisodes(*rows)
+			} else {
+				fatal(fmt.Errorf("calib -auto: -rows or -usage required to mine"))
+			}
+			if err != nil {
+				fatal(err)
+			}
+			prop, ok := calib.Propose(eps, *current, *target, *minN)
+			if !ok {
+				printJSON(map[string]any{"auto": "keep-current", "reason": "no qualifying proposal", "episodes": len(eps)})
+				return
+			}
+			tag := fmt.Sprintf("calibauto-%s", time.Now().UTC().Format("20060102-150405"))
+			cmd := exec.Command("bash", "scripts/paired-ab.sh", "CLUS_ESCALATE_BELOW",
+				fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed), tag, "30")
+			cmd.Env = append(os.Environ(), "AB_FROZEN="+mustAbs(*set))
+			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+			fmt.Fprintf(os.Stderr, "[calib-auto] self-test: %s vs %s on %s (tag %s)\n",
+				fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed), *set, tag)
+			if err := cmd.Run(); err != nil {
+				fatal(fmt.Errorf("calib -auto: self-test failed: %w", err))
+			}
+			base := filepath.Join("var", "ab-"+tag)
+			pair, err := calib.ReadPair(filepath.Join(base, "a0", "results.jsonl"), filepath.Join(base, "a1", "results.jsonl"))
+			if err != nil {
+				fatal(err)
+			}
+			v := calib.Decide(pair)
+			printJSON(map[string]any{"proposal": prop, "pair": pair, "verdict": v})
+			if *apply {
+				if !v.Apply {
+					fatal(fmt.Errorf("calib -auto: self-test lost — nothing applied"))
+				}
+				if err := calib.NewStore(c).Save(ctx, prop.Proposed, "calib -auto self-test win"); err != nil {
+					fatal(err)
+				}
+				printJSON(map[string]any{"applied": prop.Proposed})
+			}
+			return
+		}
 		switch {
 		case *usage:
 			eps, err := calib.ReadUsage(ctx, c, 0)
@@ -996,6 +1051,14 @@ func printJSON(v any) {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "cumulus-cluster:", err)
 	os.Exit(1)
+}
+
+// mustAbs resolves p against the CWD for subprocess env handoff.
+func mustAbs(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
 }
 
 func trim(s string, n int) string {

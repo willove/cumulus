@@ -146,10 +146,15 @@ func TestReadUsagePseudoLabels(t *testing.T) {
 	if len(eps) != 2 {
 		t.Fatalf("episodes = %d, want 2: %+v", len(eps), eps)
 	}
-	if !eps[0].Correct || eps[0].Conf != 0.72 {
-		t.Fatalf("stable row mapped wrong: %+v", eps[0])
+	// The ledger query does not guarantee row order — match by conf.
+	byConf := map[float64]Episode{}
+	for _, e := range eps {
+		byConf[e.Conf] = e
 	}
-	if eps[1].Correct || eps[1].Conf != 0.58 {
-		t.Fatalf("wobbly row mapped wrong: %+v", eps[1])
+	if e := byConf[0.72]; !e.Correct {
+		t.Fatalf("stable row mapped wrong: %+v", e)
+	}
+	if e := byConf[0.58]; e.Correct {
+		t.Fatalf("wobbly row mapped wrong: %+v", e)
 	}
 }

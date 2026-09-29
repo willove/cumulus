@@ -8,7 +8,9 @@ package facts
 
 import (
 	"context"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -43,6 +45,22 @@ type Report struct {
 
 // CoverScore is the per-fact hit line on the offline 0-10 sample scale.
 const CoverScore = 4.0
+
+// CoverScoreLine is CoverScore at runtime (R1 takeover point): the keep/
+// cover line gates which windows enter the evidence set and when a merely
+// covering window may stop the loop, so it is exactly the kind of hand
+// constant the learning loop must be able to reach. Default byte-identical.
+func CoverScoreLine() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_COVER_SCORE"))
+	if v == "" {
+		return CoverScore
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 10 {
+		return CoverScore
+	}
+	return f
+}
 
 // CoverHit is the minimum keyword-overlap share for a window to support a fact.
 const CoverHit = 0.5

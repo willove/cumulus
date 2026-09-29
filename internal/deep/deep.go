@@ -1251,6 +1251,21 @@ func (e *Engine) begin() func(*int64) {
 // sufficientScore is the "this window is strong enough to end the loop" line.
 const sufficientScore = 8.0
 
+// sufficientLine is sufficientScore at runtime (R1 takeover point): the
+// strong-window stop is the loop's main cost/quality dial, paired with
+// facts.CoverScoreLine as the cover line. Default byte-identical.
+func sufficientLine() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_SUFFICIENT_SCORE"))
+	if v == "" {
+		return sufficientScore
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 10 {
+		return sufficientScore
+	}
+	return f
+}
+
 // conflictMarked reports whether any kept window carries an unresolved
 // contradiction mark (v3b c_d). Kept windows are all at/above the cover line,
 // so a mark here is a live cross-evidence contradiction, not noise.
@@ -1625,8 +1640,8 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// budget/exhaustion caps as ever; if none arrives, synthesis handles
 		// the contested set exactly as it does today.
 		conflictGated := mcs.ScorerConflict() && conflictMarked(kept)
-		if rep.Complete && !conflictGated && (bestScore >= sufficientScore ||
-			(bestScore >= facts.CoverScore && e.budgetAtRisk())) {
+		if rep.Complete && !conflictGated && (bestScore >= sufficientLine() ||
+			(bestScore >= facts.CoverScoreLine() && e.budgetAtRisk())) {
 			reason = "sufficient"
 			if e.Verbose != nil {
 				e.Verbose("early stop: covered, best=%.1f, files=%d, budget_at_risk=%v",
@@ -1685,7 +1700,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if sm.Score > localBest {
 				localBest = sm.Score
 			}
-			if sm.Score >= 4 {
+			if sm.Score >= facts.CoverScoreLine() {
 				sm.Source = s.ID
 				kept = append(kept, sm)
 				fileKept++
@@ -1710,7 +1725,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// sibling, and the sibling lands at qi+1 so it is explored next. A
 		// sibling already in the queue is MOVED UP (out from behind whatever
 		// junk the ranker put ahead of it), not duplicated.
-		if adjacency != nil && pulled < adjacencyPullCap && localBest >= facts.CoverScore {
+		if adjacency != nil && pulled < adjacencyPullCap && localBest >= facts.CoverScoreLine() {
 			for _, nb := range adjacency.siblings(s) {
 				if tried[nb.ID] {
 					continue
@@ -1874,7 +1889,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					if sm.Score > localBest {
 						localBest = sm.Score
 					}
-					if sm.Score >= 4 {
+					if sm.Score >= facts.CoverScoreLine() {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 					}
@@ -1918,7 +1933,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// widen, at or above it we are done.
 	if reason != "utility" &&
 		(facts.NeedContinue(rep, loops, e.MaxLoops+e.CorrectBudget+e.WidenBudget) ||
-			(bestScore < facts.CoverScore && !e.budgetAtRisk())) &&
+			(bestScore < facts.CoverScoreLine() && !e.budgetAtRisk())) &&
 		e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
@@ -1978,7 +1993,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					if sm.Score > localBest {
 						localBest = sm.Score
 					}
-					if sm.Score >= 4 {
+					if sm.Score >= facts.CoverScoreLine() {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 						fileKept++
@@ -2088,7 +2103,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					if sm.Score > localBest {
 						localBest = sm.Score
 					}
-					if sm.Score >= 4 {
+					if sm.Score >= facts.CoverScoreLine() {
 						sm.Source = s.ID
 						kept = append(kept, sm)
 					}
