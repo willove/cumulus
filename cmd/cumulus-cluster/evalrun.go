@@ -50,7 +50,12 @@ type evalResult struct {
 	Loops   int     `json:"loops,omitempty"`
 	Widened int     `json:"widened,omitempty"`
 	// StopReason mirrors deep.Result.StopReason ("" on FAST hits and errors).
-	StopReason string  `json:"stop_reason,omitempty"`
+	StopReason string `json:"stop_reason,omitempty"`
+	// LatencyMS is the search-phase wall time (deep.Result.LatencyMS):
+	// sealed before any judge/closed-book call, so it measures retrieval
+	// latency uncontaminated — the instrument the batching default decision
+	// reads (v3a's only remaining claim is serial-round-trip collapse).
+	LatencyMS int64 `json:"latency_ms,omitempty"`
 	Conf    float64 `json:"conf,omitempty"`
 	Calls   int     `json:"calls,omitempty"`
 	Tokens  int64   `json:"tokens,omitempty"` // search path only (pre-judge)
@@ -471,6 +476,7 @@ func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, l
 		// results.jsonl without re-running — the Jev-Mem v2-vs-v3 decision
 		// reads exactly this histogram.
 		rec.StopReason = res.StopReason
+		rec.LatencyMS = res.LatencyMS
 		rec.Conf = res.Answer.Confidence
 		rec.Calls = res.Answer.LLMCalls
 		rec.AbstainP = res.AbstainP
