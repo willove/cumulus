@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -911,9 +912,29 @@ func main() {
 				return
 			}
 			tag := fmt.Sprintf("calibauto-%s", time.Now().UTC().Format("20060102-150405"))
+			// Subprocess handoff hardening: the argv is a FIXED array (no
+			// shell string is ever built), the two arm values must
+			// round-trip as numbers in the escalation-line domain, and the
+			// frozen-set path — the one operator-controlled piece, which
+			// rides the ENVIRONMENT where a control character could forge
+			// an assignment — must resolve to an existing directory with
+			// no control characters.
+			armA, armB := fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed)
+			for _, v := range []string{armA, armB} {
+				if f, perr := strconv.ParseFloat(v, 64); perr != nil || f < 0 || f > 0.95 {
+					fatal(fmt.Errorf("calib -auto: arm %q failed numeric validation", v))
+				}
+			}
+			setAbs := mustAbs(*set)
+			if strings.ContainsAny(setAbs, "\n\r\x00") {
+				fatal(fmt.Errorf("calib -auto: -set must not contain control characters"))
+			}
+			if fi, serr := os.Stat(setAbs); serr != nil || !fi.IsDir() {
+				fatal(fmt.Errorf("calib -auto: -set must be an existing frozen-set directory"))
+			}
 			cmd := exec.Command("bash", "scripts/paired-ab.sh", "CLUS_ESCALATE_BELOW",
-				fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed), tag, "30")
-			cmd.Env = append(os.Environ(), "AB_FROZEN="+mustAbs(*set))
+				armA, armB, tag, "30")
+			cmd.Env = append(os.Environ(), "AB_FROZEN="+setAbs)
 			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 			fmt.Fprintf(os.Stderr, "[calib-auto] self-test: %s vs %s on %s (tag %s)\n",
 				fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed), *set, tag)
