@@ -16,6 +16,8 @@ var fs embed.FS
 // Asset names (file stems).
 const (
 	EvaluateSample     = "evaluate_sample"
+	EvaluateBatch      = "evaluate_batch"
+	EvaluateDims       = "evaluate_dims"
 	FastAnalyze        = "fast_analyze"
 	KeywordsMultilevel = "keywords_multilevel"
 	HistoryRewrite     = "history_rewrite"
@@ -27,6 +29,7 @@ const (
 	ScanRank           = "scan_rank"
 	ClosedBook         = "closed_book"
 	JudgeAnswer        = "judge_answer"
+	DecomposeQuery     = "decompose_query"
 )
 
 // Load returns the raw markdown body of a prompt asset.

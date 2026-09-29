@@ -7,6 +7,7 @@
 package facts
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -46,8 +47,170 @@ const CoverScore = 4.0
 // CoverHit is the minimum keyword-overlap share for a window to support a fact.
 const CoverHit = 0.5
 
+// Decomposer produces the atomic evidence requirements for a query.
+//
+// The offline heuristic (Build) is the default and every gate's baseline; a
+// production LLM decomposer must return the SAME []string shape so the
+// downstream cover/weakest-requirement machinery is unchanged (perf-plan §6).
+type Decomposer interface {
+	Decompose(ctx context.Context, query string) ([]string, error)
+}
+
+// minUnitRunes is the shortest a requirement may be. The measured failure
+// ("参与违法怎么办" → ["参", …]) produced one-rune facts whose keyword set
+// could never be covered, so the DEEP loop burned its whole budget on a
+// phantom requirement.
+const minUnitRunes = 4
+
+// maxParts caps the requirement count. splitQuery already truncates to 4;
+// the LLM path gets the same ceiling so the two arms stay comparable.
+const maxParts = 4
+
+// boundaryRunes are the quote/bracket characters whose imbalance is the
+// signature of a mid-title or mid-term cut. Of the 12 K>1 splits measured on
+// the real question sets, 2 cut a 《…》 title and 1 cut a straight-quoted
+// title mid-token, e.g. "右和" → ["\"右", "\"这本书的出版社是哪家？"].
+const boundaryRunes = "\"'“”‘’《》〈〉()（）[]【】{}"
+
+// IsSemanticUnit reports whether one decomposed part is a complete, retrievable
+// requirement rather than a fragment of a larger one.
+//
+// It is deliberately narrow. Its only job is to reject the shapes the measured
+// miscuts actually took — too-short fragments and cut-at-a-boundary splits —
+// because a false positive here costs one extra retrieval probe, while a false
+// negative costs a phantom requirement that the loop can never satisfy.
+func IsSemanticUnit(s string) bool {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) < minUnitRunes {
+		return false
+	}
+	// A balanced pair of book/quote brackets is a normal quoted title; an
+	// UNBALANCED one means the split ran through the middle of a title.
+	var depth int
+	for _, r := range s {
+		if !strings.ContainsRune(boundaryRunes, r) {
+			continue
+		}
+		switch r {
+		case '《', '〈', '（', '(', '[', '【', '{', '“', '‘':
+			depth++
+		case '》', '〉', '）', ')', ']', '】', '}', '”', '’':
+			depth--
+		default: // straight and curly single/double quotes are ambiguous
+			return false
+		}
+		if depth < 0 {
+			return false
+		}
+	}
+	return depth == 0
+}
+
+// coordinationMarkers are the explicit structures that license a K>1 split.
+// A requirement list only exists when the QUERY says there is one; without one,
+// every split is a guess.
+//
+// Measured case that made this a gate rather than a nicety (perf-plan §4.9):
+// query "发明创造定义" — 发明创造 is a statutory term of art, and the LLM
+// decomposer read it as the coordinate pair 发明 / 创造 (the prompt's rule #2
+// forbids exactly this, and it complied with neither). The split produced a
+// confident early stop (0 DEEP loops) citing the WRONG statute at 51% of the
+// tokens. No interrogative, no "分别", no coordination of any kind: for a bare
+// term-of-art lookup K=1 is the correct answer by construction.
+var coordinationMarkers = []string{
+	"分别", "各自", "以及", "同时", "还有", "此外", "另外", "分别指", "分别是什么",
+}
+
+// alternativeMarkers are the structures that look like coordination but are not.
+// "或者" in a legal question states an either/or CONDITION — splitting it
+// produces two requirements where the text states one
+// ("数额特别巨大或者有其他特别严重情节的…判什么刑" is a single question).
+var alternativeMarkers = []string{"或者", "或是", "还是", "或则"}
+
+// HasCoordination reports whether the query explicitly signals a requirement
+// list. An alternative marker anywhere disqualifies it: a query can contain both
+// ("…和…分别指什么，或者有例外吗") and the alternative reading dominates.
+//
+// A query that asks two or more separate questions licenses a list on its own —
+// one question per clause — with no marker word. Measured 2026-09-28 (live run
+// on the 727k-rune novel): "孙悟空在斜月三星洞跟随谁学艺？学成了哪些本领？"
+// has no marker, so a correct two-part model split was vetoed whole — the
+// decompose call cost ~837 tokens and produced exactly the two atomic
+// requirements, all discarded for K=1. The asymmetry is the license's
+// justification: a false LICENSE costs at most K≤4 extra cover checks on parts
+// the model itself proposed, while a false VETO wastes the whole call — and
+// the bare term-of-art shape the gate exists for ("发明创造定义") carries no
+// interrogative at all, so this license cannot reopen that defect.
+func HasCoordination(query string) bool {
+	q := strings.ToLower(strings.TrimSpace(query))
+	for _, m := range alternativeMarkers {
+		if strings.Contains(q, m) {
+			return false
+		}
+	}
+	for _, m := range coordinationMarkers {
+		if strings.Contains(q, m) {
+			return true
+		}
+	}
+	return strings.Count(q, "？")+strings.Count(q, "?") > 1
+}
+
+// BuildParts turns already-decomposed requirements into Facts, applying the
+// semantic-unit gate and the count ceiling. It returns nil when nothing
+// survives, which is the caller's signal to fall back to the heuristic Build —
+// a decomposer that produces garbage must degrade to today's behaviour, never
+// to a search with unreachable requirements.
+//
+// The query is required because a K>1 result additionally needs the QUERY to
+// license a requirement list (HasCoordination). A multi-part result for a query
+// with no coordination structure is the measured 发明创造 defect.
+func BuildParts(query string, parts []string) []Fact {
+	fx, _ := BuildPartsWhy(query, parts)
+	return fx
+}
+
+// Why names the gate that produced an empty BuildPartsWhy result, for the
+// verbose log: from the outside "nothing survived" and "not licensed" are
+// indistinguishable, and telling them apart is the first debugging step after
+// a fallback fires.
+const (
+	WhyNone         = ""              // accepted (or trivially empty input)
+	WhyUnits        = "units"         // every part failed IsSemanticUnit
+	WhyCoordination = "coordination"  // units survived, query licenses no list
+)
+
+// BuildPartsWhy is BuildParts with the veto reason spelled out.
+func BuildPartsWhy(query string, parts []string) ([]Fact, string) {
+	var out []Fact
+	for _, p := range parts {
+		if len(out) >= maxParts {
+			break
+		}
+		p = strings.TrimSpace(p)
+		if !IsSemanticUnit(p) {
+			continue
+		}
+		out = append(out, Fact{ID: "f" + itoa(len(out)+1), Query: p})
+	}
+	if len(out) > 1 && !HasCoordination(query) {
+		return nil, WhyCoordination
+	}
+	if len(out) == 0 {
+		return nil, WhyUnits
+	}
+	return out, WhyNone
+}
+
 // Build decomposes query into atomic facts (LENS D_req).
 // Heuristic: conjunction / comparison marks spawn extra facts; otherwise K=1.
+//
+// MEASURED: on the real question sets (baike 64 / chinalaw 42 / realeval 30)
+// this yields K=1 for 124 of 136 queries, and every one of the 12 K>1 splits
+// is a miscut inside a book title, a defined term, or an enumeration — the
+// model can copy it but not fix it. Production replaces it with a
+// decomposer.Decomposer (see Decomposer); this stays as the deterministic
+// baseline every gate runs on.
 func Build(query string) []Fact {
 	q := strings.TrimSpace(query)
 	if q == "" {

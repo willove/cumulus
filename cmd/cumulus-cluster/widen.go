@@ -109,6 +109,23 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl st
 				out = append(out, s)
 			}
 		}
+		// The semantic arm above is APPENDED after a 500-document lexical
+		// sweep, and both usageFirst and mixedAffinity cut the list to
+		// maxDeepLoops (=4). A document the embedder ranked #1 by cosine
+		// therefore lands at position ~500 and is truncated away before the
+		// DEEP loop ever sees it — the arm is computed, paid for, and
+		// discarded unless it also happened to be a lexical hit.
+		//
+		// Evidence it is worth using: -l1pre, which REPLACES the candidate
+		// list with the KNN hits in distance order, moved the same 30 cn-law
+		// anchors from Ev.Rec 30.0%→43.3% and EM 43.3%→66.7%
+		// (var/realeval/results.jsonl vs results_l1.jsonl).
+		//
+		// promoteSemanticHead is the surgical version: same candidate SET,
+		// different ORDER, so the only thing that changes is which documents
+		// the loop reaches first. Default off (k=0) is today's behaviour
+		// byte-for-byte.
+		out = promoteSemanticHead(out, extra, semanticHead())
 		// 使用权重提升：本会话刚引过/账本里这些词元反复命中的文档排到探索
 		// 最前（加速但不淹没：配额 4，稳定保序，同分不吃掉全局最优）。
 		uw := usage.get()
@@ -134,6 +151,75 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl st
 		// 「保护」一词命中妇女权益全家，反家暴法被挤出前 6），全局最优补足。
 		return mixedAffinity(out, affinity, maxDeepLoops, 3), nil
 	}
+}
+
+// semanticHead is how many of the query's KNN neighbours get promoted to the
+// head of the DEEP admission list (perf-plan §4.2 / P1-3).
+//
+// DEFAULT 0 — REVERTED 2026-09-28 from 4.
+//
+// Why it was set to 4: a paired endpoint-tier A/B on 12 cn-law anchors showed
+// ev_rec 4/12 → 6/12 with discordant 0:2 and search_tokens 0.81×.
+//
+// Why it is back to 0: that A/B's corpus has p50 document length of 145
+// CHARACTERS (min 69 / max 470), which fits entirely inside MiniLM's
+// 128-token embedding window (internal/minilm/tokenizer.go). The same
+// measurement on a real-length document — a 15.5M-rune novel split into 2,212
+// blocks, queried with the book's own 4,198 chapter titles — gives:
+//
+//	MiniLM-384   R@1 0.3%  R@4 1.1%  R@32 4.2%     (random baseline 0.05/0.18/1.4)
+//	local-hash-64 R@1 0.1% R@4 0.5%
+//
+// i.e. the semantic arm is ~6x better than random on 2,212 real blocks, which
+// is enough to look like it works and nowhere near enough to be useful. The
+// mechanism is the tokenizer's 128-token cap: an 8,000-rune block is 62x the
+// window, so its vector represents only its first ~300 characters.
+//
+// So the +2 was a SHORT-DOCUMENT result and it does not transfer. Promoting a
+// ranking that is near-random at document scale is not a free default. The
+// lexical arm measures 99.0% R@4 on the same blocks with no embedding at all.
+//
+// Set CLUS_ADMIT_SEMANTIC_HEAD>0 to opt back in; the arithmetic is unchanged,
+// and it remains the right setting for corpora whose documents fit the window.
+func semanticHead() int {
+	if v := os.Getenv("CLUS_ADMIT_SEMANTIC_HEAD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// promoteSemanticHead moves the first k of `semantic` (KNN distance order) to
+// the front of `cands`, keeping every other candidate in its original relative
+// order.
+//
+// Invariants, both gate-pinned in widen_test.go:
+//   - the candidate SET is preserved (nothing dropped, nothing duplicated) —
+//     only the order changes;
+//   - k <= 0 is an identity, so the default path is untouched.
+func promoteSemanticHead(cands, semantic []source.Source, k int) []source.Source {
+	if k <= 0 || len(semantic) == 0 {
+		return cands
+	}
+	if k > len(semantic) {
+		k = len(semantic)
+	}
+	head := semantic[:k]
+	claimed := make(map[string]bool, k)
+	for _, s := range head {
+		claimed[s.ID] = true
+	}
+	tail := make([]source.Source, 0, len(cands))
+	for _, s := range cands {
+		if claimed[s.ID] {
+			continue
+		}
+		tail = append(tail, s)
+	}
+	out := make([]source.Source, 0, k+len(tail))
+	out = append(out, head...)
+	return append(out, tail...)
 }
 
 // injectWeighted appends usage-weighted documents missing from the sweep.

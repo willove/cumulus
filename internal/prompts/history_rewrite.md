@@ -21,8 +21,10 @@ Latest User Message: "{{query}}"
 - history_relevant=false 时 standalone_query = 原消息。
 - 自包含问句 changed=false。
 - 语言跟随 Latest User Message。
+- **用户术语设定必须并入**：历史中若出现用户对术语的设定、更正或别名说明（「X 就是 Y」「X 又叫 Y」「X 按 Y 理解」「补充设定：X 指 Y」），且最新消息使用了该术语，则 standalone_query 须把规范名并进术语处（如 女儿国 → 女儿国（西梁女国）），changed=true。这是用户显式给出的检索指引，不是闲聊上下文；只认用户原话写明的等同关系，不得自行补充历史中未出现的任何同义词。
 
 ## 冻结回归
 - 闲聊史 + 检索问 → history_relevant=false，query 不带闲聊词。
-- 自包含问句 → changed=false。
+- 自包含问句（无相关历史）→ changed=false。
 - 需指代消解（「它/那个配置」）→ standalone_query 补全指代。
+- 用户设定「X 就是 Y」+ 含 X 的自包含问句 → standalone_query 含 Y，changed=true。

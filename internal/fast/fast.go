@@ -48,6 +48,14 @@ type Answer struct {
 	// there — so the caller lets it stand at FAST.
 	Bridged bool `json:"bridged"`
 	Refused bool `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
+	// SynthDeferred marks an answer whose synthesis was deliberately skipped
+	// because its confidence sat below the escalation line the caller wired
+	// in (DeferBelow): a DEEP escalation re-synthesizes anyway, so the FAST
+	// tier's render is a ~7k-token duplicate (stages_tokens, 2026-09-28: the
+	// fast bucket held 14.6k of a 29.8k query, half of it this call). The
+	// summary is empty until BackfillSynth runs — which the non-escalating
+	// path owes the answer before it is served or persisted.
+	SynthDeferred bool `json:"synth_deferred,omitempty"`
 }
 
 // Analysis is the low-cost query analysis (fast_analyze contract): intent plus
@@ -128,6 +136,19 @@ type Engine struct {
 	// (does a smaller synthesis input even pay?) is unanswerable without a
 	// per-stage split. Wired to the monitor tracker by serve.
 	Stages func(stage string, d time.Duration)
+	// DeferBelow, when > 0, skips this engine's synthesis for answers whose
+	// confidence sits below the line — the caller (the DEEP tier, which knows
+	// the escalation threshold) wires it, and owes BackfillSynth on any
+	// deferred answer it ends up serving anyway. 0 (the default, and every
+	// gate) synthesizes exactly as before.
+	DeferBelow float64
+	// DeferThinCover, when set, additionally defers answers whose whole-query
+	// coverage is under the line — armed by the DEEP tier only for K>1 fact
+	// decompositions, where the measured escalation path is cover-incompleteness
+	// rather than thin confidence (live: the two-question novel query deferred
+	// nothing until this arm existed). A fact-complete answer that stands is
+	// backfilled by the caller.
+	DeferThinCover bool
 	// SynthDelta, when set, receives the synthesis answer delta by delta so
 	// the HTTP face can stream it to the browser (the user watches the
 	// answer being written instead of waiting for the whole generation).
@@ -300,6 +321,22 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}
 	mean /= float64(len(kept))
 	conf := mcs.Confidence(mean, cov)
+	// Deferred synthesis (CLUS_FAST_DEFER_SYNTH, default off): when the
+	// caller wired an escalation line and this answer sits under it — or the
+	// caller armed the cover arm and the whole query is not lexically covered
+	// — the render is skipped. Escalation is decided by confidence or fact
+	// cover, both already in hand, and the DEEP tier synthesizes its own
+	// answer over better evidence. Bridged answers never defer: the bridge
+	// path stands on its own and must be served complete.
+	coverThin := e.DeferThinCover && cov < 0.999
+	if !bridged && (coverThin || (e.DeferBelow > 0 && conf < e.DeferBelow)) {
+		return Answer{
+			Query: query, Mode: ModeFAST, LLMCalls: calls,
+			SourceID: best.ID, Samples: kept, Coverage: cov,
+			Confidence: conf, Skipped: conf < SkipBelow,
+			SynthDeferred: true,
+		}, nil
+	}
 	t3 := time.Now()
 	summary := e.render(ctx, query, best, kept)
 	stage("synth", t3)
@@ -480,6 +517,20 @@ func (e *Engine) WidenSources(ctx context.Context, query string, sources []sourc
 // answer, so RefusedOf must report true for it. Without this, a refused LLM
 // run leaks a template-answer past the persistence gate (真机抓到:
 // 醉酒问题 LLM 拒答→模板代答→仍落簇).
+// BackfillSynth renders the deferred synthesis into ans — the debt the
+// non-escalating path owes a deferred answer before serving it. It mirrors
+// Search's original tail: the same render, the same refusal re-derivation,
+// the same LLM-call accounting.
+func (e *Engine) BackfillSynth(ctx context.Context, ans *Answer, src source.Source) {
+	if !ans.SynthDeferred {
+		return
+	}
+	ans.Summary = e.render(ctx, ans.Query, src, ans.Samples)
+	ans.SynthDeferred = false
+	ans.LLMCalls++
+	ans.Refused = RefusedOf(e.Synth) || RefusedOfSummary(ans.Summary, e.Synth)
+}
+
 func (e *Engine) render(ctx context.Context, query string, src source.Source, samples []mcs.Sample) string {
 	if e.Synth != nil {
 		if e.SynthDelta != nil {

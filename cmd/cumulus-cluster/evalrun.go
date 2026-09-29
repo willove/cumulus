@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/willove/cumulite"
@@ -48,6 +49,8 @@ type evalResult struct {
 	Mode    string  `json:"mode,omitempty"`
 	Loops   int     `json:"loops,omitempty"`
 	Widened int     `json:"widened,omitempty"`
+	// StopReason mirrors deep.Result.StopReason ("" on FAST hits and errors).
+	StopReason string  `json:"stop_reason,omitempty"`
 	Conf    float64 `json:"conf,omitempty"`
 	Calls   int     `json:"calls,omitempty"`
 	Tokens  int64   `json:"tokens,omitempty"` // search path only (pre-judge)
@@ -168,8 +171,18 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	dE.Scorer = stack.scorer
 	dE.Synth = stack.synth
 	// Independent search token budget (3.2 / LENS Remark 2).
+	//
+	// The meter must read PER-ITEM spend. Production rebuilds the stack per
+	// request, so a fresh client's cumulative TotalTokens IS the per-query
+	// count; this runner shares one client across items AND the judge, so the
+	// raw cumulative crosses the 27k per-query line a few items in and then
+	// budget-exits every later DEEP query at ~2 loops (measured live
+	// 2026-09-29, stop-reason probe: q000/q001 ended exhaustive at 9.5k/8.0k,
+	// q003+ all "budget" at ~2.4k, all judged wrong). The loop below resets
+	// tokBase to the item's snapshot before each Ask.
+	budgetBase := new(int64)
 	if stack.chat != nil {
-		dE.TokensUsed = stack.chat.TotalTokens
+		dE.TokensUsed = func() int64 { return stack.chat.TotalTokens() - atomic.LoadInt64(budgetBase) }
 		if v := os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 				dE.TokenBudget = n
@@ -230,6 +243,11 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 			break
 		}
 		ictx, cancel := context.WithTimeout(ctx, perItem)
+		// Per-item budget base: the engine's meter reads client-total minus
+		// this, so the 27k line prices THIS item's retrieval, not the run's.
+		if stack.chat != nil {
+			atomic.StoreInt64(budgetBase, stack.chat.TotalTokens())
+		}
 		runList := list
 		if l1pre {
 			if narrowed, err := narrowByKNN(ctx, c, embedFn, sourcesColl, list, it.Query); err != nil {
@@ -442,6 +460,11 @@ func evalSearchOne(ctx context.Context, dE *deep.Engine, chat *llm.ChatClient, l
 		rec.Mode = res.Mode
 		rec.Loops = res.Loops
 		rec.Widened = res.Widened
+		// Stop-reason telemetry threads into the per-item row so a run's
+		// exit distribution (sufficient/utility/budget/…) is readable from
+		// results.jsonl without re-running — the Jev-Mem v2-vs-v3 decision
+		// reads exactly this histogram.
+		rec.StopReason = res.StopReason
 		rec.Conf = res.Answer.Confidence
 		rec.Calls = res.Answer.LLMCalls
 		rec.AbstainP = res.AbstainP

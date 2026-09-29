@@ -49,12 +49,18 @@ type Engine struct {
 	MergeTheta   float64
 	// Judge is the optional no-reference persist judge: does the ANSWER
 	// answer the QUESTION? The serve face wires the aigate judge (nil on
-	// the eval face, so eval stays deterministic). The verdict is recorded
-	// on the cluster; JudgeGates turns a negative verdict into a refusal
-	// to persist. A judge ERROR never blocks — fail-open on error,
-	// fail-closed on verdict.
-	Judge      func(ctx context.Context, query, answer string) (ok bool, why string, err error)
-	JudgeGates bool
+	// the eval face, so eval stays deterministic). A judge ERROR never blocks
+	// — fail-open on error, fail-closed on verdict.
+	//
+	// It is an LLM call per persisted answer, so it does not run by default.
+	// JudgeGates turns a negative verdict into a refusal to persist;
+	// JudgeRecord only files the verdict on the cluster. Both are opt-in,
+	// because a record nobody gates on is still a full model round-trip per
+	// query — measured ~2 calls (~4,000 tokens) of a 27,000-token budget on
+	// a real novel run, for a field no consumer read.
+	Judge       func(ctx context.Context, query, answer string) (ok bool, why string, err error)
+	JudgeGates  bool
+	JudgeRecord bool
 	// writeMu serializes the cluster write path. Choosing a fold target is a
 	// read-modify-write — read the candidates, decide, save the merged snapshot
 	// — so two concurrent asks for one topic would either both create the same
@@ -406,12 +412,34 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 	// The gate judges the answer's EVIDENCE (pinned corpus windows), never
 	// its own Summary: a summary echoing the query's words used to pass this
 	// check by construction (audit C2 — the system confirming itself).
+	//
+	// Stopgap added 2026-09-28 (fast.Answerable): the shape check is repeated
+	// HERE, at the persistence boundary, instead of trusting ans.Refused to
+	// have survived every hop. A real run on a 727k-rune novel carried
+	// Refused=false while carrying the deterministic template as the summary,
+	// and the template was persisted as a cluster's content — whose
+	// LevelKeys[principle] became the question itself, so the next same-topic
+	// query replayed "孙悟空的兵器是什么" as knowledge, for 0 tokens.
+	//
+	// The Synth guard is what keeps the offline gates working: with no
+	// synthesizer wired, a template summary is the legitimate answer shape
+	// those gates exist to produce (fast.RefusedOfSummary carries the same
+	// condition and the same reasoning). With one wired, a template means the
+	// synthesizer refused and the answer path papered over it.
+	//
+	// Note what this does NOT fix: both gates below still measure whether the
+	// evidence CONTAINS the question's words. A passage can match lexically,
+	// clear RelevanceGate and the confidence floor, and still not answer the
+	// question. That is a separate, larger piece of work (real answerability,
+	// not shape); this only stops a no-content answer becoming permanent.
 	if ans.Skipped || ans.Refused || ans.SourceID == "" ||
+		ans.SynthDeferred || // an unpaid synthesis debt must not become a cluster's content
+		(e.synthWired() && !fast.Answerable(ans.Query, ans.Summary)) ||
 		!cluster.RelevanceGate(ans.Query, cluster.Cluster{Evidence: ans.Samples}, 0.15) {
 		return res, nil
 	}
 	var judgeOK *bool
-	if e.Judge != nil {
+	if e.Judge != nil && (e.JudgeGates || e.JudgeRecord) {
 		ok, why, jerr := e.Judge(ctx, ans.Query, ans.Summary)
 		if jerr != nil {
 			// No verdict was produced; an error must not become a refusal.
@@ -710,6 +738,18 @@ func (e *Engine) pickReusable(cs []cluster.Cluster, qe []float64, query string) 
 		if !cluster.RelevanceGate(query, *c, 0.15) {
 			continue
 		}
+		// Cross-mode poison guard (2026-09-28, measured live): an offline CLI
+		// search — no endpoint, no synthesizer — persists template-shaped
+		// clusters by design (the deterministic gates depend on that shape),
+		// and an online stack then replayed one as knowledge for 0 tokens.
+		// The mirror of the persist-boundary guard: with a synthesizer wired,
+		// template content is not reusable — skip the candidate, let L0
+		// re-answer, and the fold path overwrites the template. Offline-to-
+		// offline reuse (no synth wired) keeps working, so the gates stay
+		// deterministic.
+		if e.synthWired() && fast.TemplateDegraded(c.Content) {
+			continue
+		}
 		return c
 	}
 	return nil
@@ -768,4 +808,11 @@ func (e *Engine) refreshEmbeds(ctx context.Context, c *cluster.Cluster) {
 		return
 	}
 	c.AttachKeyEmbeds(vs)
+}
+
+// synthWired reports whether a production synthesizer is attached, i.e. whether
+// a template summary means "the synthesizer refused" (bad, must not persist) or
+// is the legitimate offline answer shape the deterministic gates run on (fine).
+func (e *Engine) synthWired() bool {
+	return e.Fast != nil && e.Fast.Synth != nil
 }

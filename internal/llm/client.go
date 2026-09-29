@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,10 @@ type ChatClient struct {
 	ReasoningSplit bool
 
 	total atomic.Int64 // cumulative upstream-reported tokens
+	// prompt/completion split, when the endpoint reports it (OpenAI 兼容面都给；
+	// 缺席时保持 0，消费台账只记 total)。Atomic 与 total 同理。
+	prompt     atomic.Int64
+	completion atomic.Int64
 }
 
 func (c *ChatClient) http() *http.Client {
@@ -125,7 +130,9 @@ func (c *ChatClient) complete(ctx context.Context, user string, noThink bool) (s
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			TotalTokens int64 `json:"total_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(payload, &out); err != nil {
@@ -133,6 +140,12 @@ func (c *ChatClient) complete(ctx context.Context, user string, noThink bool) (s
 	}
 	if out.Usage.TotalTokens > 0 {
 		c.total.Add(out.Usage.TotalTokens) // budget accounting
+	}
+	if out.Usage.PromptTokens > 0 {
+		c.prompt.Add(out.Usage.PromptTokens)
+	}
+	if out.Usage.CompletionTokens > 0 {
+		c.completion.Add(out.Usage.CompletionTokens)
 	}
 	if len(out.Choices) == 0 {
 		return "", fmt.Errorf("llm: empty choices")
@@ -263,6 +276,12 @@ func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta fu
 
 func (c *ChatClient) TotalTokens() int64 { return c.total.Load() }
 
+// SnapshotUsage 报告本 client 生命周期内的累计用量拆分。栈是每请求重建的，
+// 所以一次检索结束时快照即该次的用量（消费台账按此记账）。
+func (c *ChatClient) SnapshotUsage() (prompt, completion, total int64) {
+	return c.prompt.Load(), c.completion.Load(), c.total.Load()
+}
+
 // thinkRe matches an inline chain-of-thought block.
 var thinkRe = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
 
@@ -310,6 +329,17 @@ func (s *AigateSynthesizer) SynthesizeStream(ctx context.Context, query string, 
 // per-fact oracle vector when given fact hints).
 type AigateScorer struct {
 	Client *ChatClient
+	// NoThink routes evaluate_sample through CompleteStructured (private
+	// thinking disabled).
+	//
+	// The prompt's own rule (see CompleteStructured) says mechanical
+	// structured-JSON passes should not pay for reasoning nothing reads, and
+	// this is the highest-frequency call in the suite (~10 per cold query).
+	// It is opt-in because "does thinking off change the 0-10 relevance
+	// scale" is NOT the same measurement the rule was calibrated on
+	// (that was fast_analyze keyword quality) — see cmd/scoreprobe, which is
+	// the instrument that has to answer it before this default flips.
+	NoThink bool
 }
 
 // EvaluateResult is the evaluate_sample v2 JSON shape.
@@ -353,6 +383,155 @@ func (s *AigateScorer) ScoreWithFacts(ctx context.Context, query string, facts [
 	if err != nil {
 		return 0, "", nil, err
 	}
+	return r.Score, r.Reasoning, clampCovers(r.Covers, facts), nil
+}
+
+// BatchItem is one window's verdict from the batched evaluate call.
+type BatchItem struct {
+	ID        string   `json:"id"`
+	Score     float64  `json:"score"`
+	Reasoning string   `json:"reasoning"`
+	Covers    []string `json:"covers"`
+}
+
+// firstJSONArray returns the first bracket-balanced array span in s that is
+// also VALID JSON, string-aware (brackets inside JSON strings don't count),
+// scanning past balanced-but-non-JSON spans (Chinese prose decorates with
+// [引用]/[注1] shapes that balance as arrays but parse as nothing). Models
+// decorate batch answers the same way they decorate single objects — prose
+// around the array, or a second copy.
+func firstJSONArray(s string) string {
+	for from := 0; from < len(s); {
+		start, depth := -1, 0
+		inStr, esc := false, false
+		found := ""
+		for i, r := range s[from:] {
+			switch {
+			case esc:
+				esc = false
+			case inStr:
+				if r == '"' {
+					inStr = false
+				} else if r == '\\' {
+					esc = true
+				}
+			case r == '"':
+				inStr = true
+			case r == '[':
+				if depth == 0 {
+					start = from + i
+				}
+				depth++
+			case r == ']':
+				if depth > 0 {
+					depth--
+					if depth == 0 && start >= 0 {
+						found = s[start : from+i+1]
+						break
+					}
+				}
+			}
+			if found != "" {
+				break
+			}
+		}
+		if found == "" {
+			return ""
+		}
+		if json.Valid([]byte(found)) {
+			return found
+		}
+		// Not JSON (a prose bracket pair): resume scanning just past its
+		// opening bracket, in case the real array nests inside it.
+		from = start + 1
+	}
+	return ""
+}
+
+// ParseEvaluateBatchJSON is exported for frozen prompt regression tests. It
+// requires exactly one item per expected window id, in the S1..Sn labelling
+// the prompt mandates — a short or padded array is an error, never a silent
+// truncation (downstream gates read per-window scores positionally).
+//
+// It deliberately does NOT go through parseJSON: the shared jsonRe matches
+// OBJECTS only (\{[\s\S]*\}), so an array handed to parseJSON yields the
+// first embedded object and a spurious "cannot unmarshal object into []".
+func ParseEvaluateBatchJSON(raw string, want int) ([]BatchItem, error) {
+	if arr := firstJSONArray(raw); arr != "" {
+		raw = arr
+	}
+	var parsed []BatchItem
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		// Same one-shot repair chance parseJSON gives objects: legal-text
+		// quotes and raw newlines inside string values.
+		fixed := repairModelJSON(raw)
+		if fixed == raw {
+			return nil, err
+		}
+		if err2 := json.Unmarshal([]byte(fixed), &parsed); err2 != nil {
+			return nil, err
+		}
+	}
+	if len(parsed) != want {
+		return nil, fmt.Errorf("llm: evaluate_batch: want %d items, got %d", want, len(parsed))
+	}
+	byID := make(map[string]BatchItem, len(parsed))
+	for _, it := range parsed {
+		byID[it.ID] = it
+	}
+	out := make([]BatchItem, want)
+	for i := range want {
+		id := fmt.Sprintf("S%d", i+1)
+		it, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("llm: evaluate_batch: missing window %s", id)
+		}
+		out[i] = it
+	}
+	return out, nil
+}
+
+// ScoreBatch implements mcs.BatchScorer: every window of the round in ONE
+// call (v3a — call granularity only; the per-window schema is the single-
+// window one). Facts ride along exactly as in ScoreWithFacts, covers clamped
+// to the given ids.
+func (s *AigateScorer) ScoreBatch(ctx context.Context, query string, facts []string, samples []mcs.Sample) ([]mcs.BatchResult, error) {
+	if len(samples) == 0 {
+		return nil, nil
+	}
+	factsText := "（none）"
+	if len(facts) > 0 {
+		factsText = strings.Join(facts, "\n")
+	}
+	var wins strings.Builder
+	for i, sm := range samples {
+		fmt.Fprintf(&wins, "[S%d] (Source: %s [%d,%d))\n...%s...\n\n",
+			i+1, sm.Source, sm.Start, sm.End, truncateRunes(sm.Content, maxSampleRunes))
+	}
+	tmpl := prompts.MustRender(prompts.EvaluateBatch, map[string]string{
+		"query":   query,
+		"count":   strconv.Itoa(len(samples)),
+		"facts":   factsText,
+		"windows": strings.TrimRight(wins.String(), "\n"),
+	})
+	raw, err := s.call(ctx, tmpl)
+	if err != nil {
+		return nil, err
+	}
+	items, err := ParseEvaluateBatchJSON(raw, len(samples))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcs.BatchResult, len(items))
+	for i, it := range items {
+		out[i] = mcs.BatchResult{Score: it.Score, Reasoning: it.Reasoning, Covers: clampCovers(it.Covers, facts)}
+	}
+	return out, nil
+}
+
+// clampCovers restricts oracle annotations to the given fact ids — a window
+// may only claim facts the decomposer actually proposed.
+func clampCovers(covers, facts []string) []string {
 	allowed := map[string]bool{}
 	for _, f := range facts {
 		if i := strings.Index(f, ":"); i > 0 {
@@ -360,13 +539,133 @@ func (s *AigateScorer) ScoreWithFacts(ctx context.Context, query string, facts [
 		}
 		allowed[f] = true
 	}
-	var covers []string
-	for _, c := range r.Covers {
+	var out []string
+	for _, c := range covers {
 		if allowed[c] {
-			covers = append(covers, c)
+			out = append(out, c)
 		}
 	}
-	return r.Score, r.Reasoning, covers, nil
+	return out
+}
+
+// DimItem is the v3b batch item shape (evaluate_dims): the batch fields plus
+// the decomposed dims and cross-evidence contradiction marks. Novelty and
+// Support are parsed for schema honesty (a drifting prompt fails the frozen
+// test, not silently) but nothing consumes them yet — they ride the prompt
+// because the paper's decomposed judgement is the point of the shape.
+type DimItem struct {
+	ID            string   `json:"id"`
+	Score         float64  `json:"score"`
+	Reasoning     string   `json:"reasoning"`
+	Covers        []string `json:"covers"`
+	Novelty       float64  `json:"novelty"`
+	Support       float64  `json:"support"`
+	ConflictsWith []string `json:"conflicts_with"`
+}
+
+// ParseEvaluateDimsJSON is ParseEvaluateBatchJSON's sibling for the dims
+// payload: same balanced-array extraction, count and id contract, one repair
+// chance. Exported for frozen prompt regression tests.
+func ParseEvaluateDimsJSON(raw string, want int) ([]DimItem, error) {
+	if arr := firstJSONArray(raw); arr != "" {
+		raw = arr
+	}
+	var parsed []DimItem
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		fixed := repairModelJSON(raw)
+		if fixed == raw {
+			return nil, err
+		}
+		if err2 := json.Unmarshal([]byte(fixed), &parsed); err2 != nil {
+			return nil, err
+		}
+	}
+	if len(parsed) != want {
+		return nil, fmt.Errorf("llm: evaluate_dims: want %d items, got %d", want, len(parsed))
+	}
+	byID := make(map[string]DimItem, len(parsed))
+	for _, it := range parsed {
+		byID[it.ID] = it
+	}
+	out := make([]DimItem, want)
+	for i := range want {
+		id := fmt.Sprintf("S%d", i+1)
+		it, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("llm: evaluate_dims: missing window %s", id)
+		}
+		out[i] = it
+	}
+	return out, nil
+}
+
+// digestTop and maxDigestRunes bound the Current Evidence Digest: enough of
+// the kept windows for the scorer to see what it might contradict, without
+// the digest doubling the prompt on a long crawl.
+const (
+	digestTop     = 3
+	maxDigestRunes = 400
+)
+
+// ScoreBatchConflict implements mcs.ConflictBatchScorer (v3b c_d): the
+// batched call also sees the top kept windows so contradiction marks are
+// cross-file. ConflictsWith ids ride onto the samples verbatim (K-labels are
+// digest entries, S-labels are batch peers — both are for the caller's stop
+// gate, the sampler never resolves them).
+func (s *AigateScorer) ScoreBatchConflict(ctx context.Context, query string, facts []string, samples, prior []mcs.Sample) ([]mcs.BatchResult, error) {
+	if len(samples) == 0 {
+		return nil, nil
+	}
+	factsText := "（none）"
+	if len(facts) > 0 {
+		factsText = strings.Join(facts, "\n")
+	}
+	// Digest: top-scoring kept windows first, stable by position.
+	idx := make([]int, len(prior))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return prior[idx[a]].Score > prior[idx[b]].Score })
+	if len(idx) > digestTop {
+		idx = idx[:digestTop]
+	}
+	var dig strings.Builder
+	for n, i := range idx {
+		fmt.Fprintf(&dig, "[K%d] %s\n", n+1, truncateRunes(prior[i].Content, maxDigestRunes))
+	}
+	digest := strings.TrimRight(dig.String(), "\n")
+	if digest == "" {
+		digest = "（none）"
+	}
+	var wins strings.Builder
+	for i, sm := range samples {
+		fmt.Fprintf(&wins, "[S%d] (Source: %s [%d,%d))\n...%s...\n\n",
+			i+1, sm.Source, sm.Start, sm.End, truncateRunes(sm.Content, maxSampleRunes))
+	}
+	tmpl := prompts.MustRender(prompts.EvaluateDims, map[string]string{
+		"query":        query,
+		"count":        strconv.Itoa(len(samples)),
+		"facts":        factsText,
+		"digest":       digest,
+		"digest_count": strconv.Itoa(len(idx)),
+		"windows":      strings.TrimRight(wins.String(), "\n"),
+	})
+	raw, err := s.call(ctx, tmpl)
+	if err != nil {
+		return nil, err
+	}
+	items, err := ParseEvaluateDimsJSON(raw, len(samples))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mcs.BatchResult, len(items))
+	for i, it := range items {
+		out[i] = mcs.BatchResult{
+			Score: it.Score, Reasoning: it.Reasoning,
+			Covers: clampCovers(it.Covers, facts), Conflicts: it.ConflictsWith,
+		}
+	}
+	return out, nil
 }
 
 func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []string, sm mcs.Sample) (EvaluateResult, error) {
@@ -380,7 +679,7 @@ func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []strin
 		"sample_content": truncateRunes(sm.Content, maxSampleRunes),
 		"facts":          factsText,
 	})
-	raw, err := s.Client.Complete(ctx, tmpl)
+	raw, err := s.call(ctx, tmpl)
 	if err != nil {
 		return EvaluateResult{}, err
 	}
@@ -395,6 +694,15 @@ func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []strin
 		r.Score = 10
 	}
 	return r, nil
+}
+
+// call dispatches on NoThink. Kept as a method so Score and ScoreWithFacts can
+// never drift apart on the thinking flag.
+func (s *AigateScorer) call(ctx context.Context, tmpl string) (string, error) {
+	if s.NoThink {
+		return s.Client.CompleteStructured(ctx, tmpl)
+	}
+	return s.Client.Complete(ctx, tmpl)
 }
 
 // AigateEmbedder requests embeddings (OpenAI-compatible /embeddings).
@@ -467,6 +775,88 @@ var (
 	_ mcs.Scorer       = (*AigateScorer)(nil)
 	_ cluster.Embedder = (*AigateEmbedder)(nil)
 )
+
+// AigateFactBuilder decomposes a query into atomic evidence requirements via
+// the decompose_query prompt, replacing the deterministic heuristic
+// facts.Build in production (perf-plan §6 / P1-4).
+//
+// Why this exists, measured: facts.Build yields K=1 for 124 of 136 real
+// questions, and every one of its 12 K>1 splits is a miscut inside a book
+// title, a defined term, or an enumeration. A miscut fact is a phantom
+// requirement — unreachable, so NeedContinue never clears and the DEEP loop
+// spends its whole budget on it.
+//
+// NoThink defaults to false here, unlike the other structured-JSON passes. That
+// is deliberate and NOT an oversight: scoreprobe measured that turning private
+// thinking off moves mid-band (3~7) decisions from 64% to 52% stable, and this
+// call exists precisely to stop mid-band churn from deciding K. The extra call
+// is 1 per query against ~10 scoring calls, so the budget is the right place to
+// spend it. Flip after a larger probe arm, not before.
+type AigateFactBuilder struct {
+	Client  *ChatClient
+	NoThink bool
+}
+
+// Decompose implements facts.Decomposer.
+func (b *AigateFactBuilder) Decompose(ctx context.Context, query string) ([]string, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	tmpl := prompts.MustRender(prompts.DecomposeQuery, map[string]string{"query": query})
+	var raw string
+	var err error
+	if b.NoThink {
+		raw, err = b.Client.CompleteStructured(ctx, tmpl)
+	} else {
+		raw, err = b.Client.Complete(ctx, tmpl)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return parseDecomposeJSON(raw, query)
+}
+
+// parseDecomposeJSON reads the prompt's JSON array of strings, then applies
+// facts.BuildParts' semantic-unit gate. A model that echoes prose, returns an
+// object, or emits fragments yields a nil slice — which the caller reads as
+// "fall back to the heuristic", never as "search with no requirements".
+func parseDecomposeJSON(raw, query string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	// Tolerate a fenced block, and a stray object wrapping the array.
+	if i := strings.Index(raw, "["); i >= 0 {
+		if j := strings.LastIndex(raw, "]"); j > i {
+			raw = raw[i : j+1]
+		}
+	}
+	var parts []string
+	if err := json.Unmarshal([]byte(raw), &parts); err != nil {
+		// Some runs answer with {"requirements": [...]}.
+		var wrapper struct {
+			Requirements []string `json:"requirements"`
+			Facts        []string `json:"facts"`
+			Parts        []string `json:"parts"`
+		}
+		if err2 := json.Unmarshal([]byte(raw), &wrapper); err2 != nil {
+			return nil, nil // unreadable → heuristic, not an error the query pays for
+		}
+		parts = wrapper.Requirements
+		if len(parts) == 0 {
+			parts = wrapper.Facts
+		}
+		if len(parts) == 0 {
+			parts = wrapper.Parts
+		}
+	}
+	fx := facts.BuildParts(query, parts)
+	out := make([]string, 0, len(fx))
+	for _, f := range fx {
+		out = append(out, f.Query)
+	}
+	return out, nil
+}
 
 // AigateAnalyzer classifies intent and extracts the keyword cascade via the
 // fast_analyze prompt.

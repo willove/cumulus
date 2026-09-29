@@ -167,6 +167,9 @@ type Result struct {
 	Widened int `json:"widened,omitempty"`
 	// Session echoes the chat session id when the caller passed one.
 	Session string `json:"session,omitempty"`
+	// Model names the chat model that served this query ("" on the offline
+	// stub). 消费追溯维度：监控、会话卡与持久台账都按它记账。
+	Model string `json:"model,omitempty"`
 	// Budget accounting: LatencyMS is always filled; Tokens carries the
 	// upstream-reported total (0 on the offline stub path — the CLI fills it
 	// from the chat client after Ask returns). BudgetHit marks an independent
@@ -191,6 +194,9 @@ type Result struct {
 	// (coverage complete at/over the score bar), "utility" (per-round
 	// pessimistic exit — p_fail high and not improving across rounds, opt-in
 	// via CLUS_EARLY_ABSTAIN; skips self-correction and widening too),
+	// "insufficient_after_budget" — the refusal happened because the budget
+	// ran out, not because the corpus lacked the answer. Same user-facing
+	// text as a plain refusal, so it is named explicitly; see the refusal path.
 	// "budget" (MaxLoops or TokenBudget cap), "" (candidates exhausted, or no
 	// loop ran — FAST-tier answers and pre-DEEP early refuses, which
 	// AbstainEarly/AbstainAction already describe).
@@ -198,6 +204,24 @@ type Result struct {
 	// AbstainEarly marks a pre-DEEP refusal (FAST had zero usable evidence
 	// and p_fail cleared EarlyAbove): DEEP was skipped to save budget.
 	AbstainEarly bool `json:"abstain_early,omitempty"`
+	// StagesTokens attributes search tokens per paying stage when a Meter is
+	// wired: rewrite (history fold), fast (the FAST tier's score+analyze+
+	// synth, one bucket), decompose, rank (admission ordering), score (DEEP
+	// window scoring), widen, synth. Judge spend never enters these — the
+	// budget's own exclusion rule — and the buckets are attribution, not
+	// billing: they exist so a fat stage is visible before it is optimized.
+	StagesTokens *StageTokens `json:"stages_tokens,omitempty"`
+}
+
+// StageTokens is the per-stage token attribution carried on Result.
+type StageTokens struct {
+	Rewrite   int64 `json:"rewrite,omitempty"`
+	Fast      int64 `json:"fast,omitempty"`
+	Decompose int64 `json:"decompose,omitempty"`
+	Rank      int64 `json:"rank,omitempty"`
+	Score     int64 `json:"score,omitempty"`
+	Widen     int64 `json:"widen,omitempty"`
+	Synth     int64 `json:"synth,omitempty"`
 }
 
 // Engine runs FAST and escalates into DEEP when confidence is thin.
@@ -239,6 +263,34 @@ type Engine struct {
 	// Widen re-admits candidate files mid-search under the same contract
 	// (Sirchmunk ReAct 对齐；nil 关闭扩征，离线门可用).
 	Widen func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error)
+	// Decompose replaces the deterministic facts.Build heuristic with an LLM
+	// requirement decomposer (perf-plan §6 / P1-4).
+	//
+	// Why the swap matters: the heuristic yields K=1 for 124 of 136 measured
+	// real queries, and every one of its 12 K>1 splits is a miscut inside a
+	// book title, a defined term, or an enumeration. A miscut fact is a
+	// PHANTOM requirement — unreachable, so NeedContinue never clears and the
+	// loop burns its whole budget on it.
+	//
+	// nil keeps facts.Build, so every offline gate and the offline stub stack
+	// are byte-for-byte unchanged (D6: mechanism gates never touch a model).
+	Decompose facts.Decomposer
+	// DecomposeBudget bounds the LLM decomposer to one call per query; it is
+	// here so the cost is a declared engine property rather than an accident
+	// of the decomposer's implementation.
+	DecomposeBudget int
+
+	// fxMemoQuery / fxMemo / decomposeUsed back Engine.decompose.
+	//
+	// The memo is keyed by the EFFECTIVE query, not assumed per-request: an
+	// Engine is reused across queries in real call paths (and lazy_test.go
+	// relies on it), so an unkeyed memo fed the first query's requirements to
+	// the second — caught by TestAskLazyLoadsCorpusWhenEscalating. Keying on
+	// the query makes reuse safe regardless of the Engine's lifetime.
+	fxMemoQuery   string
+	fxMemo        []facts.Fact
+	fxMemoSet     bool
+	decomposeUsed int
 	// TokenBudget is an independent stop (LENS Def 3 / Remark 2): when > 0
 	// and TokensUsed is wired, the DEEP loop checks remaining budget before
 	// scoring each admitted file. Judge tokens never enter this budget.
@@ -250,6 +302,14 @@ type Engine struct {
 	// nil (the default, and every gate) changes nothing. See
 	// fast.Engine.Stages for why the split exists.
 	Stages func(stage string, d time.Duration)
+	// Meter, when set, snapshots the process's cumulative SEARCH-token
+	// counter (chat.TotalTokens in production; judge spend excluded by the
+	// stack's own base snapshot). StageTokens on Result attributes each
+	// paying stage's delta; nil = no attribution (offline/hermetic runs).
+	Meter func() int64
+	// stageTok is the per-Ask scratch the metered call sites accumulate into;
+	// reset at every Ask/AskLazy entry so a reused engine never mixes queries.
+	stageTok *StageTokens
 	// SynthDelta streams the synthesis answer delta by delta (see
 	// fast.Engine.SynthDelta); nil = non-streaming synthesis.
 	SynthDelta func(chunk string)
@@ -318,6 +378,10 @@ func New(k *kb.Engine, conflicts ConflictStore) *Engine {
 	return &Engine{
 		KB: k, Conflicts: conflicts, EscalateBelow: EscalateBelow,
 		MaxLoops: MaxLoops, WidenBudget: WidenBudget, CorrectBudget: CorrectBudget,
+		// The per-query cap is ON by default (see DefaultTokenBudget for the
+		// derivation). A caller that wants the old uncapped loop sets
+		// TokenBudget = 0 explicitly; the env override still wins on top.
+		TokenBudget: DefaultTokenBudget,
 	}
 }
 
@@ -329,6 +393,25 @@ func envFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// DocWorkers is how many candidate documents the DEEP pass may sample at once.
+//
+// Default 1 = the historical serial loop, output byte-for-byte. Opt-in because
+// a cold query scores ~10 candidate documents back to back, and each one ends
+// in a blocking evaluate_sample round-trip; the serial chain was the largest
+// single term in the observed 40s+ cold latency (perf-plan §2 P0-3).
+//
+// Concurrency does NOT make the DEEP rounds themselves concurrent: round N+1
+// consumes round N's TopSeeds, so ~2 waves is the floor. This cap only widens
+// the candidate set within one round.
+func DocWorkers() int {
+	if v := os.Getenv("CLUS_DEEP_DOC_WORKERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1
 }
 
 // bridgeFloorScore mirrors fast.bridgeFloorScore (CLUS_BRIDGE_FLOOR, default
@@ -352,7 +435,11 @@ func (e *Engine) rankAdmission(ctx context.Context, query string, sources []sour
 	if e.RankAdmission == nil {
 		return sources
 	}
+	end := e.begin()
 	out, err := e.RankAdmission(ctx, query, sources, affinity)
+	if e.stageTok != nil {
+		end(&e.stageTok.Rank)
+	}
 	if err == nil && len(out) > 0 {
 		return out
 	}
@@ -392,6 +479,61 @@ func (e *Engine) scorer() mcs.Scorer {
 	return mcs.KeywordScorer{}
 }
 
+// decompose resolves the query's atomic evidence requirements exactly once per
+// Engine and memoizes the result, because thresholdFor (in askEffective) and the
+// oracle hints + coverage report (in runDeep) must agree on the same K — two
+// independent decompositions would let the stop line and the coverage report
+// talk about different requirement sets.
+//
+// Degradation ladder, in order:
+//  1. no Decompose wired        → facts.Build (today's behaviour, byte-for-byte)
+//  2. LLM error / unreadable    → facts.Build, noted under Verbose
+//  3. LLM output fails the
+//     semantic-unit gate        → facts.Build
+//  4. budget exhausted (>=1)    → facts.Build
+//
+// The fallback is never "no requirements": a search with an empty requirement
+// set would silently disable the weakest-requirement stop.
+func (e *Engine) decompose(ctx context.Context, query string) []facts.Fact {
+	if e.fxMemoSet && e.fxMemoQuery == query {
+		return e.fxMemo
+	}
+	fx := facts.Build(query) // the deterministic baseline, also the fallback
+	if e.Decompose != nil {
+		if e.DecomposeBudget > 0 && e.decomposeUsed >= e.DecomposeBudget {
+			if e.Verbose != nil {
+				e.Verbose("decompose: budget spent, heuristic K=%d", len(fx))
+			}
+			e.fxMemoQuery, e.fxMemo, e.fxMemoSet = query, fx, true
+			return fx
+		}
+		e.decomposeUsed++
+		end := e.begin()
+		parts, err := e.Decompose.Decompose(ctx, query)
+		if e.stageTok != nil {
+			end(&e.stageTok.Decompose)
+		}
+		if err != nil {
+			if e.Verbose != nil {
+				e.Verbose("decompose: %v — heuristic K=%d", err, len(fx))
+			}
+		} else if got, why := facts.BuildPartsWhy(query, parts); len(got) > 0 {
+			fx = got
+		} else if e.Verbose != nil {
+			if len(parts) == 0 {
+				// The aigate layer pre-gates its own output, so an empty slice
+				// here covers both a garbled model answer and its own veto —
+				// the parts it saw are not recoverable through this interface.
+				e.Verbose("decompose: no usable requirements — heuristic K=%d", len(fx))
+			} else {
+				e.Verbose("decompose: %d parts vetoed (%s) — heuristic K=%d", len(parts), why, len(fx))
+			}
+		}
+	}
+	e.fxMemoQuery, e.fxMemo, e.fxMemoSet = query, fx, true
+	return fx
+}
+
 // gammaStep raises the escalation line per extra atomic fact (B10): a
 // multi-fact comparison must not stop on a single-fact-quality answer.
 const gammaStep = 0.05
@@ -418,12 +560,18 @@ func (e *Engine) thresholdFor(fx []facts.Fact) float64 {
 // Ask runs the confidence-gated path: insufficient confidence escalates.
 func (e *Engine) Ask(ctx context.Context, query string, sources []source.Source) (res Result, err error) {
 	started := time.Now()
+	e.stageTok = &StageTokens{}
 	defer func() {
 		d := time.Since(started)
 		res.LatencyMS = d.Milliseconds()
 		res.LatencyUS = d.Microseconds()
 	}()
-	return e.askEffective(ctx, e.effectiveQuery(ctx, query), sources)
+	end := e.begin()
+	q := e.effectiveQuery(ctx, query)
+	if e.stageTok != nil {
+		end(&e.stageTok.Rewrite)
+	}
+	return e.askEffective(ctx, q, sources)
 }
 
 // askEffective is the Ask body on a query already folded out of session
@@ -441,8 +589,22 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 	if e.Sources == nil {
 		e.Sources = sources
 	}
-	fx := facts.Build(query)
+	fx := e.decompose(ctx, query)
 	thr := e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
+	// Deferred FAST synthesis (CLUS_FAST_DEFER_SYNTH, default off): the FAST
+	// tier runs inside KB.Ask below, and a thin-confidence answer there is
+	// certain to escalate — its render is a duplicate the DEEP tier pays
+	// again (stages_tokens, 2026-09-28: fast bucket 14.6k of a 29.8k query,
+	// ~half of it that render). The line handed down is the SAME threshold
+	// this engine escalates on, so "deferred" and "escalated" cannot drift
+	// apart; the non-escalating path owes BackfillSynth (see afterBase).
+	if e.KB != nil && e.KB.Fast != nil && os.Getenv("CLUS_FAST_DEFER_SYNTH") == "1" {
+		e.KB.Fast.DeferBelow = thr
+		// K>1: the measured escalation trigger for multi-question queries is
+		// cover-incompleteness, not thin confidence — arm the cover arm too,
+		// or the defer never fires on exactly the queries that escalate.
+		e.KB.Fast.DeferThinCover = len(fx) > 1
+	}
 
 	// FILENAME_ONLY tier (D5 附档): name/extension lookups answer before any
 	// retrieval, with 0 LLM calls.
@@ -451,7 +613,11 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 	}
 
 	// Try L2 reuse first (0-sample path).
+	end := e.begin()
 	base, err := e.KB.Ask(ctx, query, sources)
+	if e.stageTok != nil {
+		end(&e.stageTok.Fast)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -468,6 +634,7 @@ type SourceLoader func(ctx context.Context) ([]source.Source, error)
 // the corpus and continues on the normal path.
 func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (res Result, err error) {
 	started := time.Now()
+	e.stageTok = &StageTokens{}
 	defer func() {
 		d := time.Since(started)
 		res.LatencyMS = d.Milliseconds()
@@ -476,8 +643,12 @@ func (e *Engine) AskLazy(ctx context.Context, query string, load SourceLoader) (
 	if load == nil {
 		return Result{}, fmt.Errorf("deep: AskLazy requires a loader")
 	}
+	end := e.begin()
 	query = e.effectiveQuery(ctx, query)
-	fx := facts.Build(query)
+	if e.stageTok != nil {
+		end(&e.stageTok.Rewrite)
+	}
+	fx := e.decompose(ctx, query)
 	thr := e.thresholdFor(fx)
 
 	if e.KB != nil {
@@ -509,6 +680,9 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		d := time.Since(started)
 		res.LatencyMS = d.Milliseconds()
 		res.LatencyUS = d.Microseconds()
+		if e.Meter != nil && e.stageTok != nil {
+			res.StagesTokens = e.stageTok
+		}
 	}()
 	e.BudgetHit = false
 	res = Result{
@@ -598,6 +772,23 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		}
 	}
 	if !need {
+		// The standing-FAST path owes a deferred answer its synthesis before
+		// it is served (deferred ⇒ conf < thr ⇒ need=true, so this is
+		// reachable only if a future edit moves a line — the backfill keeps
+		// that edit from serving an empty summary). res.Answer is a COPY of
+		// base.Answer made above, so the debt is paid into the copy.
+		if res.Answer.SynthDeferred && e.KB != nil && e.KB.Fast != nil {
+			for _, s := range citeCorpus {
+				if s.ID == res.Answer.SourceID {
+					endB := e.begin()
+					e.KB.Fast.BackfillSynth(ctx, &res.Answer, s)
+					if e.stageTok != nil {
+						endB(&e.stageTok.Fast)
+					}
+					break
+				}
+			}
+		}
 		res.Citations.Legend = legend(res.Citations, false)
 		if base.Answer.SourceID != "" {
 			res.Admitted = []string{base.Answer.SourceID}
@@ -1004,6 +1195,144 @@ func citationCorpus(corpus, widened []source.Source) []source.Source {
 // admission, self-correction, widening and the query simulator all call the
 // model, so a gate that guards only the first loop still lets the budget be
 // blown afterwards.
+// begin returns the stage-close function for a metered span: call it after the
+// paying call returns and hand it the bucket the spend belongs in. With no
+// Meter wired the close is a no-op, so every gate keeps its byte-for-byte
+// offline behaviour.
+func (e *Engine) begin() func(*int64) {
+	if e.Meter == nil {
+		return func(*int64) {}
+	}
+	before := e.Meter()
+	return func(slot *int64) { *slot += e.Meter() - before }
+}
+// sufficientScore is the "this window is strong enough to end the loop" line.
+const sufficientScore = 8.0
+
+// conflictMarked reports whether any kept window carries an unresolved
+// contradiction mark (v3b c_d). Kept windows are all at/above the cover line,
+// so a mark here is a live cross-evidence contradiction, not noise.
+func conflictMarked(kept []mcs.Sample) bool { return conflictCount(kept) > 0 }
+
+// conflictCount is the number of kept windows carrying Conflicts marks.
+func conflictCount(kept []mcs.Sample) int {
+	n := 0
+	for _, sm := range kept {
+		if len(sm.Conflicts) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// budgetRiskFraction is the share of the per-query token budget past which a
+// merely-covering window is accepted as the answer. It is a fraction, not a
+// token count, so it scales with whatever budget an operator sets.
+const budgetRiskFraction = 0.6
+
+// DefaultTokenBudget is the per-query cap applied when an operator sets none.
+//
+// It is derived, not guessed. Offline, on the pipeline's own admission order
+// over a real 727k-rune novel (104 blocks, 104 hard mid-chapter queries),
+// recall is R@1 51.0% / R@2 60.6% / R@3 69.2% / R@4 72.1% / R@8 76.0% /
+// R@64 80.8% — the curve saturates at four documents, and 20% is unreachable
+// at ANY budget. A scoring call costs ~6,665 tokens measured (73,212 tokens
+// over 11 calls), so four calls is ~26,660 ≈ 27,000.
+//
+// Live A/B on five questions, same book, same store:
+//
+//	gate<6, no budget  → 47,293 tokens/query mean
+//	gate<4 + 27,000    → 27,480 tokens/query mean  (−42%)
+//	latency             33.0s → 17.7s (−46%)
+//
+// with no visible quality change (4 answered correctly, 1 refused, both arms).
+//
+// The attribution run matters: three of the five questions cost the SAME in
+// both arms (they stop via a strong cover, the FAST tier, or candidate
+// exhaustion). Only the widening-shaped ones differ, and the budget is what
+// capped them — the gate change alone saved almost nothing. So this number is
+// a hard ceiling, not a quality lever, and it must not be read as one.
+//
+// Overshoot is by design: budgetHit is consulted before each admitted file and
+// one scoring batch costs ~6.7k tokens, so a query may legally land ~one batch
+// over the line (measured 30,839 on a 27,000 budget, 2026-09-28). The cap
+// bounds the spend to budget+one-batch, not to the budget exactly.
+const DefaultTokenBudget int64 = 27_000
+
+// adjacencyPullCap bounds the sibling hops per query: two siblings per
+// covering block, and at most this many total, so a corpus of many
+// covering-grade blocks cannot turn the pull into a second full crawl.
+const adjacencyPullCap = 4
+
+// adjacencyIndex answers "which sources are block i±1 of this one", built
+// once per DEEP query over the full candidate list. nil (flag off, or a
+// corpus with no blocks) disables the pull entirely.
+type adjacencyIndex struct {
+	byParent map[string]map[int]source.Source
+}
+
+func newAdjacencyIndex(srcs []source.Source) *adjacencyIndex {
+	if os.Getenv("CLUS_DEEP_ADJACENCY") != "1" {
+		return nil
+	}
+	ai := &adjacencyIndex{byParent: map[string]map[int]source.Source{}}
+	for _, s := range srcs {
+		parent, _, _, ok := source.BlockParent(s.Meta)
+		if !ok {
+			continue
+		}
+		idx, ok := source.BlockIndex(s)
+		if !ok {
+			continue
+		}
+		m := ai.byParent[parent]
+		if m == nil {
+			m = map[int]source.Source{}
+			ai.byParent[parent] = m
+		}
+		m[idx] = s
+	}
+	if len(ai.byParent) == 0 {
+		return nil
+	}
+	return ai
+}
+
+// siblings returns the i±1 blocks of s within the same parent, in index
+// order. Activity is the caller's loop's own concern (it already skips
+// non-active sources).
+func (ai *adjacencyIndex) siblings(s source.Source) []source.Source {
+	parent, _, _, ok := source.BlockParent(s.Meta)
+	if !ok {
+		return nil
+	}
+	idx, ok := source.BlockIndex(s)
+	if !ok {
+		return nil
+	}
+	m := ai.byParent[parent]
+	var out []source.Source
+	for _, n := range []int{idx + 1, idx - 1} { // next sibling first: the forward continuation is the measured case
+		if sib, ok := m[n]; ok {
+			out = append(out, sib)
+		}
+	}
+	return out
+}
+
+// budgetAtRisk reports whether this query is consuming its token budget.
+//
+// It is the only thing that arms the second early-stop arm, so with TokenBudget
+// unset it is always false and the loop behaves exactly as before — the budget
+// stays opt-in, but it is now something the stop condition READS rather than a
+// number sitting in a config file that nothing consults.
+func (e *Engine) budgetAtRisk() bool {
+	if e.TokenBudget <= 0 || e.TokensUsed == nil {
+		return false
+	}
+	return float64(e.TokensUsed()) >= budgetRiskFraction*float64(e.TokenBudget)
+}
+
 func (e *Engine) budgetHit() bool {
 	if e.TokenBudget <= 0 || e.TokensUsed == nil {
 		return false
@@ -1097,7 +1426,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	if affinity == nil {
 		affinity = map[string]bool{}
 	}
-	fx := facts.Build(query)
+	fx := e.decompose(ctx, query)
 	// oracle hints: "f1:描述" strings let a FactAware scorer emit the
 	// per-fact observation vector in the same scoring call.
 	hints := make([]string, len(fx))
@@ -1113,6 +1442,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		}
 		return facts.ReportFor(fx, samples)
 	}
+	// kept accumulates this query's covering windows; declared before
+	// newSampler because the closure reads it at call time (c_d digest).
+	var kept []mcs.Sample
 	newSampler := func() *mcs.Sampler {
 		cfg := mcs.EnvConfig()
 		// DEEP admission budget: this loop scores every admitted file, and
@@ -1129,6 +1461,11 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		}
 		smp := mcs.New(cfg, e.scorer())
 		smp.FactHints = hints
+		// v3b c_d: every sampler built mid-loop sees the evidence kept so
+		// far as the digest — the closure reads `kept` at call time, so each
+		// file's scoring call sees the previous files' windows. Read-only by
+		// contract (Sampler.Prior).
+		smp.Prior = kept
 		return smp
 	}
 	// Admission order matters at scale: on a 10k-article corpus the caller's
@@ -1172,7 +1509,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 
 	var best fast.Answer
 	loops := 0
-	var kept []mcs.Sample
 	var bestSrc source.Source
 	bestScore := -1.0
 	rep := report(kept)
@@ -1182,7 +1518,31 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	reason := ""
 	prevP := 0.0
 	noImprove := 0
-	for _, s := range ranked {
+	// Adjacency widen (CLUS_DEEP_ADJACENCY, default OFF): blocks are fixed-
+	// rune slices of one parent, so a scene that answers a question routinely
+	// straddles a block boundary — measured 2026-09-28 on the 727k-rune novel,
+	// twice in one day: block 0 scored 8.0 with its window cutting off
+	// mid-scene, and the continuation block (the one holding the answer's
+	// second half) sat BEHIND a 0.0-scored block in the admission order. When
+	// a block scores at/over the cover line, its i±1 siblings are pulled to
+	// the FRONT of the exploration queue — near-zero ranking cost, bounded by
+	// adjacencyPullCap. Off by default: it reorders exploration on every DEEP
+	// query, so it earns its default through a paired A/B like every other
+	// behavioural knob in this loop.
+	adjacency := newAdjacencyIndex(sources)
+	queue := ranked
+	queued := map[string]bool{}
+	if adjacency != nil {
+		q := make([]source.Source, len(ranked))
+		copy(q, ranked)
+		queue = q // ranked is rankAdmission's slice; never mutate its backing
+		for _, s := range q {
+			queued[s.ID] = true
+		}
+	}
+	pulled := 0
+	for qi := 0; qi < len(queue); qi++ {
+		s := queue[qi]
 		coveredBefore := coveredFacts(rep)
 		if cancelled(ctx) {
 			break
@@ -1196,12 +1556,45 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// Weakest-requirement stop: the strongest window with full
 		// coverage is enough — sampling further admitted files wastes budget
 		// and latency (真机: 85s/13944 tokens 空转在已答问题上).
-		if rep.Complete && bestScore >= 8 {
+		//
+		// The second arm is the budget-aware stop (2026-07-28, perf-plan §4.9).
+		// The fixed >= 8 line was calibrated on a corpus where a correct
+		// answer scores well above it; on a real 727k-rune novel the block
+		// holding the answer scored 5.0 while the wrong blocks scored 2.0/1.0/
+		// 1.0 — clean separation, but permanently under the line, so the loop
+		// could not tell it was done and kept scoring (measured: 73,212 tokens
+		// for one question, ~21,000 of it after the answer was already in
+		// hand).
+		//
+		// So: a STRONG answer always stops, and a merely COVERING one stops
+		// when the query is running out of budget. That encodes "context and
+		// money are finite" in the stop condition itself, instead of tuning a
+		// generosity constant — and with no budget set the behaviour is exactly
+		// what it was, so nothing changes until an operator sets one.
+		//
+		// v3b c_d (CLUS_SCORER_CONFLICT, default OFF): an UNRESOLVED
+		// contradiction among the kept windows vetoes the sufficient exit —
+		// the paper's third stop leg. Every kept window is at/above the cover
+		// line by construction, so any Conflicts mark on the kept set is a
+		// live contradiction, and stopping "sufficient" on contested evidence
+		// is how adversarial distractors win (paper's adversarial category:
+		// 0.962 vs 0.742 — the gap this leg is borrowed for). The loop then
+		// keeps hunting for a disambiguating window under the same
+		// budget/exhaustion caps as ever; if none arrives, synthesis handles
+		// the contested set exactly as it does today.
+		conflictGated := mcs.ScorerConflict() && conflictMarked(kept)
+		if rep.Complete && !conflictGated && (bestScore >= sufficientScore ||
+			(bestScore >= facts.CoverScore && e.budgetAtRisk())) {
 			reason = "sufficient"
 			if e.Verbose != nil {
-				e.Verbose("early stop: covered, best=%.1f, files=%d", bestScore, loops)
+				e.Verbose("early stop: covered, best=%.1f, files=%d, budget_at_risk=%v",
+					bestScore, loops, e.budgetAtRisk())
 			}
 			break
+		}
+		if conflictGated && e.Verbose != nil {
+			e.Verbose("conflict gate: sufficient exit vetoed (%d contested windows), continuing",
+				conflictCount(kept))
 		}
 		loops++
 		if loops > e.MaxLoops {
@@ -1219,6 +1612,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			break
 		}
 		_ts := time.Now()
+		endScore := e.begin()
 		samples, err := newSampler().SampleBody(ctx, query, s.Body)
 		sampleNS += int64(time.Since(_ts))
 		bridged := false
@@ -1233,6 +1627,9 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				samples = s2
 				bridged = true
 			}
+		}
+		if e.stageTok != nil {
+			endScore(&e.stageTok.Score)
 		}
 		if err != nil {
 			if e.Verbose != nil {
@@ -1265,6 +1662,36 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		rep = report(kept)
 		if blf != nil {
 			blf.Observe(s.ID, beliefObserve(fileKept, localBest, coveredFacts(rep)-coveredBefore, len(fx)))
+		}
+		// The adjacency pull lives HERE, after the score is known and before
+		// the next candidate: a covering-grade block justifies one hop to each
+		// sibling, and the sibling lands at qi+1 so it is explored next. A
+		// sibling already in the queue is MOVED UP (out from behind whatever
+		// junk the ranker put ahead of it), not duplicated.
+		if adjacency != nil && pulled < adjacencyPullCap && localBest >= facts.CoverScore {
+			for _, nb := range adjacency.siblings(s) {
+				if tried[nb.ID] {
+					continue
+				}
+				if queued[nb.ID] {
+					for j := qi + 1; j < len(queue); j++ {
+						if queue[j].ID == nb.ID {
+							queue = append(queue[:j], queue[j+1:]...)
+							break
+						}
+					}
+				}
+				queued[nb.ID] = true
+				pulled++
+				queue = append(queue[:qi+1], append([]source.Source{nb}, queue[qi+1:]...)...)
+				if e.Verbose != nil {
+					e.Verbose("adjacency: pulled %s ahead of the queue (sibling of %s, best=%.1f)",
+						nb.BusinessKey, s.BusinessKey, localBest)
+				}
+				if pulled >= adjacencyPullCap {
+					break
+				}
+			}
 		}
 		// Session-bridge early exit: an anchored document (the thread's own,
 		// weight ≥ 0.6) that only the fallback could sample is the answer.
@@ -1355,6 +1782,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if gap > 0 {
 				smp.ExploreBoost = 1 + 2*gap // 1.0 (no gap) → 3.0 (all open)
 			}
+			smp.Prior = kept // same c_d digest contract as newSampler
 			return smp
 		}
 		// 2.4: MissingQueries first, then two-call complements (Jaccard-filtered)
@@ -1436,7 +1864,20 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// wrong-doc windows "complete". The budget term uses the REAL loop count
 	// (passing 0 made the predicate collapse to !Complete, so the "budget
 	// aware" gate never saw the budget).
-	if reason != "utility" && (facts.NeedContinue(rep, loops, e.MaxLoops+e.CorrectBudget+e.WidenBudget) || bestScore < 6) && e.Widen != nil && !e.budgetHit() {
+	//
+	// The score term is now the COVER line, not a fixed 6 (2026-07-28,
+	// perf-plan §4.9). It used to disagree with the early stop: stop at >= 8,
+	// widen below 6, so a best window in [4,8) satisfied neither — and the
+	// loop went widening anyway. Measured on a real 727k-rune novel: the block
+	// holding the answer scored 5.0, the wrong ones 2.0/1.0/1.0, and the loop
+	// spent ~21,000 of its 73,212 tokens widening AFTER already having a
+	// covering window. "A window that covers a requirement" is now the
+	// single line both gates share, so there is no dead band: below it we
+	// widen, at or above it we are done.
+	if reason != "utility" &&
+		(facts.NeedContinue(rep, loops, e.MaxLoops+e.CorrectBudget+e.WidenBudget) ||
+			(bestScore < facts.CoverScore && !e.budgetAtRisk())) &&
+		e.Widen != nil && !e.budgetHit() {
 		keptIDs := map[string]bool{}
 		for _, sm := range kept {
 			keptIDs[sm.Source] = true
@@ -1444,7 +1885,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for k := range lawAffinity(keptIDs, sources) {
 			affinity[k] = true
 		}
-		if extra, err := e.Widen(ctx, query, widenExclude(), e.WidenBudget, affinity); err == nil && len(extra) > 0 {
+		endWn := e.begin()
+		extra, werr := e.Widen(ctx, query, widenExclude(), e.WidenBudget, affinity)
+		if e.stageTok != nil {
+			endWn(&e.stageTok.Widen)
+		}
+		if werr == nil && len(extra) > 0 {
 			if blf != nil {
 				// The widening budget (3 files) makes ORDER the whole
 				// mechanism: re-rank by the belief posterior so the slots
@@ -1475,8 +1921,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				widened++
 				tried[s.ID] = true
 				_ts := time.Now()
+				endW := e.begin()
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
 				sampleNS += int64(time.Since(_ts))
+				if e.stageTok != nil {
+					endW(&e.stageTok.Score)
+				}
 				if err != nil {
 					continue
 				}
@@ -1513,6 +1963,20 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// normal answer to every consumer (the ledger gate, the bench's
 		// insufficient metric) — the same missing-flag drift the recordUsage
 		// gate fixes on its side.
+		// Say whether the budget is why we found nothing. With a default
+		// budget, "the corpus lacks it" and "we ran out of budget before we
+		// found it" produce the SAME user-facing text, and conflating them
+		// makes a recall ceiling look like a corpus gap. Live A/B showed the
+		// difference is real: one refusal question answered in the uncapped
+		// arm and refused in the capped one.
+		//
+		// Only the budget case gets a new value. "" keeps its established
+		// meaning (candidates exhausted / no loop ran — utility_stop_test.go
+		// pins it), and an earlier break (utility, sufficient, budget) already
+		// named a more specific reason and must not be overwritten.
+		if reason == "" && e.BudgetHit {
+			reason = "insufficient_after_budget"
+		}
 		return fast.Answer{
 			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true, Refused: true,
 			Summary: insufficientSummary(query, tried, sources),
@@ -1550,7 +2014,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		for id := range keptIDs {
 			exclude[id] = true
 		}
-		if extra, err := e.Widen(ctx, query, exclude, e.WidenBudget, affinity); err == nil && len(extra) > 0 {
+		endWn := e.begin()
+		extra, werr := e.Widen(ctx, query, exclude, e.WidenBudget, affinity)
+		if e.stageTok != nil {
+			endWn(&e.stageTok.Widen)
+		}
+		if werr == nil && len(extra) > 0 {
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
 				if e.budgetHit() || cancelled(ctx) {
@@ -1563,8 +2032,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				widened++
 				tried[s.ID] = true
 				_ts := time.Now()
+				endW := e.begin()
 				samples, err := newSampler().SampleBody(ctx, query, s.Body)
 				sampleNS += int64(time.Since(_ts))
+				if e.stageTok != nil {
+					endW(&e.stageTok.Score)
+				}
 				if err != nil {
 					continue
 				}
@@ -1626,17 +2099,24 @@ func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, te
 	if e.Synth != nil {
 		// Both branches report their wall time — an early return from the
 		// streaming path used to leave deep_synth out of the stage split.
-		t0 := time.Now()
-		if e.SynthDelta != nil {
-			if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
-				if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
-					e.stage("deep_synth", t0)
-					return s
+	t0 := time.Now()
+	endSyn := e.begin()
+	if e.SynthDelta != nil {
+		if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
+			if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+				if e.stageTok != nil {
+					endSyn(&e.stageTok.Synth)
 				}
+				e.stage("deep_synth", t0)
+				return s
 			}
 		}
-		s, err := e.Synth.Synthesize(ctx, query, kept)
-		e.stage("deep_synth", t0)
+	}
+	s, err := e.Synth.Synthesize(ctx, query, kept)
+	if e.stageTok != nil {
+		endSyn(&e.stageTok.Synth)
+	}
+	e.stage("deep_synth", t0)
 		if err == nil && strings.TrimSpace(s) != "" {
 			return s
 		}

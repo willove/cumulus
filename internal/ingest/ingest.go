@@ -23,6 +23,7 @@ import (
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/adapt"
+	"github.com/willove/cumulus/internal/charset"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
 	"github.com/willove/cumulus/internal/storedoc"
@@ -1485,6 +1486,25 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		ext := strings.ToLower(filepath.Ext(p))
 		typ := "md"
 		text := string(raw)
+		// Charset gate. Measured on a 1,251-file Chinese web-novel corpus:
+		// 5.4% native UTF-8, 87.0% GB18030, 7.6% undecodable. Without this,
+		// the 87% is stored as mojibake (every CJK char becomes one RuneError,
+		// so rune counts — and therefore block and citation offsets — are wrong
+		// by a large factor) and the 7.6% is stored as a document riddled with
+		// U+FFFD, which answers queries while looking intact.
+		//
+		// Decoding happens BEFORE format extraction: ExtractHTML and friends
+		// parse text, and a GBK byte stream is not a document they can parse.
+		cs, cerr := charset.Decode(raw)
+		if cerr != nil {
+			bump(p, "undecodable", cerr.Error())
+			if aerr := advance(i); aerr != nil {
+				return ingested, aerr
+			}
+			progress("extracting")
+			continue
+		}
+		text = cs.Text
 		switch ext {
 		case ".txt":
 			typ = "txt"
@@ -1522,10 +1542,29 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			uri = "upload://" + rel
 		}
 		progress("normalizing")
-		src := source.New(filepath.Base(p), typ, uri, rel, "zh", text, nil)
+		// Provenance for the conversion. The suite's document Digest covers the
+		// CONVERTED + normalized body, so without these the file on disk can
+		// never be tied back to the text the engine holds. src_digest is the
+		// file as it was BEFORE transcoding.
+		meta := map[string]any{
+			"charset":    string(cs.Tier),
+			"src_bytes":  cs.SrcBytes,
+			"src_digest": cs.SrcDigest,
+		}
+		if cs.Converted {
+			meta["charset_converted"] = true
+		}
+		src := source.New(filepath.Base(p), typ, uri, rel, "zh", text, meta)
 		progress("upserting")
 		// Async extraction is not subject to the synchronous Put body cap.
-		if _, err := s.put(ctx, src, 0); err != nil {
+		// Long-document splitting is opt-in (CLUS_INGEST_BLOCKS) and routes
+		// through PutBlock, which falls through to the plain put when the
+		// switch is off — so the default path is the same call as before.
+		if blkCfg := EnvBlockConfig(); blkCfg.enabled() {
+			if _, err := s.PutBlock(ctx, src, blkCfg); err != nil {
+				return ingested, fmt.Errorf("file %s: %w", fileLabel(p), err)
+			}
+		} else if _, err := s.put(ctx, src, 0); err != nil {
 			return ingested, fmt.Errorf("file %s: %w", fileLabel(p), err)
 		}
 		ingested++

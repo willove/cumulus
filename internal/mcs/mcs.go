@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Sample is one candidate window of a source body.
@@ -22,8 +23,9 @@ type Sample struct {
 	End       int      `json:"end"`
 	Content   string   `json:"content"`
 	Source    string   `json:"source"`
-	Arm       string   `json:"arm,omitempty"`    // lex | local | global
-	Covers    []string `json:"covers,omitempty"` // fact ids this window supports
+	Arm       string   `json:"arm,omitempty"`     // lex | local | global
+	Covers    []string `json:"covers,omitempty"`  // fact ids this window supports
+	Conflicts []string `json:"conflicts,omitempty"` // evidence ids this window contradicts (v3b c_d)
 	Score     float64  `json:"score"`
 	Reasoning string   `json:"reasoning"`
 }
@@ -47,6 +49,52 @@ type Scorer interface {
 // call count does not grow with K.
 type FactAware interface {
 	ScoreWithFacts(ctx context.Context, query string, facts []string, s Sample) (score float64, reasoning string, covers []string, err error)
+}
+
+// BatchScorer is an optional Scorer extension (Jev-Mem v3a): score every
+// window of a round in ONE model call. len(results) must equal len(samples)
+// and results[i] belongs to samples[i]; a whole-batch failure returns err
+// (the sampler then reports every window failed — the same honest
+// total-failure contract the per-window path has).
+type BatchScorer interface {
+	ScoreBatch(ctx context.Context, query string, facts []string, samples []Sample) ([]BatchResult, error)
+}
+
+// BatchResult gains Conflicts on the v3b path: the ids ("K1".. digest
+// entries, "S1".. batch peers) this window directly contradicts. Novelty and
+// Support are parsed for schema honesty but deliberately NOT carried onto
+// Sample — nothing consumes them yet, and telemetry-only fields on a struct
+// every stage copies would be dead weight until a mechanism earns them.
+type BatchResult struct {
+	Score     float64
+	Reasoning string
+	Covers    []string
+	Conflicts []string
+}
+
+// ConflictBatchScorer is the v3b extension of BatchScorer (Jev-Mem c_d): the
+// batched call ALSO sees a digest of the evidence already kept this query, so
+// contradiction marks are cross-file, not just within one batch. Results
+// carry Conflicts the caller may gate stopping on.
+type ConflictBatchScorer interface {
+	ScoreBatchConflict(ctx context.Context, query string, facts []string, samples, prior []Sample) ([]BatchResult, error)
+}
+
+// ScorerBatch reports whether the batched scoring path is enabled. Opt-in:
+// batching changes the prompt shape the model sees (N windows in one call),
+// so it earns its default through a paired A/B like every other behavioural
+// knob (scripts/paired-ab.sh CLUS_MCS_SCORER_BATCH 0 1 scorebatch).
+func ScorerBatch() bool {
+	n, _ := envInt("CLUS_MCS_SCORER_BATCH")
+	return n == 1
+}
+
+// ScorerConflict reports whether the conflict-aware batched path (v3b) is
+// enabled. It implies the batched path; on its own (batch off) it is inert —
+// the per-window call shape cannot see cross-window contradiction.
+func ScorerConflict() bool {
+	n, _ := envInt("CLUS_SCORER_CONFLICT")
+	return n == 1
 }
 
 // KeywordScorer is a deterministic offline stub: score = keyword hit density
@@ -229,6 +277,23 @@ func envInt(key string) (int, bool) {
 	return n, true
 }
 
+// ScorerWorkers is how many windows one scoring round may have in flight.
+//
+// Default 1 = the historical serial loop, byte-for-byte. Concurrency is
+// opt-in (perf-plan §2 P0-2) because a cold query issues ~10 blocking
+// evaluate_sample round-trips back to back and serialising them was the
+// single largest term in the observed 40s+ cold latency.
+//
+// The cap is deliberately conservative: an unthrottled fan-out turns a rate
+// limit into a retry storm, and the retry storm is worse than the serial wait
+// (same failure mode as the embedder's CLUS_EMBED_WORKERS, see minilm/forward.go).
+func ScorerWorkers() int {
+	if n, ok := envInt("CLUS_MCS_SCORER_WORKERS"); ok {
+		return n
+	}
+	return 1
+}
+
 // Sampler runs the three-stage loop.
 type Sampler struct {
 	Cfg    Config
@@ -245,6 +310,12 @@ type Sampler struct {
 	// information-directed λ weighting). 0 or 1 = normal arm economics.
 	// It is advisory: every arm keeps its one-slot floor.
 	ExploreBoost float64
+	// Prior is the evidence already kept this query, handed to a
+	// ConflictBatchScorer as the Current Evidence Digest (v3b c_d): the
+	// scorer marks which of these the round's windows contradict. The
+	// sampler itself never mutates it — the DEEP loop owns the kept set and
+	// refreshes this before each file.
+	Prior []Sample
 }
 
 // Arms are the complementary proposal families: lex anchors on the
@@ -590,44 +661,150 @@ func (s *Sampler) globalScatter(runes []rune, limit int) []Sample {
 	return out
 }
 
+// evalAll scores every window in a round.
+//
+// Ordering contract: the returned slice is index-aligned with `in`, so the
+// result is byte-identical to the historical serial loop regardless of how
+// many scorers ran concurrently. That is what lets ScorerWorkers() stay
+// opt-in: turning concurrency on must not move a single byte of gate output.
+//
+// Concurrency note: a Scorer implementation must be safe for concurrent use
+// when ScorerWorkers() > 1. The production scorers are (llm.ChatClient keeps
+// only an atomic token counter; KeywordScorer is stateless). A stub used by a
+// gate that flips the cap is responsible for its own safety.
+//
+// `lastErr` is resolved by index, not by completion order, so the aggregate
+// "every window failed" error names the same window the serial loop named.
 func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sample, error) {
 	fa, _ := s.Scorer.(FactAware)
-	out := make([]Sample, 0, len(in))
-	failed := 0
-	var lastErr error
-	for _, sm := range in {
+	out := make([]Sample, len(in))
+	errs := make([]error, len(in))
+
+	// Batched path (v3a, CLUS_MCS_SCORER_BATCH=1): one call for the whole
+	// round instead of one per window. On a batch error every window is an
+	// observation failure — falling through to the per-window path would
+	// spend N more calls on a scorer that just failed, and silently
+	// degrading to unbatched would hide the flag's failure mode from the
+	// A/B that gates it.
+	//
+	// v3b (CLUS_SCORER_CONFLICT=1, implies batch): the conflict-aware call
+	// also receives the Prior digest, and its Conflicts marks land on the
+	// samples for the caller's stop gate. Selection is highest-first so the
+	// flag pair (batch=1, conflict=0) is exactly v3a.
+	if len(in) > 1 {
+		if cs, ok := s.Scorer.(ConflictBatchScorer); ok && ScorerConflict() {
+			res, err := cs.ScoreBatchConflict(ctx, query, s.FactHints, in, s.Prior)
+			if err == nil {
+				for i := range in {
+					sm := in[i]
+					sm.Score, sm.Reasoning, sm.Covers, sm.Conflicts = res[i].Score, res[i].Reasoning, res[i].Covers, res[i].Conflicts
+					out[i] = sm
+				}
+				return out, nil
+			}
+			for i := range in {
+				sm := in[i]
+				sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
+				out[i] = sm
+				errs[i] = err
+			}
+			return out, s.batchFailure(in, errs)
+		}
+		if bs, ok := s.Scorer.(BatchScorer); ok && ScorerBatch() {
+			res, err := bs.ScoreBatch(ctx, query, s.FactHints, in)
+			if err != nil {
+				for i := range in {
+					sm := in[i]
+					sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
+					out[i] = sm
+					errs[i] = err
+				}
+				return out, s.batchFailure(in, errs)
+			}
+			for i := range in {
+				sm := in[i]
+				sm.Score, sm.Reasoning, sm.Covers = res[i].Score, res[i].Reasoning, res[i].Covers
+				out[i] = sm
+			}
+			return out, nil
+		}
+	}
+
+	scoreOne := func(i int) {
+		sm := in[i]
+		var err error
 		if fa != nil && len(s.FactHints) > 0 {
-			sc, why, covers, err := fa.ScoreWithFacts(ctx, query, s.FactHints, sm)
+			var sc float64
+			var why string
+			var covers []string
+			sc, why, covers, err = fa.ScoreWithFacts(ctx, query, s.FactHints, sm)
 			if err != nil {
 				// A3: observation failure ≠ judged irrelevant.
 				sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
-				out = append(out, sm)
-				failed, lastErr = failed+1, err
-				continue
+			} else {
+				sm.Score, sm.Reasoning, sm.Covers = sc, why, covers
 			}
-			sm.Score, sm.Reasoning, sm.Covers = sc, why, covers
-			out = append(out, sm)
-			continue
+		} else {
+			var sc float64
+			var why string
+			sc, why, err = s.Scorer.Score(ctx, query, sm)
+			if err != nil {
+				sm.Score, sm.Reasoning = ScoreFailed, "scorer error: "+err.Error()
+			} else {
+				sm.Score, sm.Reasoning = sc, why
+			}
 		}
-		sc, why, err := s.Scorer.Score(ctx, query, sm)
-		if err != nil {
-			sm.Score, sm.Reasoning = ScoreFailed, "scorer error: "+err.Error()
-			out = append(out, sm)
-			failed, lastErr = failed+1, err
-			continue
-		}
-		sm.Score, sm.Reasoning = sc, why
-		out = append(out, sm)
+		errs[i] = err
+		out[i] = sm
 	}
+
+	if w := ScorerWorkers(); w > 1 && len(in) > 1 {
+		sem := make(chan struct{}, w)
+		var wg sync.WaitGroup
+		for i := range in {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				scoreOne(i)
+			}(i)
+		}
+		wg.Wait()
+	} else {
+		for i := range in {
+			scoreOne(i)
+		}
+	}
+
+	// Counted after the join, never inside: a shared counter written from the
+	// workers is a data race the -race gate catches immediately.
 	// Total failure must not dress up as "no evidence": when every window's
-	// scoring failed the scorer itself is down (network, auth, quota), and
-	// the honest result is an error the caller can surface — not an all-
+	// scoring failed the scorer itself is down (network, auth, quota), and the
+	// honest result is an error the caller can surface — not an all-
 	// ScoreFailed page that reads downstream as 证据不足/insufficient and
 	// poisons refusals and eval numbers alike.
-	if len(in) > 0 && failed == len(in) {
-		return out, fmt.Errorf("mcs: scorer failed for all %d windows: %w", len(in), lastErr)
+	return out, s.batchFailure(in, errs)
+}
+
+// batchFailure reports the honest total-failure error when EVERY window in
+// the batch failed to score (both the per-window and the batched path feed
+// it the same per-window error slice). nil when at least one window scored.
+func (s *Sampler) batchFailure(in []Sample, errs []error) error {
+	failed := 0
+	var lastErr error
+	for i := len(errs) - 1; i >= 0; i-- {
+		if errs[i] != nil {
+			failed++
+			if lastErr == nil {
+				lastErr = errs[i] // highest index wins, as the serial loop did
+			}
+		}
 	}
-	return out, nil
+	if len(in) > 0 && failed == len(in) {
+		return fmt.Errorf("mcs: scorer failed for all %d windows: %w", len(in), lastErr)
+	}
+	return nil
 }
 
 func window(runes []rune, center, half int, source string) Sample {

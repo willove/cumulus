@@ -18,3 +18,7 @@ var/
 /docs/
 
 .omo/
+__pycache__/
+.pytest_cache/
+.zcode/
+results/

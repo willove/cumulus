@@ -33,9 +33,37 @@ func TestPersistJudgeRecordGateAndFailOpen(t *testing.T) {
 		return false, "", errors.New("endpoint down")
 	}
 
+	// A wired judge with neither flag set must cost nothing — the measured
+	// case was ~2 calls per query (~4,000 tokens of a 27,000 budget) spent
+	// filing a verdict that gates nothing.
+	t.Run("wired but neither gated nor recorded costs nothing", func(t *testing.T) {
+		e := New(nil, cluster.NewMemory(), cluster.Local{N: 64})
+		called := 0
+		e.Judge = func(context.Context, string, string) (bool, string, error) {
+			called++
+			return false, "not an answer", nil
+		}
+		r, err := e.Persist(ctx, newAns(), corpus)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if called != 0 {
+			t.Fatalf("judge ran %d times with neither gate nor record requested", called)
+		}
+		if r.Judged {
+			t.Fatalf("no verdict was requested, so none should be reported: %+v", r)
+		}
+		if !r.Persisted {
+			t.Fatal("the answer must still persist")
+		}
+	})
+
 	t.Run("record mode keeps the answer, stamps the verdict", func(t *testing.T) {
 		e := New(nil, cluster.NewMemory(), cluster.Local{N: 64})
-		e.Judge, e.JudgeGates = noJudge, false
+		// Record mode is now explicit (JudgeRecord), not implied by Judge being
+		// wired: the judge is a model call per persisted answer, so it runs
+		// only when it can gate or when the verdict was asked for.
+		e.Judge, e.JudgeGates, e.JudgeRecord = noJudge, false, true
 		r, err := e.Persist(ctx, newAns(), corpus)
 		if err != nil || !r.Persisted {
 			t.Fatalf("record mode must still persist: %+v %v", r, err)
