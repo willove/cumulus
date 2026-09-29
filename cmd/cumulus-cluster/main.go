@@ -27,7 +27,9 @@ import (
 	"github.com/willove/cumulus/internal/eval"
 	"github.com/willove/cumulus/internal/graph"
 	"github.com/willove/cumulus/internal/ingest"
+	"github.com/willove/cumulus/internal/learn"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
@@ -1037,6 +1039,99 @@ func main() {
 		default:
 			fatal(fmt.Errorf("calib: -rows required (mine), or -rows + -rows-b (self-test verdict)"))
 		}
+
+	case "learn":
+		// 认知引擎第四砖（薄引导者）：挖异常（零 LLM）→ 一次假设调用（白名单
+		// 硬约束）→ calib -auto 自跑对 → 应用后护栏校验（掉线即回滚）→
+		// clus_learning 日志。铁律：只拧白名单旋钮、预算硬顶、全程可审计。
+		fs := flag.NewFlagSet("learn", flag.ExitOnError)
+		dry := fs.Bool("dry", false, "mine + hypothesis only, no experiment, no apply (zero cost)")
+		budget := fs.Int64("budget", learn.DefaultCycleBudget, "per-cycle token ceiling")
+		set := fs.String("set", "", "frozen set dir for the self-test (items.jsonl+corpus.jsonl)")
+		apply := fs.Bool("apply", false, "apply a winning proposal (guardrail-checked, auto-rollback)")
+		_ = fs.Parse(rest)
+
+		jr := learn.NewJournal(c)
+		if err := jr.Ensure(ctx); err != nil {
+			fatal(err)
+		}
+		anomalies, err := learn.MineAnomalies(ctx, c, 6)
+		if err != nil {
+			fatal(err)
+		}
+		if len(anomalies) == 0 {
+			printJSON(map[string]any{"cycle": "idle", "reason": "no episodes mined"})
+			return
+		}
+		if !learn.GuardrailBaselinePresent(filepath.Join("var", "guardrail", "baseline.json")) {
+			fatal(fmt.Errorf("learn: no guardrail baseline — run scripts/guardrail.sh baseline first (learning without an alarm is not learning)"))
+		}
+		ps := newProdStack()
+		if ps.chat == nil {
+			fatal(fmt.Errorf("learn: hypothesis call needs a live endpoint"))
+		}
+
+		// The ONE LLM call: anomaly table + whitelist → hypothesis.
+		var tbl strings.Builder
+		for _, a := range anomalies {
+			fmt.Fprintf(&tbl, "- %s: %s (score %.2f)\n", a.Name, a.Detail, a.Score)
+		}
+		tmpl := prompts.MustRender(prompts.LearnHypothesis, map[string]string{
+			"anomalies": strings.TrimRight(tbl.String(), "\n"),
+			"knobs":     learn.RenderKnobs(),
+		})
+		raw, err := ps.chat.Complete(ctx, tmpl)
+		if err != nil {
+			fatal(err)
+		}
+		h := learn.ParseHypothesis(raw)
+		entry := map[string]any{
+			"anomalies": anomalies, "hypothesis": h, "dry": *dry,
+		}
+		if h.Action != "tune" {
+			entry["outcome"] = "no-action"
+			_ = jr.Record(ctx, entry)
+			printJSON(map[string]any{"cycle": "no-action", "hypothesis": h})
+			return
+		}
+		if *dry {
+			entry["outcome"] = "dry"
+			_ = jr.Record(ctx, entry)
+			printJSON(map[string]any{"cycle": "dry", "hypothesis": h})
+			return
+		}
+		if *set == "" {
+			fatal(fmt.Errorf("learn: -set (frozen set dir) required for the self-test"))
+		}
+		// Budget gate: a paired 30-item run costs ~360k tokens by measurement.
+		if !learn.BudgetOK(360_000, *budget) {
+			entry["outcome"] = "over-budget"
+			_ = jr.Record(ctx, entry)
+			printJSON(map[string]any{"cycle": "over-budget", "hypothesis": h})
+			return
+		}
+		// Delegate to the calib -auto machinery by invoking this binary's
+		// own subcommand — the pair discipline stays in ONE place.
+		self, err := os.Executable()
+		if err != nil {
+			fatal(err)
+		}
+		auto := exec.Command(self, "-data", data, "calib",
+			"-usage", "-auto", "-set", *set,
+			"-target", "0.75", "-min-n", "10")
+		if *apply {
+			auto.Args = append(auto.Args, "-apply")
+		}
+		auto.Env = os.Environ()
+		auto.Stdout, auto.Stderr = os.Stderr, os.Stderr
+		if err := auto.Run(); err != nil {
+			entry["outcome"] = "self-test-failed"
+			_ = jr.Record(ctx, entry)
+			fatal(fmt.Errorf("learn: calib -auto failed: %w", err))
+		}
+		entry["outcome"] = "self-test-run"
+		_ = jr.Record(ctx, entry)
+		printJSON(map[string]any{"cycle": "done", "hypothesis": h})
 
 	case "delete":
 		if len(rest) < 1 {
