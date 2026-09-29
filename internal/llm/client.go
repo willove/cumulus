@@ -529,6 +529,59 @@ func (s *AigateScorer) ScoreBatch(ctx context.Context, query string, facts []str
 	return out, nil
 }
 
+// AigateConsistency is the pre-synthesis evidence-agreement gate (收益层 2):
+// one call sees the kept windows TOGETHER — the cross-window view the
+// per-window scorer structurally lacks (the v3b lesson) — and reports
+// whether they agree on the answer to the query.
+type AigateConsistency struct{ Client *ChatClient }
+
+// AgreeResult is the evidence_agree JSON shape.
+type AgreeResult struct {
+	Agree           bool   `json:"agree"`
+	ConflictSummary string `json:"conflict_summary"`
+}
+
+// ParseAgreeJSON is exported for frozen prompt regression tests.
+func ParseAgreeJSON(raw string) (AgreeResult, error) {
+	if obj := firstJSONObject(raw); obj != "" {
+		raw = obj
+	}
+	var parsed AgreeResult
+	if err := parseJSON(raw, &parsed); err != nil {
+		return AgreeResult{}, err
+	}
+	if parsed.Agree {
+		parsed.ConflictSummary = ""
+	}
+	return parsed, nil
+}
+
+// CheckConsistency implements deep.ConsistencyChecker.
+func (s *AigateConsistency) CheckConsistency(ctx context.Context, query string, windows []mcs.Sample) (bool, string, error) {
+	if s == nil || s.Client == nil || len(windows) == 0 {
+		return true, "", nil
+	}
+	var b strings.Builder
+	for i, sm := range windows {
+		fmt.Fprintf(&b, "[E%d] (Source: %s [%d,%d))\n...%s...\n\n",
+			i+1, sm.Source, sm.Start, sm.End, truncateRunes(sm.Content, maxSampleRunes))
+	}
+	tmpl := prompts.MustRender(prompts.EvidenceAgree, map[string]string{
+		"query":   query,
+		"count":   strconv.Itoa(len(windows)),
+		"windows": strings.TrimRight(b.String(), "\n"),
+	})
+	raw, err := s.Client.CompleteStructured(ctx, tmpl)
+	if err != nil {
+		return true, "", err
+	}
+	r, err := ParseAgreeJSON(raw)
+	if err != nil {
+		return true, "", err
+	}
+	return r.Agree, r.ConflictSummary, nil
+}
+
 // clampCovers restricts oracle annotations to the given fact ids — a window
 // may only claim facts the decomposer actually proposed.
 func clampCovers(covers, facts []string) []string {

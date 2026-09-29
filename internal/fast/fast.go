@@ -48,6 +48,11 @@ type Answer struct {
 	// there — so the caller lets it stand at FAST.
 	Bridged bool `json:"bridged"`
 	Refused bool `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
+	// Contested marks an answer whose evidence windows disagreed on the same
+	// fact point (the pre-synthesis consistency gate): the summary carries a
+	// divergence prefix naming BOTH claims, so the reader sees the split
+	// before the model's pick.
+	Contested bool `json:"contested,omitempty"`
 	// SynthDeferred marks an answer whose synthesis was deliberately skipped
 	// because its confidence sat below the escalation line the caller wired
 	// in (DeferBelow): a DEEP escalation re-synthesizes anyway, so the FAST
@@ -333,7 +338,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		return Answer{
 			Query: query, Mode: ModeFAST, LLMCalls: calls,
 			SourceID: best.ID, Samples: kept, Coverage: cov,
-			Confidence: conf, Skipped: conf < skipBelowLine(),
+			Confidence: conf, Skipped: conf < SkipBelowLine(),
 			SynthDeferred: true,
 		}, nil
 	}
@@ -352,7 +357,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		// A bridged answer stands even under the confidence floor: the
 		// session's own document carried it, and escalating cannot find
 		// wording the statute does not contain.
-		Skipped: conf < skipBelowLine() && !bridged,
+		Skipped: conf < SkipBelowLine() && !bridged,
 		Bridged: bridged,
 		Refused: RefusedOf(e.Synth) || RefusedOfSummary(summary, e.Synth),
 	}, nil
@@ -438,10 +443,10 @@ func maxUsageDoc(usage map[string]float64, sources []source.Source) (string, flo
 // the FAST skip flag from the DEEP escalation line.
 const SkipBelow = 0.35
 
-// skipBelowLine is SkipBelow at runtime: the same CLUS_ESCALATE_BELOW knob
+// SkipBelowLine is SkipBelow at runtime: the same CLUS_ESCALATE_BELOW knob
 // that moves the DEEP escalation line moves this floor with it (the mirror
 // is the whole point — a skipped answer is itself an escalation trigger).
-func skipBelowLine() float64 {
+func SkipBelowLine() float64 {
 	v := strings.TrimSpace(os.Getenv("CLUS_ESCALATE_BELOW"))
 	if v == "" {
 		return SkipBelow

@@ -205,6 +205,12 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		}
 	}
 	dE.Scorer = stack.scorer
+	// Pre-synthesis consistency gate (收益层 2): wired unconditionally —
+	// the gate itself is flag-gated (CLUS_SYNTH_CONSISTENCY) and only pays
+	// when the kept set actually spans sources.
+	if stack.chat != nil {
+		dE.Consistency = &llm.AigateConsistency{Client: stack.chat}
+	}
 	dE.Synth = stack.synth
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
 	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}

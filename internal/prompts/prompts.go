@@ -18,6 +18,7 @@ const (
 	EvaluateSample     = "evaluate_sample"
 	EvaluateBatch      = "evaluate_batch"
 	EvaluateDims       = "evaluate_dims"
+	EvidenceAgree      = "evidence_agree"
 	FastAnalyze        = "fast_analyze"
 	KeywordsMultilevel = "keywords_multilevel"
 	HistoryRewrite     = "history_rewrite"

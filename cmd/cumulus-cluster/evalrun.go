@@ -169,6 +169,12 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	kbE.Cites = deep.NewCumuCiteStore(c, ns.Coll(namespace, "clus_cites"))
 	dE := deep.New(kbE, deep.NewCumuStore(c, ns.Coll(namespace, "clus_conflicts")))
 	dE.Scorer = stack.scorer
+	// Pre-synthesis consistency gate (收益层 2): wired unconditionally —
+	// the gate itself is flag-gated (CLUS_SYNTH_CONSISTENCY) and only pays
+	// when the kept set actually spans sources.
+	if stack.chat != nil {
+		dE.Consistency = &llm.AigateConsistency{Client: stack.chat}
+	}
 	dE.Synth = stack.synth
 	// Independent search token budget (3.2 / LENS Remark 2).
 	//

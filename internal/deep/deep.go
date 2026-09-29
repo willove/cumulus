@@ -257,6 +257,11 @@ type Engine struct {
 	// Synth renders DEEP summaries (synthesize_roi). nil = deterministic
 	// template; production wires llm.AigateSynthesizer.
 	Synth fast.Synthesizer
+	// Consistency is the optional pre-synthesis evidence-agreement gate
+	// (CLUS_SYNTH_CONSISTENCY, default OFF): when the kept set spans >=2
+	// sources, one call checks the windows TOGETHER for same-fact-point
+	// divergence; a contested answer is marked and hedged (markContested).
+	Consistency ConsistencyChecker
 	// SampleContext is the session fallback for the sampler (see
 	// fast.Engine.SampleContext): when the raw query keeps no window in an
 	// admitted document, retry once with the thread's recent questions
@@ -822,6 +827,13 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		res.Citations.Legend = legend(res.Citations, false)
 		if base.Answer.SourceID != "" {
 			res.Admitted = []string{base.Answer.SourceID}
+		}
+		// The served-FAST half of the consistency gate: a FAST answer whose
+		// kept windows span sources is exactly as contestable as a DEEP one
+		// (the adversarial yardsticks' FAST rows were ALL wrong), and this
+		// is the only return a non-escalating answer takes.
+		if contested, why := e.consistencyGate(ctx, query, base.Answer.Samples); contested {
+			markContested(&res.Answer, why)
 		}
 		return res, nil
 	}
@@ -2021,7 +2033,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			Query: query, Mode: ModeDEEP, LLMCalls: loops,
 			SourceID: bestSrc.ID, Samples: kept, Coverage: cov,
 			Confidence: conf, Summary: e.render(ctx, query, kept, tmpl),
-			Skipped: conf < fast.SkipBelow,
+			Skipped: conf < fast.SkipBelowLine(),
 		}
 	}
 	best = buildAnswer(template)
@@ -2094,6 +2106,12 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 			}
 		}
+	}
+	// Pre-synthesis consistency gate (收益层 2, CLUS_SYNTH_CONSISTENCY,
+	// default OFF): the ONE place every DEEP answer exits, after all
+	// refinement passes, before the caller serves/persists it.
+	if contested, why := e.consistencyGate(ctx, query, kept); contested {
+		markContested(&best, why)
 	}
 	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 }
