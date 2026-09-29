@@ -929,74 +929,14 @@ func main() {
 			return
 		}
 		if *auto {
-			// R3: the loop runs its own experiment. The pair discipline is
-			// scripts/paired-ab.sh's (fresh stores, frozen set, judge) — the
-			// orchestrator shells to it rather than duplicating the harness.
 			if *set == "" {
-				fatal(fmt.Errorf("calib -auto: -set (frozen set dir) required for the self-test"))
+				*set = strings.TrimSpace(os.Getenv("CLUS_CALIB_SET"))
 			}
-			var eps []calib.Episode
-			var err error
-			if *usage {
-				eps, err = calib.ReadUsage(ctx, c, 0)
-			} else if *rows != "" {
-				eps, err = calib.ReadEpisodes(*rows)
-			} else {
-				fatal(fmt.Errorf("calib -auto: -rows or -usage required to mine"))
+			if *set == "" {
+				fatal(fmt.Errorf("calib -auto: -set (frozen set dir, or CLUS_CALIB_SET env) required for the self-test"))
 			}
-			if err != nil {
+			if err := calibAutoCycle(ctx, c, *rows, *usage, *set, *apply, *current, *target, *minN); err != nil {
 				fatal(err)
-			}
-			prop, ok := calib.Propose(eps, *current, *target, *minN)
-			if !ok {
-				printJSON(map[string]any{"auto": "keep-current", "reason": "no qualifying proposal", "episodes": len(eps)})
-				return
-			}
-			tag := fmt.Sprintf("calibauto-%s", time.Now().UTC().Format("20060102-150405"))
-			// Subprocess handoff hardening: the argv is a FIXED array (no
-			// shell string is ever built), the two arm values must
-			// round-trip as numbers in the escalation-line domain, and the
-			// frozen-set path — the one operator-controlled piece, which
-			// rides the ENVIRONMENT where a control character could forge
-			// an assignment — must resolve to an existing directory with
-			// no control characters.
-			armA, armB := fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed)
-			for _, v := range []string{armA, armB} {
-				if f, perr := strconv.ParseFloat(v, 64); perr != nil || f < 0 || f > 0.95 {
-					fatal(fmt.Errorf("calib -auto: arm %q failed numeric validation", v))
-				}
-			}
-			setAbs := mustAbs(*set)
-			if strings.ContainsAny(setAbs, "\n\r\x00") {
-				fatal(fmt.Errorf("calib -auto: -set must not contain control characters"))
-			}
-			if fi, serr := os.Stat(setAbs); serr != nil || !fi.IsDir() {
-				fatal(fmt.Errorf("calib -auto: -set must be an existing frozen-set directory"))
-			}
-			cmd := exec.Command("bash", "scripts/paired-ab.sh", "CLUS_ESCALATE_BELOW",
-				armA, armB, tag, "30")
-			cmd.Env = append(os.Environ(), "AB_FROZEN="+setAbs)
-			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-			fmt.Fprintf(os.Stderr, "[calib-auto] self-test: %s vs %s on %s (tag %s)\n",
-				fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed), *set, tag)
-			if err := cmd.Run(); err != nil {
-				fatal(fmt.Errorf("calib -auto: self-test failed: %w", err))
-			}
-			base := filepath.Join("var", "ab-"+tag)
-			pair, err := calib.ReadPair(filepath.Join(base, "a0", "results.jsonl"), filepath.Join(base, "a1", "results.jsonl"))
-			if err != nil {
-				fatal(err)
-			}
-			v := calib.Decide(pair)
-			printJSON(map[string]any{"proposal": prop, "pair": pair, "verdict": v})
-			if *apply {
-				if !v.Apply {
-					fatal(fmt.Errorf("calib -auto: self-test lost — nothing applied"))
-				}
-				if err := calib.NewStore(c).Save(ctx, prop.Proposed, "calib -auto self-test win"); err != nil {
-					fatal(err)
-				}
-				printJSON(map[string]any{"applied": prop.Proposed})
 			}
 			return
 		}
@@ -1110,24 +1050,21 @@ func main() {
 			printJSON(map[string]any{"cycle": "over-budget", "hypothesis": h})
 			return
 		}
-		// Delegate to the calib -auto machinery by invoking this binary's
-		// own subcommand — the pair discipline stays in ONE place.
-		self, err := os.Executable()
-		if err != nil {
-			fatal(err)
+		// Delegate IN-PROCESS to the shared calibAutoCycle: the pair
+		// discipline stays in one place and no self-subprocess exists (the
+		// only exec anywhere in the loop is paired-ab.sh's literal bash).
+		current := 0.35
+		if line, ok, lerr := calib.NewStore(c).Load(ctx); lerr == nil && ok {
+			current = line
+		} else if v := os.Getenv("CLUS_ESCALATE_BELOW"); v != "" {
+			if f, perr := strconv.ParseFloat(strings.TrimSpace(v), 64); perr == nil && f >= 0 && f <= 0.95 {
+				current = f
+			}
 		}
-		auto := exec.Command(self, "-data", data, "calib",
-			"-usage", "-auto", "-set", *set,
-			"-target", "0.75", "-min-n", "10")
-		if *apply {
-			auto.Args = append(auto.Args, "-apply")
-		}
-		auto.Env = os.Environ()
-		auto.Stdout, auto.Stderr = os.Stderr, os.Stderr
-		if err := auto.Run(); err != nil {
+		if err := calibAutoCycle(ctx, c, "", true, *set, *apply, current, 0.75, 10); err != nil {
 			entry["outcome"] = "self-test-failed"
 			_ = jr.Record(ctx, entry)
-			fatal(fmt.Errorf("learn: calib -auto failed: %w", err))
+			fatal(fmt.Errorf("learn: %w", err))
 		}
 		entry["outcome"] = "self-test-run"
 		_ = jr.Record(ctx, entry)
@@ -1206,6 +1143,74 @@ func printJSON(v any) {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "cumulus-cluster:", err)
 	os.Exit(1)
+}
+
+// calibAutoCycle is the R3 loop shared by `calib -auto` and `learn`: mine →
+// propose → self-run the pair (scripts/paired-ab.sh, argv literals + env
+// handoff) → decide → optionally apply. One place for the pair discipline.
+func calibAutoCycle(ctx context.Context, c cumulite.Port, rowsPath string, fromUsage bool, setDir string, apply bool, current, target float64, minN int) error {
+	var eps []calib.Episode
+	var err error
+	if fromUsage {
+		eps, err = calib.ReadUsage(ctx, c, 0)
+	} else if rowsPath != "" {
+		eps, err = calib.ReadEpisodes(rowsPath)
+	} else {
+		return fmt.Errorf("calib -auto: -rows or -usage required to mine")
+	}
+	if err != nil {
+		return err
+	}
+	prop, ok := calib.Propose(eps, current, target, minN)
+	if !ok {
+		printJSON(map[string]any{"auto": "keep-current", "reason": "no qualifying proposal", "episodes": len(eps)})
+		return nil
+	}
+	tag := fmt.Sprintf("calibauto-%s", time.Now().UTC().Format("20060102-150405"))
+	// Subprocess handoff hardening: the argv is a FIXED array (no shell
+	// string is ever built), the two arm values must round-trip as numbers
+	// in the escalation-line domain, and the frozen-set path — the one
+	// operator-controlled piece, which rides the ENVIRONMENT where a
+	// control character could forge an assignment — must resolve to an
+	// existing directory with no control characters.
+	armA, armB := fmt.Sprintf("%g", prop.Current), fmt.Sprintf("%g", prop.Proposed)
+	for _, v := range []string{armA, armB} {
+		if f, perr := strconv.ParseFloat(v, 64); perr != nil || f < 0 || f > 0.95 {
+			return fmt.Errorf("calib -auto: arm %q failed numeric validation", v)
+		}
+	}
+	setAbs := mustAbs(setDir)
+	if strings.ContainsAny(setAbs, "\n\r\x00") {
+		return fmt.Errorf("calib -auto: -set must not contain control characters")
+	}
+	if fi, serr := os.Stat(setAbs); serr != nil || !fi.IsDir() {
+		return fmt.Errorf("calib -auto: -set must be an existing frozen-set directory")
+	}
+	cmd := exec.Command("bash", "scripts/paired-ab.sh", "CLUS_ESCALATE_BELOW",
+		armA, armB, tag, "30")
+	cmd.Env = append(os.Environ(), "AB_FROZEN="+setAbs)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	fmt.Fprintf(os.Stderr, "[calib-auto] self-test: %s vs %s on %s (tag %s)\n", armA, armB, setDir, tag)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("calib -auto: self-test failed: %w", err)
+	}
+	base := filepath.Join("var", "ab-"+tag)
+	pair, err := calib.ReadPair(filepath.Join(base, "a0", "results.jsonl"), filepath.Join(base, "a1", "results.jsonl"))
+	if err != nil {
+		return err
+	}
+	v := calib.Decide(pair)
+	printJSON(map[string]any{"proposal": prop, "pair": pair, "verdict": v})
+	if apply {
+		if !v.Apply {
+			return fmt.Errorf("calib -auto: self-test lost — nothing applied")
+		}
+		if err := calib.NewStore(c).Save(ctx, prop.Proposed, "calib -auto self-test win"); err != nil {
+			return err
+		}
+		printJSON(map[string]any{"applied": prop.Proposed})
+	}
+	return nil
 }
 
 // mustAbs resolves p against the CWD for subprocess env handoff.
