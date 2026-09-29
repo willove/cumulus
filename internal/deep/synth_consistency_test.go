@@ -34,29 +34,50 @@ func (s *stubConsistency) CheckConsistency(_ context.Context, _ string, windows 
 }
 
 func TestConsistencyGateWindows(t *testing.T) {
-	mk := func(src string, score float64) mcs.Sample {
-		return mcs.Sample{Source: src, Score: score, Content: "窗口内容。"}
+	mk := func(src string, score, start int) mcs.Sample {
+		return mcs.Sample{Source: src, Score: float64(score), Start: start, Content: "窗口内容。"}
+	}
+	corpus := []source.Source{
+		{ID: "a", Body: "《题》 作者：甲。全文：正文甲正文甲。"},
+		{ID: "b", Body: "《题》 作者：乙。全文：正文乙正文乙。"},
 	}
 	// Single source (even many windows) → no check possible.
-	if got := consistencyGateWindows([]mcs.Sample{mk("a", 9), mk("a", 8), mk("a", 7)}); got != nil {
+	if got := consistencyGateWindows([]mcs.Sample{mk("a", 9, 500), mk("a", 8, 700), mk("a", 7, 900)}, corpus); got != nil {
 		t.Fatalf("single source must not gate, got %d windows", len(got))
 	}
 	// Sub-cover windows never count as disagreeing evidence.
-	if got := consistencyGateWindows([]mcs.Sample{mk("a", 9), mk("b", 3.9)}); got != nil {
+	if got := consistencyGateWindows([]mcs.Sample{mk("a", 9, 500), mk("b", 3, 500)}, corpus); got != nil {
 		t.Fatalf("sub-cover second source must not gate, got %d", len(got))
 	}
-	// Two sources → the top window of each, in first-seen order.
-	got := consistencyGateWindows([]mcs.Sample{mk("a", 9), mk("b", 8), mk("a", 5), mk("b", 8.5)})
-	if len(got) != 2 || got[0].Source != "a" || got[0].Score != 9 || got[1].Source != "b" || got[1].Score != 8.5 {
-		t.Fatalf("two-source pick wrong: %+v", got)
+	// Two sources, top windows mid-body → EACH gains its head sample (the
+	// agreeprobe discrimination: the divergence signal lives at the head).
+	got := consistencyGateWindows([]mcs.Sample{mk("a", 9, 500), mk("b", 8, 500), mk("a", 5, 900), mk("b", 8, 600)}, corpus)
+	if len(got) != 4 {
+		t.Fatalf("want top+head per source (4 windows), got %d: %+v", len(got), got)
 	}
-	// Cap at four sources.
+	heads := 0
+	for _, w := range got {
+		if w.Start == 0 && strings.Contains(w.Content, "作者：") {
+			heads++
+		}
+	}
+	if heads != 2 {
+		t.Fatalf("want one head window per source, got %d: %+v", heads, got)
+	}
+	// A top window already covering the head must not duplicate it.
+	got = consistencyGateWindows([]mcs.Sample{mk("a", 9, 0), mk("b", 8, 0)}, corpus)
+	if len(got) != 2 {
+		t.Fatalf("head-covering tops stay single, got %d: %+v", len(got), got)
+	}
+	// Cap at three sources.
 	in := make([]mcs.Sample, 0, 6)
+	corpus6 := []source.Source{}
 	for _, s := range []string{"a", "b", "c", "d", "e", "f"} {
-		in = append(in, mk(s, 9))
+		in = append(in, mk(s, 9, 500))
+		corpus6 = append(corpus6, source.Source{ID: s, Body: "头。" + strings.Repeat("正文。", 200)})
 	}
-	if got := consistencyGateWindows(in); len(got) != 4 {
-		t.Fatalf("cap = %d, want 4", len(got))
+	if got := consistencyGateWindows(in, corpus6); len(got) > 6 {
+		t.Fatalf("cap = %d windows, want <= 6 (3 sources x top+head)", len(got))
 	}
 }
 

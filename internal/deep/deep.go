@@ -832,7 +832,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		// kept windows span sources is exactly as contestable as a DEEP one
 		// (the adversarial yardsticks' FAST rows were ALL wrong), and this
 		// is the only return a non-escalating answer takes.
-		if contested, why := e.consistencyGate(ctx, query, base.Answer.Samples); contested {
+		if contested, why := e.consistencyGate(ctx, query, base.Answer.Samples, citeCorpus); contested {
 			markContested(&res.Answer, why)
 		}
 		return res, nil
@@ -2110,7 +2110,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// Pre-synthesis consistency gate (收益层 2, CLUS_SYNTH_CONSISTENCY,
 	// default OFF): the ONE place every DEEP answer exits, after all
 	// refinement passes, before the caller serves/persists it.
-	if contested, why := e.consistencyGate(ctx, query, kept); contested {
+	if contested, why := e.consistencyGate(ctx, query, kept, sources); contested {
 		markContested(&best, why)
 	}
 	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
