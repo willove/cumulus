@@ -20,6 +20,7 @@ import (
 	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/abstain"
 	"github.com/willove/cumulus/internal/bucket"
+	"github.com/willove/cumulus/internal/calib"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/fast"
@@ -212,6 +213,13 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		dE.Consistency = &llm.AigateConsistency{Client: stack.chat}
 	}
 	dE.Synth = stack.synth
+	// Learning takeover point (R1, cognitive engine brick 1): an applied
+	// calibration line from the calib loop wins over env/const; env remains
+	// the operator's manual override simply by the key being absent
+	// (calib -apply wrote it; delete the key to fall back).
+	if line, ok, err := calib.NewStore(c).Load(ctx); err == nil && ok {
+		dE.EscalateBelow = line
+	}
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
 	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, ss.usage)

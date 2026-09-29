@@ -19,6 +19,7 @@ import (
 
 	"github.com/willove/cumulus/internal/adapt"
 	"github.com/willove/cumulus/internal/affinity"
+	"github.com/willove/cumulus/internal/calib"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/eval"
@@ -867,6 +868,50 @@ func main() {
 		// budget must not cap a multi-item batch.
 		if err := evalRun(context.Background(), c, st, sources, namespace, *file, *out, *judgeOn, *priorRank, *l1pre, *limit, *tag); err != nil {
 			fatal(err)
+		}
+
+	case "calib":
+		// 认知引擎第一砖：挖档→提线→（配对自检）→受控应用。record-only
+		// 除非显式 -apply；判定规则与真实判例钉在 internal/calib。
+		fs := flag.NewFlagSet("calib", flag.ExitOnError)
+		rows := fs.String("rows", "", "result rows jsonl to mine (conf/mode/eval.correct)")
+		rowsB := fs.String("rows-b", "", "paired arm rows jsonl: with -rows becomes the self-test verdict")
+		target := fs.Float64("target", 0.75, "serve-band correct-rate target for a proposal")
+		minN := fs.Int("min-n", 10, "minimum band support to propose")
+		current := fs.Float64("current", deep.EscalateBelow, "current line the proposal challenges")
+		line := fs.Float64("line", 0, "the proposal's line to apply (refuses blind applies)")
+		apply := fs.Bool("apply", false, "write -line into the store takeover point (requires a winning verdict)")
+		_ = fs.Parse(rest)
+		switch {
+		case *rows != "" && *rowsB != "":
+			a, err := calib.ReadPair(*rows, *rowsB)
+			if err != nil {
+				fatal(err)
+			}
+			v := calib.Decide(a)
+			printJSON(v)
+			if *apply {
+				if !v.Apply {
+					fatal(fmt.Errorf("calib: refusing to -apply a rejected verdict"))
+				}
+				if *line <= 0 || *line > 0.95 {
+					fatal(fmt.Errorf("calib: -apply needs the proposal's -line (0,0.95]"))
+				}
+				if err := calib.NewStore(c).Save(ctx, *line, "paired self-test win"); err != nil {
+					fatal(err)
+				}
+				printJSON(map[string]any{"applied": *line})
+			}
+		case *rows != "":
+			eps, err := calib.ReadEpisodes(*rows)
+			if err != nil {
+				fatal(err)
+			}
+			p, ok := calib.Propose(eps, *current, *target, *minN)
+			p.Bands = nil // keep the printed proposal compact
+			printJSON(map[string]any{"proposal": p, "proposed": ok})
+		default:
+			fatal(fmt.Errorf("calib: -rows required (mine), or -rows + -rows-b (self-test verdict)"))
 		}
 
 	case "delete":
