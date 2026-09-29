@@ -879,6 +879,7 @@ func main() {
 		rows := fs.String("rows", "", "result rows jsonl to mine (conf/mode/eval.correct)")
 		usage := fs.Bool("usage", false, "mine production episodes from the clus_usage ledger instead of a rows file")
 		auto := fs.Bool("auto", false, "R3: run the whole loop — mine, propose, SELF-RUN the paired test (paired-ab.sh), decide, optionally apply")
+		guardrail := fs.String("guardrail", "", "guardrail mode: baseline|check with -rows")
 		set := fs.String("set", "", "frozen set dir (items.jsonl+corpus.jsonl) the self-test runs on")
 		rowsB := fs.String("rows-b", "", "paired arm rows jsonl: with -rows becomes the self-test verdict")
 		target := fs.Float64("target", 0.75, "serve-band correct-rate target for a proposal")
@@ -887,6 +888,44 @@ func main() {
 		line := fs.Float64("line", 0, "the proposal's line to apply (refuses blind applies)")
 		apply := fs.Bool("apply", false, "write -line into the store takeover point (requires a winning verdict)")
 		_ = fs.Parse(rest)
+		if *guardrail != "" {
+			// The guardrail is a pure ALARM, never a teacher: judge-free
+			// metrics (ev_rec set membership, tokens, p90 latency) against
+			// a stored baseline with fixed tolerances.
+			m, err := calib.ReadMetrics(*rows)
+			if err != nil {
+				fatal(err)
+			}
+			bl := filepath.Join("var", "guardrail", "baseline.json")
+			switch *guardrail {
+			case "baseline":
+				b, err := json.MarshalIndent(m, "", "  ")
+				if err != nil {
+					fatal(err)
+				}
+				if err := os.WriteFile(bl, append(b, '\n'), 0o644); err != nil {
+					fatal(err)
+				}
+				printJSON(m)
+			case "check":
+				raw, err := os.ReadFile(bl)
+				if err != nil {
+					fatal(fmt.Errorf("guardrail: no baseline (run guardrail.sh baseline): %w", err))
+				}
+				var base calib.GuardrailMetrics
+				if err := json.Unmarshal(raw, &base); err != nil {
+					fatal(err)
+				}
+				v := calib.CompareGuardrail(base, m, calib.DefaultGuardrailTolerances())
+				printJSON(v)
+				if !v.Pass {
+					os.Exit(1)
+				}
+			default:
+				fatal(fmt.Errorf("calib -guardrail: mode must be baseline|check"))
+			}
+			return
+		}
 		if *auto {
 			// R3: the loop runs its own experiment. The pair discipline is
 			// scripts/paired-ab.sh's (fresh stores, frozen set, judge) — the

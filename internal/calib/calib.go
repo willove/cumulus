@@ -207,9 +207,126 @@ type resultRow struct {
 	Conf  float64 `json:"conf"`
 	Eval  *struct {
 		Correct *bool `json:"correct"`
+		EvRec   *bool `json:"ev_rec"`
 	} `json:"eval"`
 	Tokens      int64 `json:"search_tokens"`
 	TokensAlias int64 `json:"tokens"`
+	LatencyMS   int64 `json:"latency_ms"`
+}
+
+// GuardrailMetrics is the judge-free health reading of one run: ev_rec
+// (citations ∩ gold set membership — no LLM anywhere), answered share,
+// tokens, and the p90 search latency.
+type GuardrailMetrics struct {
+	N        int     `json:"n"`
+	EvRec    int     `json:"ev_rec"`
+	Answered int     `json:"answered"`
+	Tokens   int64   `json:"tokens"`
+	LatP90MS int64   `json:"latency_p90_ms"`
+}
+
+// ReadMetrics aggregates one run's result rows into guardrail metrics.
+func ReadMetrics(path string) (GuardrailMetrics, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return GuardrailMetrics{}, err
+	}
+	defer f.Close()
+	var m GuardrailMetrics
+	var lats []int64
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var r resultRow
+		if err := json.Unmarshal(line, &r); err != nil {
+			return GuardrailMetrics{}, fmt.Errorf("%s: %w", path, err)
+		}
+		if r.Eval == nil {
+			continue
+		}
+		m.N++
+		if r.Eval.EvRec != nil && *r.Eval.EvRec {
+			m.EvRec++
+		}
+		if r.Eval.Correct != nil {
+			// answered is judged by an non-empty reference match OR the
+			// judge having run; the honest cheap proxy: any row that was
+			// scored counts as answered-attempted, ev_rec carries quality.
+			m.Answered++
+		}
+		t := r.Tokens
+		if t == 0 {
+			t = r.TokensAlias
+		}
+		m.Tokens += t
+		lats = append(lats, r.LatencyMS)
+	}
+	if err := sc.Err(); err != nil {
+		return GuardrailMetrics{}, err
+	}
+	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	if len(lats) > 0 {
+		m.LatP90MS = lats[(9*len(lats))/10]
+	}
+	return m, nil
+}
+
+// GuardrailVerdict is the pass/fail reading with the failing reasons listed.
+type GuardrailVerdict struct {
+	Pass    bool     `json:"pass"`
+	Reasons []string `json:"reasons,omitempty"`
+}
+
+// GuardrailTolerances: the guardrail alarms on REAL regressions, not noise —
+// ev_rec may drop at most one item, tokens may grow at most 15%, p90 latency
+// at most 30%. Anything tighter would make the alarm itself the teacher.
+type GuardrailTolerances struct {
+	EvRecSlack int     // items
+	TokRatio   float64 // ceiling
+	LatRatio   float64 // ceiling
+}
+
+// DefaultGuardrailTolerances is the standing tolerance set.
+func DefaultGuardrailTolerances() GuardrailTolerances {
+	return GuardrailTolerances{EvRecSlack: 1, TokRatio: 1.15, LatRatio: 1.30}
+}
+
+// CompareGuardrail reads the current metrics against the baseline.
+func CompareGuardrail(base, cur GuardrailMetrics, tol GuardrailTolerances) GuardrailVerdict {
+	v := GuardrailVerdict{Pass: true}
+	if cur.N == 0 {
+		v.Pass = false
+		v.Reasons = append(v.Reasons, "current run has no scored rows")
+		return v
+	}
+	if cur.EvRec < base.EvRec-tol.EvRecSlack {
+		v.Pass = false
+		v.Reasons = append(v.Reasons, fmt.Sprintf("ev_rec %d→%d (floor %d)", base.EvRec, cur.EvRec, base.EvRec-tol.EvRecSlack))
+	}
+	tokR := 1.0
+	if base.Tokens > 0 {
+		tokR = float64(cur.Tokens) / float64(base.Tokens)
+	}
+	if tokR > tol.TokRatio {
+		v.Pass = false
+		v.Reasons = append(v.Reasons, fmt.Sprintf("tokens %.2f× (ceiling %.2f×)", tokR, tol.TokRatio))
+	}
+	latR := 1.0
+	if base.LatP90MS > 0 {
+		latR = float64(cur.LatP90MS) / float64(base.LatP90MS)
+	}
+	if latR > tol.LatRatio {
+		v.Pass = false
+		v.Reasons = append(v.Reasons, fmt.Sprintf("latency p90 %.2f× (ceiling %.2f×)", latR, tol.LatRatio))
+	}
+	if v.Pass {
+		v.Reasons = append(v.Reasons, "ev_rec/tokens/latency within tolerance")
+	}
+	return v
 }
 
 // ReadEpisodes bridges one arm's result rows into episodes.

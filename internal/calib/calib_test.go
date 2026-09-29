@@ -2,6 +2,8 @@ package calib
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/willove/cumulite"
@@ -156,5 +158,64 @@ func TestReadUsagePseudoLabels(t *testing.T) {
 	}
 	if e := byConf[0.58]; e.Correct {
 		t.Fatalf("wobbly row mapped wrong: %+v", e)
+	}
+}
+
+// TestCompareGuardrailBoundaries pins the alarm's edge behaviour: exactly at
+// tolerance passes, one past it fails — an alarm tighter than its tolerance
+// would become a teacher (the trap this guardrail exists to prevent).
+func TestCompareGuardrailBoundaries(t *testing.T) {
+	tol := DefaultGuardrailTolerances()
+	base := GuardrailMetrics{N: 12, EvRec: 6, Tokens: 100000, LatP90MS: 20000}
+
+	// Exactly at every tolerance: ev_rec −1, tokens ×1.15, p90 ×1.30.
+	atEdge := GuardrailMetrics{N: 12, EvRec: 5, Tokens: 115000, LatP90MS: 26000}
+	if v := CompareGuardrail(base, atEdge, tol); !v.Pass {
+		t.Fatalf("at-tolerance must pass: %+v", v)
+	}
+	pastEv := atEdge
+	pastEv.EvRec = 4
+	if v := CompareGuardrail(base, pastEv, tol); v.Pass {
+		t.Fatal("ev_rec two items down must alarm")
+	}
+	pastTok := atEdge
+	pastTok.Tokens = 115001
+	if v := CompareGuardrail(base, pastTok, tol); v.Pass {
+		t.Fatal("tokens past ceiling must alarm")
+	}
+	pastLat := atEdge
+	pastLat.LatP90MS = 26001
+	if v := CompareGuardrail(base, pastLat, tol); v.Pass {
+		t.Fatal("latency past ceiling must alarm")
+	}
+	if v := CompareGuardrail(base, GuardrailMetrics{}, tol); v.Pass {
+		t.Fatal("empty current run must alarm")
+	}
+	zeroSide := GuardrailMetrics{N: 12, EvRec: 5, Tokens: 1, LatP90MS: 1}
+	if v := CompareGuardrail(GuardrailMetrics{N: 12}, zeroSide, tol); !v.Pass {
+		t.Fatalf("zero baseline must not false-alarm: %+v", v)
+	}
+}
+
+// TestReadMetricsAggregation pins the row→metrics bridge: ev_rec counts,
+// tokens prefer search_tokens, p90 lands on the index floor.
+func TestReadMetricsAggregation(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/rows.jsonl"
+	rows := []string{
+		`{"id":"a","mode":"DEEP","eval":{"ev_rec":true,"correct":true},"search_tokens":100,"latency_ms":1000}`,
+		`{"id":"b","mode":"DEEP","eval":{"ev_rec":false,"correct":false},"search_tokens":300,"latency_ms":3000}`,
+		`{"id":"c","mode":"FAST","eval":{"ev_rec":true},"tokens":50,"latency_ms":2000}`,
+		`{"id":"d","mode":"DEEP"}`,
+	}
+	if err := os.WriteFile(p, []byte(strings.Join(rows, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ReadMetrics(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.N != 3 || m.EvRec != 2 || m.Tokens != 450 || m.LatP90MS != 3000 {
+		t.Fatalf("metrics wrong: %+v", m)
 	}
 }
