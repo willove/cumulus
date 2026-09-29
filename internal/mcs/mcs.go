@@ -25,7 +25,6 @@ type Sample struct {
 	Source    string   `json:"source"`
 	Arm       string   `json:"arm,omitempty"`     // lex | local | global
 	Covers    []string `json:"covers,omitempty"`  // fact ids this window supports
-	Conflicts []string `json:"conflicts,omitempty"` // evidence ids this window contradicts (v3b c_d)
 	Score     float64  `json:"score"`
 	Reasoning string   `json:"reasoning"`
 }
@@ -49,52 +48,6 @@ type Scorer interface {
 // call count does not grow with K.
 type FactAware interface {
 	ScoreWithFacts(ctx context.Context, query string, facts []string, s Sample) (score float64, reasoning string, covers []string, err error)
-}
-
-// BatchScorer is an optional Scorer extension (Jev-Mem v3a): score every
-// window of a round in ONE model call. len(results) must equal len(samples)
-// and results[i] belongs to samples[i]; a whole-batch failure returns err
-// (the sampler then reports every window failed — the same honest
-// total-failure contract the per-window path has).
-type BatchScorer interface {
-	ScoreBatch(ctx context.Context, query string, facts []string, samples []Sample) ([]BatchResult, error)
-}
-
-// BatchResult gains Conflicts on the v3b path: the ids ("K1".. digest
-// entries, "S1".. batch peers) this window directly contradicts. Novelty and
-// Support are parsed for schema honesty but deliberately NOT carried onto
-// Sample — nothing consumes them yet, and telemetry-only fields on a struct
-// every stage copies would be dead weight until a mechanism earns them.
-type BatchResult struct {
-	Score     float64
-	Reasoning string
-	Covers    []string
-	Conflicts []string
-}
-
-// ConflictBatchScorer is the v3b extension of BatchScorer (Jev-Mem c_d): the
-// batched call ALSO sees a digest of the evidence already kept this query, so
-// contradiction marks are cross-file, not just within one batch. Results
-// carry Conflicts the caller may gate stopping on.
-type ConflictBatchScorer interface {
-	ScoreBatchConflict(ctx context.Context, query string, facts []string, samples, prior []Sample) ([]BatchResult, error)
-}
-
-// ScorerBatch reports whether the batched scoring path is enabled. Opt-in:
-// batching changes the prompt shape the model sees (N windows in one call),
-// so it earns its default through a paired A/B like every other behavioural
-// knob (scripts/paired-ab.sh CLUS_MCS_SCORER_BATCH 0 1 scorebatch).
-func ScorerBatch() bool {
-	n, _ := envInt("CLUS_MCS_SCORER_BATCH")
-	return n == 1
-}
-
-// ScorerConflict reports whether the conflict-aware batched path (v3b) is
-// enabled. It implies the batched path; on its own (batch off) it is inert —
-// the per-window call shape cannot see cross-window contradiction.
-func ScorerConflict() bool {
-	n, _ := envInt("CLUS_SCORER_CONFLICT")
-	return n == 1
 }
 
 // KeywordScorer is a deterministic offline stub: score = keyword hit density
@@ -310,12 +263,6 @@ type Sampler struct {
 	// information-directed λ weighting). 0 or 1 = normal arm economics.
 	// It is advisory: every arm keeps its one-slot floor.
 	ExploreBoost float64
-	// Prior is the evidence already kept this query, handed to a
-	// ConflictBatchScorer as the Current Evidence Digest (v3b c_d): the
-	// scorer marks which of these the round's windows contradict. The
-	// sampler itself never mutates it — the DEEP loop owns the kept set and
-	// refreshes this before each file.
-	Prior []Sample
 }
 
 // Arms are the complementary proposal families: lex anchors on the
@@ -679,56 +626,6 @@ func (s *Sampler) evalAll(ctx context.Context, query string, in []Sample) ([]Sam
 	fa, _ := s.Scorer.(FactAware)
 	out := make([]Sample, len(in))
 	errs := make([]error, len(in))
-
-	// Batched path (v3a, CLUS_MCS_SCORER_BATCH=1): one call for the whole
-	// round instead of one per window. On a batch error every window is an
-	// observation failure — falling through to the per-window path would
-	// spend N more calls on a scorer that just failed, and silently
-	// degrading to unbatched would hide the flag's failure mode from the
-	// A/B that gates it.
-	//
-	// v3b (CLUS_SCORER_CONFLICT=1, implies batch): the conflict-aware call
-	// also receives the Prior digest, and its Conflicts marks land on the
-	// samples for the caller's stop gate. Selection is highest-first so the
-	// flag pair (batch=1, conflict=0) is exactly v3a.
-	if len(in) > 1 {
-		if cs, ok := s.Scorer.(ConflictBatchScorer); ok && ScorerConflict() {
-			res, err := cs.ScoreBatchConflict(ctx, query, s.FactHints, in, s.Prior)
-			if err == nil {
-				for i := range in {
-					sm := in[i]
-					sm.Score, sm.Reasoning, sm.Covers, sm.Conflicts = res[i].Score, res[i].Reasoning, res[i].Covers, res[i].Conflicts
-					out[i] = sm
-				}
-				return out, nil
-			}
-			for i := range in {
-				sm := in[i]
-				sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
-				out[i] = sm
-				errs[i] = err
-			}
-			return out, s.batchFailure(in, errs)
-		}
-		if bs, ok := s.Scorer.(BatchScorer); ok && ScorerBatch() {
-			res, err := bs.ScoreBatch(ctx, query, s.FactHints, in)
-			if err != nil {
-				for i := range in {
-					sm := in[i]
-					sm.Score, sm.Reasoning, sm.Covers = ScoreFailed, "scorer error: "+err.Error(), nil
-					out[i] = sm
-					errs[i] = err
-				}
-				return out, s.batchFailure(in, errs)
-			}
-			for i := range in {
-				sm := in[i]
-				sm.Score, sm.Reasoning, sm.Covers = res[i].Score, res[i].Reasoning, res[i].Covers
-				out[i] = sm
-			}
-			return out, nil
-		}
-	}
 
 	scoreOne := func(i int) {
 		sm := in[i]

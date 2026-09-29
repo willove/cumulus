@@ -207,12 +207,6 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		}
 	}
 	dE.Scorer = stack.scorer
-	// Pre-synthesis consistency gate (收益层 2): wired unconditionally —
-	// the gate itself is flag-gated (CLUS_SYNTH_CONSISTENCY) and only pays
-	// when the kept set actually spans sources.
-	if stack.chat != nil {
-		dE.Consistency = &llm.AigateConsistency{Client: stack.chat}
-	}
 	dE.Synth = stack.synth
 	// Learning takeover point (R1, cognitive engine brick 1): an applied
 	// calibration line from the calib loop wins over env/const; env remains
@@ -224,13 +218,6 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refinerFor(stack.chat))
 	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, ss.usage)
-	// Atomic-fact decomposer (P1-4). Opt-in via CLUS_DECOMPOSE so an operator
-	// pays one extra call per query deliberately, and so the offline/off stubs
-	// keep the deterministic heuristic.
-	if stack.facts != nil && envFlag("CLUS_DECOMPOSE") {
-		dE.Decompose = stack.facts
-		dE.DecomposeBudget = 1
-	}
 	// Independent search token budget (3.2): judge never draws from this.
 	if stack.chat != nil {
 		// Per-STACK budget: serve builds one stack per request, eval one

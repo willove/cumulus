@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/willove/cumulus/internal/abstain"
-	"github.com/willove/cumulus/internal/belief"
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/fast"
@@ -240,7 +239,6 @@ type Result struct {
 type StageTokens struct {
 	Rewrite   int64 `json:"rewrite,omitempty"`
 	Fast      int64 `json:"fast,omitempty"`
-	Decompose int64 `json:"decompose,omitempty"`
 	Rank      int64 `json:"rank,omitempty"`
 	Score     int64 `json:"score,omitempty"`
 	Widen     int64 `json:"widen,omitempty"`
@@ -257,11 +255,6 @@ type Engine struct {
 	// Synth renders DEEP summaries (synthesize_roi). nil = deterministic
 	// template; production wires llm.AigateSynthesizer.
 	Synth fast.Synthesizer
-	// Consistency is the optional pre-synthesis evidence-agreement gate
-	// (CLUS_SYNTH_CONSISTENCY, default OFF): when the kept set spans >=2
-	// sources, one call checks the windows TOGETHER for same-fact-point
-	// divergence; a contested answer is marked and hedged (markContested).
-	Consistency ConsistencyChecker
 	// SampleContext is the session fallback for the sampler (see
 	// fast.Engine.SampleContext): when the raw query keeps no window in an
 	// admitted document, retry once with the thread's recent questions
@@ -291,24 +284,7 @@ type Engine struct {
 	// Widen re-admits candidate files mid-search under the same contract
 	// (Sirchmunk ReAct 对齐；nil 关闭扩征，离线门可用).
 	Widen func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error)
-	// Decompose replaces the deterministic facts.Build heuristic with an LLM
-	// requirement decomposer (perf-plan §6 / P1-4).
-	//
-	// Why the swap matters: the heuristic yields K=1 for 124 of 136 measured
-	// real queries, and every one of its 12 K>1 splits is a miscut inside a
-	// book title, a defined term, or an enumeration. A miscut fact is a
-	// PHANTOM requirement — unreachable, so NeedContinue never clears and the
-	// loop burns its whole budget on it.
-	//
-	// nil keeps facts.Build, so every offline gate and the offline stub stack
-	// are byte-for-byte unchanged (D6: mechanism gates never touch a model).
-	Decompose facts.Decomposer
-	// DecomposeBudget bounds the LLM decomposer to one call per query; it is
-	// here so the cost is a declared engine property rather than an accident
-	// of the decomposer's implementation.
-	DecomposeBudget int
-
-	// fxMemoQuery / fxMemo / decomposeUsed back Engine.decompose.
+	// fxMemoQuery / fxMemo back Engine.decompose.
 	//
 	// The memo is keyed by the EFFECTIVE query, not assumed per-request: an
 	// Engine is reused across queries in real call paths (and lazy_test.go
@@ -318,7 +294,6 @@ type Engine struct {
 	fxMemoQuery   string
 	fxMemo        []facts.Fact
 	fxMemoSet     bool
-	decomposeUsed int
 	// TokenBudget is an independent stop (LENS Def 3 / Remark 2): when > 0
 	// and TokensUsed is wired, the DEEP loop checks remaining budget before
 	// scoring each admitted file. Judge tokens never enter this budget.
@@ -511,53 +486,15 @@ func (e *Engine) scorer() mcs.Scorer {
 // Engine and memoizes the result, because thresholdFor (in askEffective) and the
 // oracle hints + coverage report (in runDeep) must agree on the same K — two
 // independent decompositions would let the stop line and the coverage report
-// talk about different requirement sets.
-//
-// Degradation ladder, in order:
-//  1. no Decompose wired        → facts.Build (today's behaviour, byte-for-byte)
-//  2. LLM error / unreadable    → facts.Build, noted under Verbose
-//  3. LLM output fails the
-//     semantic-unit gate        → facts.Build
-//  4. budget exhausted (>=1)    → facts.Build
-//
-// The fallback is never "no requirements": a search with an empty requirement
-// set would silently disable the weakest-requirement stop.
-func (e *Engine) decompose(ctx context.Context, query string) []facts.Fact {
+// decompose is the deterministic requirement baseline with a per-query
+// memo. (The LLM decomposer swap was retired 2026-09-30: ab-decompose
+// measured negative — ev_rec 1:0 against, ~6% tokens — and R5 says archived
+// verdicts leave the codebase.)
+func (e *Engine) decompose(_ context.Context, query string) []facts.Fact {
 	if e.fxMemoSet && e.fxMemoQuery == query {
 		return e.fxMemo
 	}
-	fx := facts.Build(query) // the deterministic baseline, also the fallback
-	if e.Decompose != nil {
-		if e.DecomposeBudget > 0 && e.decomposeUsed >= e.DecomposeBudget {
-			if e.Verbose != nil {
-				e.Verbose("decompose: budget spent, heuristic K=%d", len(fx))
-			}
-			e.fxMemoQuery, e.fxMemo, e.fxMemoSet = query, fx, true
-			return fx
-		}
-		e.decomposeUsed++
-		end := e.begin()
-		parts, err := e.Decompose.Decompose(ctx, query)
-		if e.stageTok != nil {
-			end(&e.stageTok.Decompose)
-		}
-		if err != nil {
-			if e.Verbose != nil {
-				e.Verbose("decompose: %v — heuristic K=%d", err, len(fx))
-			}
-		} else if got, why := facts.BuildPartsWhy(query, parts); len(got) > 0 {
-			fx = got
-		} else if e.Verbose != nil {
-			if len(parts) == 0 {
-				// The aigate layer pre-gates its own output, so an empty slice
-				// here covers both a garbled model answer and its own veto —
-				// the parts it saw are not recoverable through this interface.
-				e.Verbose("decompose: no usable requirements — heuristic K=%d", len(fx))
-			} else {
-				e.Verbose("decompose: %d parts vetoed (%s) — heuristic K=%d", len(parts), why, len(fx))
-			}
-		}
-	}
+	fx := facts.Build(query)
 	e.fxMemoQuery, e.fxMemo, e.fxMemoSet = query, fx, true
 	return fx
 }
@@ -827,13 +764,6 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		res.Citations.Legend = legend(res.Citations, false)
 		if base.Answer.SourceID != "" {
 			res.Admitted = []string{base.Answer.SourceID}
-		}
-		// The served-FAST half of the consistency gate: a FAST answer whose
-		// kept windows span sources is exactly as contestable as a DEEP one
-		// (the adversarial yardsticks' FAST rows were ALL wrong), and this
-		// is the only return a non-escalating answer takes.
-		if contested, why := e.consistencyGate(ctx, query, base.Answer.Samples, citeCorpus); contested {
-			markContested(&res.Answer, why)
 		}
 		return res, nil
 	}
@@ -1266,22 +1196,6 @@ func sufficientLine() float64 {
 	return f
 }
 
-// conflictMarked reports whether any kept window carries an unresolved
-// contradiction mark (v3b c_d). Kept windows are all at/above the cover line,
-// so a mark here is a live cross-evidence contradiction, not noise.
-func conflictMarked(kept []mcs.Sample) bool { return conflictCount(kept) > 0 }
-
-// conflictCount is the number of kept windows carrying Conflicts marks.
-func conflictCount(kept []mcs.Sample) int {
-	n := 0
-	for _, sm := range kept {
-		if len(sm.Conflicts) > 0 {
-			n++
-		}
-	}
-	return n
-}
-
 // budgetRiskFraction is the share of the per-query token budget past which a
 // merely-covering window is accepted as the answer. It is a fraction, not a
 // token count, so it scales with whatever budget an operator sets.
@@ -1433,33 +1347,6 @@ func coveredFacts(r facts.Report) int {
 	return n
 }
 
-// beliefObserve is one file's observation strength on the loop's own
-// numbers: windows kept (saturating at 3), the best window score on the
-// 0-10 oracle scale, and this file's marginal fact coverage. The three
-// weights are UNPROVEN and env-adjacent; they join the θ family's
-// retune-per-domain discipline (docs/belief-update-design.md §2.3).
-func beliefObserve(kept int, best float64, newCovers, factsN int) float64 {
-	k := float64(kept) / 3
-	if k > 1 {
-		k = 1
-	}
-	b := best / 10
-	if b > 1 {
-		b = 1
-	}
-	c := 0.0
-	if factsN > 0 {
-		c = float64(newCovers) / float64(factsN)
-		if c > 1 {
-			c = 1
-		}
-	}
-	o := 0.5*k + 0.3*b + 0.2*c
-	if o > 1 {
-		o = 1
-	}
-	return o
-}
 
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
 	// Sampling telemetry: every admission/widen/self-correct SampleBody call
@@ -1518,11 +1405,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		}
 		smp := mcs.New(cfg, e.scorer())
 		smp.FactHints = hints
-		// v3b c_d: every sampler built mid-loop sees the evidence kept so
-		// far as the digest — the closure reads `kept` at call time, so each
-		// file's scoring call sees the previous files' windows. Read-only by
-		// contract (Sampler.Prior).
-		smp.Prior = kept
 		return smp
 	}
 	// Admission order matters at scale: on a 10k-article corpus the caller's
@@ -1531,27 +1413,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// the caller's fast engine carries the same cascade the FAST tier uses —
 	// then explore in relevance order (Sirchmunk Phase-1 对齐).
 	ranked := e.rankAdmission(ctx, query, sources, affinity)
-	// Candidate-region belief (CLUS_DEEP_BELIEF, default OFF): the DEEP
-	// loop's update half. Each file's observation (windows kept, best
-	// score, fact-cover marginal) folds into a posterior that reorders the
-	// widening pass — propose-observe-update instead of
-	// propose-propose-propose. Off until the paired A/B earns it
-	// (docs/belief-update-design.md); kappa is the observation strength.
-	var blf *belief.Belief
-	if os.Getenv("CLUS_DEEP_BELIEF") == "1" {
-		kappa := 0.5
-		if v := os.Getenv("CLUS_DEEP_BELIEF_KAPPA"); v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f <= 1 {
-				kappa = f
-			}
-		}
-		ids := make([]string, len(ranked))
-		for i, s := range ranked {
-			ids[i] = s.ID
-		}
-		blf = belief.New(belief.PriorFromRank(ids), kappa)
-	}
-
 	// D1: widen excludes only files this run actually attempted — not the
 	// full candidate list (L1Pre=false used to pass the whole corpus in and
 	// starve the extra budget).
@@ -1600,7 +1461,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	pulled := 0
 	for qi := 0; qi < len(queue); qi++ {
 		s := queue[qi]
-		coveredBefore := coveredFacts(rep)
 		if cancelled(ctx) {
 			break
 		}
@@ -1628,19 +1488,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		// money are finite" in the stop condition itself, instead of tuning a
 		// generosity constant — and with no budget set the behaviour is exactly
 		// what it was, so nothing changes until an operator sets one.
-		//
-		// v3b c_d (CLUS_SCORER_CONFLICT, default OFF): an UNRESOLVED
-		// contradiction among the kept windows vetoes the sufficient exit —
-		// the paper's third stop leg. Every kept window is at/above the cover
-		// line by construction, so any Conflicts mark on the kept set is a
-		// live contradiction, and stopping "sufficient" on contested evidence
-		// is how adversarial distractors win (paper's adversarial category:
-		// 0.962 vs 0.742 — the gap this leg is borrowed for). The loop then
-		// keeps hunting for a disambiguating window under the same
-		// budget/exhaustion caps as ever; if none arrives, synthesis handles
-		// the contested set exactly as it does today.
-		conflictGated := mcs.ScorerConflict() && conflictMarked(kept)
-		if rep.Complete && !conflictGated && (bestScore >= sufficientLine() ||
+		if rep.Complete && (bestScore >= sufficientLine() ||
 			(bestScore >= facts.CoverScoreLine() && e.budgetAtRisk())) {
 			reason = "sufficient"
 			if e.Verbose != nil {
@@ -1648,10 +1496,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 					bestScore, loops, e.budgetAtRisk())
 			}
 			break
-		}
-		if conflictGated && e.Verbose != nil {
-			e.Verbose("conflict gate: sufficient exit vetoed (%d contested windows), continuing",
-				conflictCount(kept))
 		}
 		loops++
 		if loops > e.MaxLoops {
@@ -1717,9 +1561,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			bestSrc = s
 		}
 		rep = report(kept)
-		if blf != nil {
-			blf.Observe(s.ID, beliefObserve(fileKept, localBest, coveredFacts(rep)-coveredBefore, len(fx)))
-		}
 		// The adjacency pull lives HERE, after the score is known and before
 		// the next candidate: a covering-grade block justifies one hop to each
 		// sibling, and the sibling lands at qi+1 so it is explored next. A
@@ -1839,7 +1680,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			if gap > 0 {
 				smp.ExploreBoost = 1 + 2*gap // 1.0 (no gap) → 3.0 (all open)
 			}
-			smp.Prior = kept // same c_d digest contract as newSampler
 			return smp
 		}
 		// 2.4: MissingQueries first, then two-call complements (Jaccard-filtered)
@@ -1948,26 +1788,8 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			endWn(&e.stageTok.Widen)
 		}
 		if werr == nil && len(extra) > 0 {
-			if blf != nil {
-				// The widening budget (3 files) makes ORDER the whole
-				// mechanism: re-rank by the belief posterior so the slots
-				// go to the neighbours of productive files, not to the
-				// same static keyword ranking that just failed.
-				byID := make(map[string]source.Source, len(extra))
-				ids := make([]string, 0, len(extra))
-				for _, s := range extra {
-					byID[s.ID] = s
-					ids = append(ids, s.ID)
-				}
-				reordered := make([]source.Source, 0, len(extra))
-				for _, id := range blf.Order(ids) {
-					reordered = append(reordered, byID[id])
-				}
-				extra = reordered
-			}
 			widenedDocs = append(widenedDocs, extra...)
 			for _, s := range extra {
-				coveredBeforeW := coveredFacts(rep)
 				if e.budgetHit() || cancelled(ctx) {
 					break
 				}
@@ -2002,9 +1824,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				if localBest > bestScore {
 					bestScore = localBest
 					bestSrc = s
-				}
-				if blf != nil {
-					blf.Observe(s.ID, beliefObserve(fileKept, localBest, coveredFacts(rep)-coveredBeforeW, len(fx)))
 				}
 			}
 			rep = report(kept)
@@ -2121,12 +1940,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 				best.Refused = fast.RefusedOf(e.Synth) || fast.RefusedOfSummary(best.Summary, e.Synth)
 			}
 		}
-	}
-	// Pre-synthesis consistency gate (收益层 2, CLUS_SYNTH_CONSISTENCY,
-	// default OFF): the ONE place every DEEP answer exits, after all
-	// refinement passes, before the caller serves/persists it.
-	if contested, why := e.consistencyGate(ctx, query, kept, sources); contested {
-		markContested(&best, why)
 	}
 	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
 }

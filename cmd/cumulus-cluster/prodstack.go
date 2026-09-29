@@ -11,7 +11,6 @@ import (
 
 	"github.com/willove/cumulus/internal/cluster"
 	"github.com/willove/cumulus/internal/deep"
-	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/mcs"
@@ -25,7 +24,6 @@ type prodStack struct {
 	synth    fast.Synthesizer
 	expander fast.KeywordExpander
 	rewriter deep.HistoryRewriter
-	facts    facts.Decomposer
 	chat     *llm.ChatClient
 	// embErr carries a strict-mode failure (CLUS_MINILM_REQUIRE=1 with the
 	// weights absent): the stack still builds with the offline fallback, but
@@ -108,7 +106,6 @@ func newProdStack() prodStack {
 	// title / defined term / enumeration, which become phantom requirements the
 	// DEEP loop can never satisfy. Wired ONLY when a live endpoint is present,
 	// so every offline gate keeps the deterministic path byte-for-byte (D6).
-	ps.facts = &llm.AigateFactBuilder{Client: chat}
 	// Embeddings switch only on an explicit AIGATE_EMBED_MODEL: the gateway's
 	// chat surface is the proven path, and a silent embed probe against a
 	// chat-only gateway would fail every search.

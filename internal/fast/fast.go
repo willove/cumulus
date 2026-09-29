@@ -48,11 +48,6 @@ type Answer struct {
 	// there — so the caller lets it stand at FAST.
 	Bridged bool `json:"bridged"`
 	Refused bool `json:"refused,omitempty"` // synthesis refused (insufficient evidence)
-	// Contested marks an answer whose evidence windows disagreed on the same
-	// fact point (the pre-synthesis consistency gate): the summary carries a
-	// divergence prefix naming BOTH claims, so the reader sees the split
-	// before the model's pick.
-	Contested bool `json:"contested,omitempty"`
 	// SynthDeferred marks an answer whose synthesis was deliberately skipped
 	// because its confidence sat below the escalation line the caller wired
 	// in (DeferBelow): a DEEP escalation re-synthesizes anyway, so the FAST

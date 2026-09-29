@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/cluster"
-	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/kb"
 	"github.com/willove/cumulus/internal/mcs"
@@ -25,14 +24,6 @@ func (s spendScorer) Score(_ context.Context, _ string, _ mcs.Sample) (float64, 
 	*s.n += 10
 	return 6, "covers f1", nil
 }
-
-type decomposeFunc func(context.Context, string) ([]string, error)
-
-func (f decomposeFunc) Decompose(ctx context.Context, q string) ([]string, error) {
-	return f(ctx, q)
-}
-
-var _ facts.Decomposer = decomposeFunc(nil)
 
 type synthFunc func(context.Context, string, []mcs.Sample) (string, error)
 
@@ -57,12 +48,6 @@ func TestStageTokensAttachedAtAskLevel(t *testing.T) {
 	e.Scorer = sc
 	e.Meter = func() int64 { return int64(spend) }
 
-	e.Decompose = decomposeFunc(func(context.Context, string) ([]string, error) {
-		spend += 8
-		return []string{"孙悟空的师父是谁", "学成了哪些本领"}, nil
-	})
-	e.DecomposeBudget = 1
-
 	q := "孙悟空的师父是谁？学成了哪些本领？" // licenses K=2
 	srcs := []source.Source{
 		source.New("blk/a", "md", "file://a", "a", "zh", q+" 相关记载。正文内容。", nil),
@@ -76,16 +61,13 @@ func TestStageTokensAttachedAtAskLevel(t *testing.T) {
 	if st == nil {
 		t.Fatal("with a Meter wired the result must carry stage tokens")
 	}
-	if st.Decompose != 8 {
-		t.Errorf("decompose bucket = %d, want 8", st.Decompose)
-	}
 	if st.Fast == 0 || st.Fast%10 != 0 {
 		t.Errorf("fast bucket = %d, want a multiple of 10 (the FAST tier scored through the same spendScorer)", st.Fast)
 	}
 	if st.Rewrite != 0 {
 		t.Errorf("rewrite bucket = %d, want 0 (no HistoryRewriter wired)", st.Rewrite)
 	}
-	if total := st.Fast + st.Decompose + st.Rank + st.Score + st.Synth + st.Widen; total != int64(spend) {
+	if total := st.Fast + st.Rank + st.Score + st.Synth + st.Widen; total != int64(spend) {
 		t.Errorf("buckets sum %d but meter moved %d — a paying call escaped attribution", total, spend)
 	}
 }
@@ -133,7 +115,7 @@ func TestStageTokensAttributeDeepStages(t *testing.T) {
 	if st.Synth == 0 || st.Synth%7 != 0 {
 		t.Errorf("synth bucket = %d, want a multiple of 7 (7 per synthesis)", st.Synth)
 	}
-	if total := st.Fast + st.Decompose + st.Rank + st.Score + st.Synth + st.Widen; total != int64(spend) {
+	if total := st.Fast + st.Rank + st.Score + st.Synth + st.Widen; total != int64(spend) {
 		t.Errorf("buckets sum %d but meter moved %d — a paying call escaped attribution", total, spend)
 	}
 }
