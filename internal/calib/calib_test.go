@@ -117,3 +117,39 @@ func TestStoreRoundtrip(t *testing.T) {
 		t.Fatalf("load = %v ok=%v err=%v", line, ok, err)
 	}
 }
+
+// TestReadUsagePseudoLabels pins the production-episode bridge: only FAST
+// rows WITH a sampled stab become episodes, and the Phase-0 threshold (0.5)
+// maps stability to the outcome pseudo-label.
+func TestReadUsagePseudoLabels(t *testing.T) {
+	c, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EnsureCollection(context.Background(), "clus_usage"); err != nil {
+		t.Fatal(err)
+	}
+	docs := []map[string]any{
+		{"mode": "FAST", "conf": 0.72, "stab": 0.67}, // stable → pseudo-correct
+		{"mode": "FAST", "conf": 0.58, "stab": 0.33}, // wobbly → pseudo-wrong
+		{"mode": "FAST", "conf": 0.90, "stab": -1.0}, // not sampled → skipped
+		{"mode": "FAST", "conf": 0.80},                // no stab column → skipped
+		{"mode": "DEEP", "conf": 0.77, "stab": 0.9},   // not the servable population
+	}
+	if _, err := c.Insert(context.Background(), "clus_usage", docs); err != nil {
+		t.Fatal(err)
+	}
+	eps, err := ReadUsage(context.Background(), c, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eps) != 2 {
+		t.Fatalf("episodes = %d, want 2: %+v", len(eps), eps)
+	}
+	if !eps[0].Correct || eps[0].Conf != 0.72 {
+		t.Fatalf("stable row mapped wrong: %+v", eps[0])
+	}
+	if eps[1].Correct || eps[1].Conf != 0.58 {
+		t.Fatalf("wobbly row mapped wrong: %+v", eps[1])
+	}
+}

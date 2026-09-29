@@ -19,6 +19,7 @@ const (
 	EvaluateBatch      = "evaluate_batch"
 	EvaluateDims       = "evaluate_dims"
 	EvidenceAgree      = "evidence_agree"
+	Paraphrase         = "paraphrase"
 	FastAnalyze        = "fast_analyze"
 	KeywordsMultilevel = "keywords_multilevel"
 	HistoryRewrite     = "history_rewrite"

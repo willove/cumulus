@@ -875,6 +875,7 @@ func main() {
 		// 除非显式 -apply；判定规则与真实判例钉在 internal/calib。
 		fs := flag.NewFlagSet("calib", flag.ExitOnError)
 		rows := fs.String("rows", "", "result rows jsonl to mine (conf/mode/eval.correct)")
+		usage := fs.Bool("usage", false, "mine production episodes from the clus_usage ledger instead of a rows file")
 		rowsB := fs.String("rows-b", "", "paired arm rows jsonl: with -rows becomes the self-test verdict")
 		target := fs.Float64("target", 0.75, "serve-band correct-rate target for a proposal")
 		minN := fs.Int("min-n", 10, "minimum band support to propose")
@@ -883,6 +884,14 @@ func main() {
 		apply := fs.Bool("apply", false, "write -line into the store takeover point (requires a winning verdict)")
 		_ = fs.Parse(rest)
 		switch {
+		case *usage:
+			eps, err := calib.ReadUsage(ctx, c, 0)
+			if err != nil {
+				fatal(err)
+			}
+			p, ok := calib.Propose(eps, *current, *target, *minN)
+			p.Bands = nil
+			printJSON(map[string]any{"proposal": p, "proposed": ok, "episodes": len(eps)})
 		case *rows != "" && *rowsB != "":
 			a, err := calib.ReadPair(*rows, *rowsB)
 			if err != nil {

@@ -172,7 +172,7 @@ func TestModelProfileFaceAndUsageLedger(t *testing.T) {
 	if err := engine.EnsureCollection(context.Background(), "clus_usage"); err != nil {
 		t.Fatal(err)
 	}
-	recordConsumption(context.Background(), engine, "law", "MiniMax-M3", 100, 50, 150, deep.Result{Mode: "FAST", Tokens: 150})
+	recordConsumption(context.Background(), engine, "law", "MiniMax-M3", 100, 50, 150, deep.Result{Mode: "FAST", Tokens: 150}, 0.67)
 	w, out = serveJSON(t, mux, http.MethodGet, "/v1/usage?model=MiniMax-M3", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("usage: %d %v", w.Code, out)

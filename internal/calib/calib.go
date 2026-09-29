@@ -318,3 +318,65 @@ func (s *Store) Load(ctx context.Context) (line float64, ok bool, err error) {
 	}
 	return r.Line, true, nil
 }
+
+// stabThreshold maps a self-play stability to the episode pseudo-label.
+// Phase 0 measured the correct-group at mean 0.62 and the wrong group at
+// 0.35 — 0.5 sits in the valley between them.
+const stabThreshold = 0.5
+
+// ReadUsage mines production episodes from the clus_usage ledger: FAST rows
+// sampled by the self-play probe carry a stab column, which becomes the
+// outcome pseudo-label. Unsampled rows (stab -1/absent) carry no outcome and
+// are skipped.
+func ReadUsage(ctx context.Context, c cumulite.Port, limit int) ([]Episode, error) {
+	if limit <= 0 || limit > 4000 {
+		limit = 4000
+	}
+	var out []Episode
+	skip := 0
+	for len(out) < limit {
+		res, err := c.Query(ctx, "clus_usage", contract.Query{Limit: 500, Skip: skip})
+		if err != nil {
+			if contract.IsNotFound(err) {
+				break
+			}
+			return nil, err
+		}
+		if len(res.Documents) == 0 {
+			break
+		}
+		skip += len(res.Documents)
+		for _, d := range res.Documents {
+			mode, _ := d["mode"].(string)
+			if !strings.HasPrefix(strings.ToUpper(mode), "FAST") {
+				continue
+			}
+			stab, ok := toFloat(d["stab"])
+			if !ok || stab < 0 {
+				continue // not sampled (or failed) — no outcome signal
+			}
+			conf, ok := toFloat(d["conf"])
+			if !ok {
+				continue
+			}
+			out = append(out, Episode{Conf: conf, Correct: stab >= stabThreshold, Mode: mode})
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// toFloat reads a JSON number that may have been stored as float64 or int64.
+func toFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case int64:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	}
+	return 0, false
+}

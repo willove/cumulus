@@ -385,7 +385,10 @@ const usageCollection = "clus_usage"
 // audits; deep history belongs to an export, not a UI page load.
 const usageScanCap = 4000
 
-func recordConsumption(ctx context.Context, c cumulite.Port, namespace, model string, prompt, completion, total int64, res deep.Result) {
+// recordConsumption writes one usage row. conf/stop_reason/cites ride the
+// search result; stab is the self-play stability when the query was sampled
+// (-1 = not sampled) — the episode store's pseudo-label column (calib loop).
+func recordConsumption(ctx context.Context, c cumulite.Port, namespace, model string, prompt, completion, total int64, res deep.Result, stab float64) {
 	if c == nil {
 		return
 	}
@@ -394,6 +397,8 @@ func recordConsumption(ctx context.Context, c cumulite.Port, namespace, model st
 		"ns": namespace, "model": model,
 		"tokens": total, "prompt_tokens": prompt, "completion_tokens": completion,
 		"mode": res.Mode, "reused": res.Reused, "latency_ms": res.LatencyMS,
+		"conf": res.Answer.Confidence, "stop_reason": res.StopReason,
+		"cites": len(res.Citations.Refs), "stab": stab,
 	}
 	_, _ = c.Insert(ctx, usageCollection, []map[string]any{doc})
 }

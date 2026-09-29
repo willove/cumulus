@@ -529,6 +529,29 @@ func (s *AigateScorer) ScoreBatch(ctx context.Context, query string, facts []str
 	return out, nil
 }
 
+// Paraphrase renders one meaning-preserving rewrite of the query (the
+// self-play perturbation generator). Reasoning endpoints leak <think> blocks
+// into content — stripped here the way the selfplay probe learned to. An
+// unusable rewrite returns the original query verbatim: a zero perturbation
+// participates in stability statistics instead of burning the sample.
+func Paraphrase(ctx context.Context, client *ChatClient, query string) (string, error) {
+	if client == nil || strings.TrimSpace(query) == "" {
+		return query, nil
+	}
+	raw, err := client.Complete(ctx, prompts.MustRender(prompts.Paraphrase, map[string]string{"query": query}))
+	if err != nil {
+		return "", err
+	}
+	if i := strings.LastIndex(raw, "</think>"); i >= 0 {
+		raw = raw[i+len("</think>"):]
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len([]rune(raw)) > 200 {
+		return query, nil
+	}
+	return raw, nil
+}
+
 // AigateConsistency is the pre-synthesis evidence-agreement gate (收益层 2):
 // one call sees the kept windows TOGETHER — the cross-window view the
 // per-window scorer structurally lacks (the v3b lesson) — and reports

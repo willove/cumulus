@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -320,6 +321,73 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 
 // runSearch executes one query and applies the CLI/HTTP shared side effects
 // (evidence marking, token accounting).
+// selfplayRate is the production self-play sampling rate (CLUS_SELFPLAY_RATE,
+// 0..1, default 0=off): the fraction of queries that get one paraphrased
+// re-search whose cite-set stability becomes the episode's pseudo-label —
+// the Phase-0-validated reward (gap +0.27). Off by default because a sampled
+// query pays one extra paraphrase call plus one extra full search.
+func selfplayRate() float64 {
+	v := strings.TrimSpace(os.Getenv("CLUS_SELFPLAY_RATE"))
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 || f > 1 {
+		return 0
+	}
+	return f
+}
+
+// citeStab is the Jaccard of two results' cited-source sets.
+func citeStab(a, b []deep.Ref) float64 {
+	set := func(refs []deep.Ref) map[string]bool {
+		m := map[string]bool{}
+		for _, r := range refs {
+			if r.SourceID != "" {
+				m[r.SourceID] = true
+			}
+		}
+		return m
+	}
+	sa, sb := set(a), set(b)
+	if len(sa) == 0 && len(sb) == 0 {
+		return 1
+	}
+	inter := 0
+	for k := range sa {
+		if sb[k] {
+			inter++
+		}
+	}
+	union := len(sa) + len(sb) - inter
+	if union == 0 {
+		return 1
+	}
+	return float64(inter) / float64(union)
+}
+
+// maybeSelfplay samples the query and, when drawn, runs the perturbation
+// re-search. Returns the stability (-1 = not sampled / failed): recorded on
+// the consumption row, the episode store's pseudo-label column.
+func maybeSelfplay(ctx context.Context, ss *searchStack, query string, res deep.Result) float64 {
+	r := selfplayRate()
+	if r <= 0 || ss.chat == nil {
+		return -1
+	}
+	if rand.Float64() >= r {
+		return -1
+	}
+	para, err := llm.Paraphrase(ctx, ss.chat, query)
+	if err != nil || para == query {
+		return -1
+	}
+	res2, err := runSearch(ctx, ss, para)
+	if err != nil {
+		return -1
+	}
+	return citeStab(res.Citations.Refs, res2.Citations.Refs)
+}
+
 func runSearch(ctx context.Context, ss *searchStack, query string) (deep.Result, error) {
 	res, err := ss.dE.AskLazy(ctx, query, func(ctx context.Context) ([]source.Source, error) {
 		return ss.loadCandidates(ctx, query)
@@ -596,8 +664,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 				}
 				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Answer, res.Citations.Refs)
 				if ss.chat != nil {
+					// Sampled BEFORE the usage snapshot so a self-play draw's
+					// extra paraphrase+search tokens land on this row — the
+					// cost of the label is paid where the label is earned.
+					stab := maybeSelfplay(r.Context(), ss, in.Query, res)
 					prompt, completion, total := ss.chat.SnapshotUsage()
-					recordConsumption(r.Context(), c, in.NS, res.Model, prompt, completion, total, res)
+					recordConsumption(r.Context(), c, in.NS, res.Model, prompt, completion, total, res, stab)
 				}
 				// Before writing the response: the early return below must not
 				// skip the registry bookkeeping.
@@ -611,8 +683,9 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 			if serr == nil {
 				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Answer, sres.Citations.Refs)
 				if ss.chat != nil {
+					stab := maybeSelfplay(r.Context(), ss, in.Query, sres)
 					prompt, completion, total := ss.chat.SnapshotUsage()
-					recordConsumption(r.Context(), c, in.NS, sres.Model, prompt, completion, total, sres)
+					recordConsumption(r.Context(), c, in.NS, sres.Model, prompt, completion, total, sres, stab)
 				}
 			}
 			errMsg := ""
