@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -117,6 +118,8 @@ def main():
 
     qpath, man = verify_manifest(args.domain, args.set, args.manifest)
     d = DOMAINS[args.domain]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.tag):
+        raise SystemExit(f"--tag must be a plain name (got {args.tag!r})")
     outdir = os.path.join(RESULTS, args.tag)
     os.makedirs(outdir, exist_ok=True)
     results = os.path.join(outdir, "results.jsonl")

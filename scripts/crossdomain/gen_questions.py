@@ -23,6 +23,7 @@ import os
 import random
 import re
 import sys
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -81,6 +82,12 @@ def chat(env, sys_msg, user_msg, retries=2):
     if not base or not key or not model:
         raise SystemExit("generator: endpoint not configured (need AIGATE_*/LLM_* base/key/model)")
     url = base.rstrip("/") + "/chat/completions"
+    # Dev-tool fetch guard: the endpoint comes from operator env; only the
+    # scheme is pinned (http/https) so a misconfigured base cannot turn the
+    # generator into an arbitrary-scheme fetcher.
+    _u = urllib.parse.urlparse(url)
+    if _u.scheme not in ("http", "https") or not _u.hostname:
+        raise SystemExit(f"generator: endpoint must be http(s), got {url!r}")
     body = json.dumps({
         "model": model,
         "messages": [
@@ -141,6 +148,10 @@ def main():
     ap.add_argument("--kind", default="baike", choices=["baike", "law"],
                     help="corpus kind: frames the question prompt (default baike)")
     args = ap.parse_args()
+    # --out names frozen-set FILES under questions/: keep it a filename, not
+    # a path (no separators, no ".."), so the sealed writes stay in QDIR.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.out):
+        raise SystemExit(f"--out must be a plain name (got {args.out!r})")
 
     qpath = os.path.join(QDIR, args.out + ".jsonl")
     provpath = os.path.join(QDIR, args.out + ".prov.jsonl")

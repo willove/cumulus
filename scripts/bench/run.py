@@ -15,11 +15,13 @@ run 的起始状态完全一致——账本/会话栈都不会把上一次 run �
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -30,7 +32,16 @@ PORT = 8610
 URL = f"http://127.0.0.1:{PORT}"
 
 
+def _loopback(url):
+    # The bench harness talks ONLY to the serve child it spawned on the
+    # loopback port; pin that so a misbuilt URL cannot aim elsewhere.
+    u = urllib.parse.urlparse(url)
+    if u.scheme != "http" or u.hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit(f"bench: target must be loopback http, got {url!r}")
+
+
 def post(url, payload, timeout=300):
+    _loopback(url)
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -43,6 +54,7 @@ def wait_health(proc, seconds=60):
         if proc.poll() is not None:
             raise SystemExit(f"serve exited early: {proc.returncode}")
         try:
+            _loopback(URL + "/health")
             with urllib.request.urlopen(URL + "/health", timeout=2) as r:
                 if r.status == 200:
                     return
@@ -83,6 +95,8 @@ def main():
     port = args.port
     URL = f"http://127.0.0.1:{port}"
 
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.tag):
+        raise SystemExit(f"--tag must be a plain name (got {args.tag!r})")
     data = os.path.join(BENCH, f"run-{args.tag}")
     if os.path.exists(data):
         shutil.rmtree(data)
