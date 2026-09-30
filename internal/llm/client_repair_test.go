@@ -149,8 +149,8 @@ func TestCompleteStructuredWireContract(t *testing.T) {
 	if strings.Contains(bodies[0], "thinking") {
 		t.Errorf("Complete sent a thinking field: %s", bodies[0])
 	}
-	if !strings.Contains(bodies[1], `"thinking":{"type":"disabled"}`) {
-		t.Errorf("CompleteStructured missing thinking disabled: %s", bodies[1])
+	if !strings.Contains(bodies[1], `"reasoning_effort":"low"`) {
+		t.Errorf("CompleteStructured missing reasoning_effort low: %s", bodies[1])
 	}
 
 	// The analyzer must route through CompleteStructured.
@@ -159,7 +159,7 @@ func TestCompleteStructuredWireContract(t *testing.T) {
 	if _, err := an.Analyze(context.Background(), "查询"); err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
-	if len(bodies) != 1 || !strings.Contains(bodies[0], `"thinking":{"type":"disabled"}`) {
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"reasoning_effort":"low"`) {
 		t.Errorf("Analyze did not disable thinking: %v", bodies)
 	}
 }
@@ -174,7 +174,7 @@ func TestAnalyzeChatVerdictVerifiedForRealQuestions(t *testing.T) {
 		bodies = append(bodies, string(b))
 		w.Header().Set("Content-Type", "application/json")
 		content := `{"intent": "chat"}`
-		if strings.Contains(string(b), "disabled") {
+		if strings.Contains(string(b), `"effort":"low"`) {
 			content = `{"intent": "chat"}`
 		} else {
 			content = `{"intent": "search", "primary": {"关键词": 0.9}}`
@@ -199,8 +199,8 @@ func TestAnalyzeChatVerdictVerifiedForRealQuestions(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("want 2 calls (fast + verify), got %d", len(bodies))
 	}
-	if !strings.Contains(bodies[0], `"thinking":{"type":"disabled"}`) {
-		t.Error("first call must be thinking-disabled")
+	if !strings.Contains(bodies[0], `"reasoning_effort":"low"`) {
+		t.Error("first call must be low effort")
 	}
 	if strings.Contains(bodies[1], "thinking") {
 		t.Error("verify call must use the thinking pass")
@@ -251,8 +251,8 @@ func TestSynthesizerNothinkFirstThinkRetry(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("want 2 calls (fast + retry), got %d", len(bodies))
 	}
-	if !strings.Contains(bodies[0], `"thinking":{"type":"disabled"}`) {
-		t.Error("first call must be thinking-disabled")
+	if !strings.Contains(bodies[0], `"reasoning_effort":"low"`) {
+		t.Error("first call must be low effort")
 	}
 	if strings.Contains(bodies[1], "thinking") {
 		t.Error("retry must use the thinking pass")

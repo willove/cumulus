@@ -64,6 +64,14 @@ func (c *ChatClient) CompleteWithEffort(ctx context.Context, user string, effort
 	return c.doChat(ctx, body)
 }
 
+// envM31Plus reports whether the configured model rejects the old
+// thinking-disable / reasoning-split parameters (M3.1-Flash-Preview+).
+// These models require adaptive thinking and only accept effort control.
+func envM31Plus() bool {
+	m := strings.ToUpper(os.Getenv("AIGATE_CHAT_MODEL"))
+	return strings.Contains(m, "M3.1") || strings.Contains(m, "M4")
+}
+
 // StageEffort reads the per-stage thinking depth from the environment.
 // Format: CLUS_THINK_<STAGE>=low|medium|high|xhigh|max
 // Stages: ANALYZE, SCORE, SYNTH, JUDGE, EXPAND.

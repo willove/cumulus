@@ -85,16 +85,20 @@ func (c *ChatClient) complete(ctx context.Context, user string, noThink bool) (s
 		},
 		"temperature": 0,
 	}
-	if c.ReasoningSplit {
-		// MiniMax-style opt-in: thinking lands in message.reasoning_content,
-		// content stays the clean answer. Servers that don't know the field
-		// ignore it.
+	if c.ReasoningSplit && !envM31Plus() {
+		// MiniMax M3-style opt-in: thinking lands in message.reasoning_content,
+		// content stays the clean answer. M3.1+ REJECTS this field ("requires
+		// adaptive thinking; reasoning_split is not allowed") — suppressed
+		// there automatically.
 		body["reasoning_split"] = true
 	}
 	if noThink {
-		// MiniMax M-series accepts thinking{type:disabled}; gateways that
-		// don't know it drop the unknown field.
-		body["thinking"] = map[string]string{"type": "disabled"}
+		// M3.1-Flash+ rejects thinking{type:disabled} ("requires adaptive
+		// thinking"). The portable "light" signal is reasoning_effort=low —
+		// recognized by OpenAI o1+ and MiniMax M3.1+, ignored harmlessly
+		// by older endpoints.
+		body["reasoning_effort"] = "low"
+		body["output_config"] = map[string]string{"effort": "low"}
 	}
 	return c.doChat(ctx, body)
 }
