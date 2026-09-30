@@ -101,9 +101,9 @@ func newProdStack() prodStack {
 	// (score line × rep.Complete keyword cover), which is what keeps either
 	// mode's wobble from fabricating a stop; flipping this default would need
 	// a hysteresis/confirm design on the stop line itself, not more patience.
-	ps.scorer = &llm.AigateScorer{Client: chat, NoThink: envFlag("CLUS_SCORER_NOTHINK")}
-	ps.analyzer = &llm.AigateAnalyzer{Client: chat}
-	ps.synth = &llm.AigateSynthesizer{Client: chat}
+	ps.scorer = &llm.AigateScorer{Client: chat, NoThink: envFlag("CLUS_SCORER_NOTHINK"), Effort: ps.stageEffort["SCORE"]}
+	ps.analyzer = &llm.AigateAnalyzer{Client: chat, Effort: ps.stageEffort["ANALYZE"]}
+	ps.synth = &llm.AigateSynthesizer{Client: chat, Effort: ps.stageEffort["SYNTH"]}
 	ps.expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
 	ps.rewriter = &llm.AigateHistoryRewriter{Client: chat}
 	// Per-stage thinking depth (MiniMax M3.1+/OpenAI o1+ compatible):

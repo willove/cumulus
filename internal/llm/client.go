@@ -334,6 +334,9 @@ func (s *AigateSynthesizer) SynthesizeStream(ctx context.Context, query string, 
 // per-fact oracle vector when given fact hints).
 type AigateScorer struct {
 	Client *ChatClient
+	// Effort routes the scoring call through CompleteWithEffort at the
+	// configured depth. When set it supersedes the NoThink binary switch.
+	Effort ThinkingLevel
 	// NoThink routes evaluate_sample through CompleteStructured (private
 	// thinking disabled).
 	//
@@ -518,6 +521,9 @@ func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []strin
 // call dispatches on NoThink. Kept as a method so Score and ScoreWithFacts can
 // never drift apart on the thinking flag.
 func (s *AigateScorer) call(ctx context.Context, tmpl string) (string, error) {
+	if s.Effort != "" {
+		return s.Client.CompleteWithEffort(ctx, tmpl, s.Effort)
+	}
 	if s.NoThink {
 		return s.Client.CompleteStructured(ctx, tmpl)
 	}
@@ -600,6 +606,9 @@ var (
 // fast_analyze prompt.
 type AigateAnalyzer struct {
 	Client *ChatClient
+	// Effort routes the analyze call through CompleteWithEffort at the
+	// configured depth (empty = existing CompleteStructured behavior).
+	Effort ThinkingLevel
 }
 
 // Analyze implements fast.Analyzer.
@@ -619,7 +628,13 @@ type AigateAnalyzer struct {
 // Genuine greetings pass the gate and never pay the extra call.
 func (a *AigateAnalyzer) Analyze(ctx context.Context, query string) (fast.Analysis, error) {
 	tmpl := prompts.MustRender(prompts.FastAnalyze, map[string]string{"query": query})
-	raw, err := a.Client.CompleteStructured(ctx, tmpl)
+	var raw string
+	var err error
+	if a.Effort != "" {
+		raw, err = a.Client.CompleteWithEffort(ctx, tmpl, a.Effort)
+	} else {
+		raw, err = a.Client.CompleteStructured(ctx, tmpl)
+	}
 	if err != nil {
 		return fast.Analysis{}, err
 	}
@@ -754,6 +769,10 @@ func ParseAnalyzeJSON(raw string) (fast.Analysis, error) {
 // (citation-marked, refuse-capable).
 type AigateSynthesizer struct {
 	Client *ChatClient
+	// Effort routes the synthesis call through CompleteWithEffort at the
+	// configured depth (empty = existing behavior). Synthesis is the quality
+	// moment — default high.
+	Effort ThinkingLevel
 
 	mu      sync.Mutex
 	refused bool
@@ -785,7 +804,13 @@ func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, sample
 	// buying answer quality on this workload. The thinking pass is kept as
 	// the error-path retry: a failed or unparseable first response gets the
 	// slower, more deliberate call instead of losing the query.
-	raw, err := s.Client.CompleteStructured(ctx, tmpl)
+	var raw string
+	var err error
+	if s.Effort != "" {
+		raw, err = s.Client.CompleteWithEffort(ctx, tmpl, s.Effort)
+	} else {
+		raw, err = s.Client.CompleteStructured(ctx, tmpl)
+	}
 	if err == nil {
 		var out SynthesizeResult
 		out, err = ParseSynthesizeJSON(raw)
@@ -794,11 +819,16 @@ func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, sample
 			return out.Summary, nil
 		}
 	}
-	// Retry with the thinking pass. A transport failure on the retry keeps
-	// the FIRST error when there was one (the more informative one — a
-	// status code beats re-parsing an empty body); a parse/summary failure
-	// on the first pass judges the retry's response below.
-	raw2, err2 := s.Client.Complete(ctx, tmpl)
+	// Retry with the thinking pass (high effort when configured). A transport
+	// failure on the retry keeps the FIRST error when there was one; a
+	// parse/summary failure on the first pass judges the retry below.
+	var raw2 string
+	var err2 error
+	if s.Effort != "" {
+		raw2, err2 = s.Client.CompleteWithEffort(ctx, tmpl, ThinkingHigh)
+	} else {
+		raw2, err2 = s.Client.Complete(ctx, tmpl)
+	}
 	if err2 != nil {
 		if err != nil {
 			return "", err
