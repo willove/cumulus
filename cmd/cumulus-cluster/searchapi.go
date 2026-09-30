@@ -312,16 +312,13 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	// with good recall pay zero extra latency. Then minilm reranks.
 	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
 	if ss.idx != nil {
-		var expand index.Expander
+		var rewriter index.Rewriter
 		if ss.chat != nil {
-			// Deep thinking: the LLM must UNDERSTAND the query intent to
-			// select the right corpus terms — this is reading comprehension,
-			// not keyword generation.
-			expand = index.MakeLLMExpander(func(ctx context.Context, prompt, effort string) (string, error) {
+			rewriter = index.MakeLLMRewriter(func(ctx context.Context, prompt, effort string) (string, error) {
 				return ss.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
-			}, string(llm.StageEffort("EXPAND", llm.ThinkingHigh)))
+			}, string(llm.StageEffort("REWRITE", llm.ThinkingMedium)))
 		}
-		bm25Top := ss.idx.NarrowWithExpansion(ctx, query, list, 50, expand)
+		bm25Top := ss.idx.RewriteWhenEmpty(ctx, query, list, 50, rewriter)
 		if len(bm25Top) > 0 {
 			if embedFn, _, _, eerr := embedderFor(); eerr == nil {
 				bm25Top = index.Rerank(ctx, query, bm25Top, embedFn)

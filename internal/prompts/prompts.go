@@ -20,6 +20,7 @@ const (
 	Paraphrase         = "paraphrase"
 	ExpandTerms        = "expand_terms"
 	SelectTerms        = "select_terms"
+	RewriteQuery       = "rewrite_query"
 	LearnHypothesis    = "learn_hypothesis"
 	FastAnalyze        = "fast_analyze"
 	KeywordsMultilevel = "keywords_multilevel"

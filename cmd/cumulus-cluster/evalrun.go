@@ -261,13 +261,13 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		}
 		// P0 corrected + conditional expansion (same as serve): BM25 with
 		// fallback LLM expansion when recall < MinRecall, then minilm Rerank.
-		var expand index.Expander
+		var rewriter index.Rewriter
 		if stack.chat != nil {
-			expand = index.MakeLLMExpander(func(ctx context.Context, prompt, effort string) (string, error) {
+			rewriter = index.MakeLLMRewriter(func(ctx context.Context, prompt, effort string) (string, error) {
 				return stack.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
-			}, string(llm.StageEffort("EXPAND", llm.ThinkingHigh)))
+			}, string(llm.StageEffort("REWRITE", llm.ThinkingMedium)))
 		}
-		runList := evalIdx.NarrowWithExpansion(ctx, it.Query, list, 50, expand)
+		runList := evalIdx.RewriteWhenEmpty(ctx, it.Query, list, 50, rewriter)
 		if len(runList) > 0 && embedFn != nil {
 			runList = index.Rerank(ctx, it.Query, runList, embedFn)
 		}

@@ -1,18 +1,20 @@
-// Corpus-bounded conditional query expansion (Sirchmunk's Expander, v3):
-// when BM25 recall is insufficient, ONE deep-thinking LLM call SELECTS from
-// the corpus's own vocabulary — never generates new terms. This is the
-// corpus-primacy red line: the LLM matches query intent to existing corpus
-// terms (reading comprehension), it does not invent domain vocabulary from
-// general knowledge (which produced generic terms matching 500+ docs,
-// measured as a net negative in v1/v2).
+// Corpus-bounded conditional query expansion (Sirchmunk's Expander, v3+v4):
+// v3: when BM25 recall is insufficient, LLM selects from corpus vocabulary.
+// v4 (RewriteWhenEmpty): when BM25 returns ZERO results, ONE LLM call
+// rewrites the query from colloquial to formal corpus language ("帮信罪"
+// → "帮助信息网络犯罪活动罪"), then BM25 retries. Only fires on complete
+// failure — partial results never trigger it. The answer still comes from
+// the corpus; the LLM only bridges the vocabulary of the QUESTION.
 package index
 
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sort"
 	"strings"
 
+	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/source"
 )
@@ -134,4 +136,126 @@ func (idx *Index) NarrowWithExpansion(ctx context.Context, query string, sources
 		return retry
 	}
 	return top
+}
+
+// Rewriter converts a query from colloquial to corpus language.
+// Production wires a deep-thinking LLM call; tests wire a stub.
+type Rewriter func(ctx context.Context, query string) (string, error)
+
+// MakeLLMRewriter builds a Rewriter from the rewrite_query prompt with
+// the given thinking depth. The LLM's job is reading comprehension —
+// understand the abbreviation/colloquialism and produce the formal term
+// the corpus uses. It does NOT answer the question (corpus-primacy).
+func MakeLLMRewriter(completeWithEffort func(ctx context.Context, prompt string, effort string) (string, error), effort string) Rewriter {
+	return func(ctx context.Context, query string) (string, error) {
+		tmpl := prompts.MustRender(prompts.RewriteQuery, map[string]string{"query": query})
+		raw, err := completeWithEffort(ctx, tmpl, effort)
+		if err != nil {
+			return "", err
+		}
+		rewritten := strings.TrimSpace(raw)
+		// Strip "改写后的查询:" prefix if the model includes it.
+		if i := strings.Index(rewritten, ":"); i >= 0 && i < 20 {
+			rewritten = strings.TrimSpace(rewritten[i+1:])
+		}
+		// Strip quotes.
+		rewritten = strings.Trim(rewritten, "\"'“”‘’ \n\t")
+		if rewritten == "" || rewritten == query {
+			return "", nil // no useful rewrite
+		}
+		return rewritten, nil
+	}
+}
+
+// MinRewriteScore is the BM25 top-score confidence line. Below it, the
+// results are garbage matches via common bigrams ("什么" IDF≈0 matching
+// everything) — as useless as zero for vocabulary-gap queries, but they
+// mask the miss from a count-based check.
+const MinRewriteScore = 1.0
+
+// TopBM25Score returns the BM25 score of the best-matching document for
+// this query. 0 means no matching document at all.
+func (idx *Index) TopBM25Score(query string) float64 {
+	if idx == nil || idx.N == 0 || strings.TrimSpace(query) == "" {
+		return 0
+	}
+	terms := mcs.Fields(query)
+	if len(terms) == 0 {
+		return 0
+	}
+	seen := make(map[string]bool)
+	scores := make(map[string]float64)
+	for _, term := range terms {
+		if seen[term] {
+			continue
+		}
+		seen[term] = true
+		postings := idx.Postings[term]
+		if len(postings) == 0 {
+			continue
+		}
+		df := float64(len(postings))
+		idf := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
+		for _, p := range postings {
+			dl := float64(idx.DocLens[p.DocID])
+			tf := float64(p.TF)
+			denom := tf + bm25K1*(1-bm25B+bm25B*dl/idx.AvgLen)
+			scores[p.DocID] += idf * tf * (bm25K1 + 1) / denom
+		}
+	}
+	top := 0.0
+	for _, sc := range scores {
+		if sc > top {
+			top = sc
+		}
+	}
+	return top
+}
+
+// RewriteWhenEmpty: if BM25's top score is below MinRewriteScore (the
+// results are garbage matches via common bigrams, not real hits), ONE LLM
+// call rewrites the query into corpus language and BM25 retries. This is
+// the "just try once" the user asked for: 帮信罪 → 帮助信息网络犯罪
+// 活动罪 → retry. If the rewrite still yields nothing, the honest empty
+// result stands.
+func (idx *Index) RewriteWhenEmpty(ctx context.Context, query string, sources []source.Source, k int, rewrite Rewriter) []source.Source {
+	if idx == nil {
+		return sources
+	}
+	// Confidence check: BM25 top score. High score → real hits, no rewrite.
+	// Low score → garbage matches or nothing → rewrite fires.
+	topScore := idx.TopBM25Score(query)
+	if topScore >= MinRewriteScore || rewrite == nil {
+		ids := idx.Rank(query, k)
+		if len(ids) == 0 {
+			return sources // no rewriter or no signal — full list
+		}
+		return buildFromIDs(ids, sources)
+	}
+	// Low confidence: one rewrite attempt.
+	rewritten, err := rewrite(ctx, query)
+	if err != nil || rewritten == "" {
+		return sources // rewrite failed — full list fallback
+	}
+	ids := idx.Rank(rewritten, k)
+	if len(ids) == 0 {
+		return nil // rewrite still finds nothing — honest empty
+	}
+	return buildFromIDs(ids, sources)
+}
+
+// buildFromIDs returns active sources matching the ranked IDs, in rank order.
+func buildFromIDs(ids []string, sources []source.Source) []source.Source {
+	idSet := make(map[string]int, len(ids))
+	for i, id := range ids {
+		idSet[id] = i
+	}
+	var out []source.Source
+	for _, s := range sources {
+		if rank, ok := idSet[s.ID]; ok && s.Status == source.StatusActive {
+			out = append(out, s)
+			_ = rank
+		}
+	}
+	return out
 }
