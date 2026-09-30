@@ -32,6 +32,7 @@ import (
 	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/ns"
+	"github.com/willove/cumulus/internal/vocab"
 	"github.com/willove/cumulus/internal/source"
 )
 
@@ -523,6 +524,39 @@ func main() {
 			out["model"] = model
 		}
 		printJSON(out)
+	case "vocab":
+		// B1 第一砖：语料自描述词表。构建=纯统计挖掘 + 本地嵌入（零 LLM，
+		// 语料为主红线内的加层）。v1 契约：重建后需重启 serve（进程内缓存）。
+		fs := flag.NewFlagSet("vocab", flag.ExitOnError)
+		build := fs.Bool("build", false, "mine + embed + persist the corpus vocabulary")
+		topK := fs.Int("top", 2000, "max terms kept")
+		_ = fs.Parse(rest)
+		if !*build {
+			fatal(fmt.Errorf("vocab: -build required"))
+		}
+		srcs, lerr := st.ActiveSources(ctx)
+		if lerr != nil {
+			fatal(lerr)
+		}
+		docs := make([]string, 0, len(srcs))
+		for _, sc := range srcs {
+			if sc.Status == "active" {
+				docs = append(docs, sc.Body)
+			}
+		}
+		embedFn, _, model, eerr := embedderFor()
+		if eerr != nil {
+			fatal(eerr)
+		}
+		t, berr := vocab.Build(ctx, docs, *topK, embedFn, model)
+		if berr != nil {
+			fatal(berr)
+		}
+		if serr := vocab.NewStore(c, namespace).Save(ctx, t); serr != nil {
+			fatal(serr)
+		}
+		printJSON(map[string]any{"terms": len(t.Entries), "model": t.Model, "note": "restart serve to reload the cached table"})
+
 	case "job":
 		fs := flag.NewFlagSet("job", flag.ExitOnError)
 		job := fs.String("job", "files", "job key")

@@ -136,6 +136,15 @@ type Engine struct {
 	// (does a smaller synthesis input even pay?) is unanswerable without a
 	// per-stage split. Wired to the monitor tracker by serve.
 	Stages func(stage string, d time.Duration)
+	// Vocab is the corpus self-describing vocabulary bridge (B1, default
+	// off — wired only when CLUS_VOCAB_BRIDGE=1 and a table is built).
+	// When the query's words lexically miss the WHOLE corpus (primary and
+	// fallback both rank zero — the vocabulary-gap moment), the bridge
+	// supplies the corpus's own nearest terms and the cascade retries with
+	// them BEFORE paying the LLM expander. Corpus-derived knowledge only.
+	Vocab interface {
+		Nearest(query string, k int) []string
+	}
 	// DeferBelow, when > 0, skips this engine's synthesis for answers whose
 	// confidence sits below the line — the caller (the DEEP tier, which knows
 	// the escalation threshold) wires it, and owes BackfillSynth on any
@@ -208,6 +217,20 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	ranked := e.rankFields(orderedKeys(a.Primary), sources)
 	if len(ranked) == 0 {
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
+	}
+	// Vocabulary bridge (B1, zero-LLM): the lexical-gap moment — primary
+	// AND fallback both missed. The corpus's own nearest terms retry for
+	// free before any model call; only when they also miss does the LLM
+	// expander run.
+	if len(ranked) == 0 && e.Vocab != nil {
+		if terms := e.Vocab.Nearest(query, 5); len(terms) > 0 {
+			if bridged := e.rankFields(terms, sources); len(bridged) > 0 {
+				ranked = bridged
+				if e.Verbose != nil {
+					e.Verbose("vocab bridge: %q → corpus terms %v", query, terms)
+				}
+			}
+		}
 	}
 	if len(ranked) == 0 && e.Expander != nil {
 		if ctx.Err() != nil {
