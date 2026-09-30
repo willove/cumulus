@@ -451,7 +451,7 @@ func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 	knn, err := c.KNN(ctx, sourcesColl, contract.KNNRequest{
-		Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
+		Field: "body_embed", Vector: qv[0], K: 30, Metric: "cosine",
 		Filter: map[string]any{"status": source.StatusActive},
 	})
 	if err != nil {

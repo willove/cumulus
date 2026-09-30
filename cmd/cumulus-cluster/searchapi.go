@@ -457,7 +457,7 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 			return nil, fmt.Errorf("embed: %w", err)
 		}
 		return ss.c.KNN(ctx, ss.sourcesColl, contract.KNNRequest{
-			Field: "body_embed", Vector: qv[0], K: 8, Metric: "cosine",
+			Field: "body_embed", Vector: qv[0], K: 30, Metric: "cosine",
 			Index:  "clus_body_embed",
 			Filter: map[string]any{"status": source.StatusActive},
 		})
