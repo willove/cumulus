@@ -149,6 +149,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	// L1 prefilter (D7): materialize the body_embed index once (bounded
 	// backfill), then narrow candidates per item by query-vector KNN.
 	var embedFn ingest.EmbedderFn
+	var embedLabel string
 	if l1pre {
 		var dims int
 		var model string
@@ -157,6 +158,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if eerr != nil {
 			return eerr // strict: CLUS_MINILM_REQUIRE=1 fails the run
 		}
+		embedLabel = model
 		if _, err := st.EnsureEmbed(ctx, embedFn, dims, model, 64); err != nil {
 			return fmt.Errorf("ensure body_embed: %w", err)
 		}
@@ -268,7 +270,9 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 			}, string(llm.StageEffort("REWRITE", llm.ThinkingMedium)))
 		}
 		runList := evalIdx.RewriteWhenEmpty(ctx, it.Query, list, 50, rewriter)
-		if len(runList) > 0 && embedFn != nil {
+		// Same semantic-only gate as serve's loadCandidates: hash vectors
+		// "rerank" by meaningless cosine and scramble BM25 order.
+		if len(runList) > 0 && embedFn != nil && embedLabel != "local-hash-64" {
 			runList = index.Rerank(ctx, it.Query, runList, embedFn)
 		}
 		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, corpusKeys, it)

@@ -320,7 +320,12 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 		}
 		bm25Top := ss.idx.RewriteWhenEmpty(ctx, query, list, 50, rewriter)
 		if len(bm25Top) > 0 {
-			if embedFn, _, _, eerr := embedderFor(); eerr == nil {
+			// Rerank only on a SEMANTIC embedder. The local-hash-64 fallback
+			// produces meaning-free vectors: "reranking" by them scrambles
+			// the BM25 order at random (measured 2026-10-01: 道交法 fell out
+			// of DEEP's early windows on 闯红灯, 88s of widen loops to
+			// recover). BM25 order beats hash-cosine order.
+			if embedFn, _, label, eerr := embedderFor(); eerr == nil && label != "local-hash-64" {
 				bm25Top = index.Rerank(ctx, query, bm25Top, embedFn)
 			}
 			list = bm25Top

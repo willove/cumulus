@@ -1148,6 +1148,16 @@ func embedderFor() (ingest.EmbedderFn, int, string, error) {
 		}
 		return fe.Embed, fe.Dims(), os.Getenv("AIGATE_EMBED_MODEL"), nil
 	}
+	// Default-on (2026-10-01): local weights present and no embed seat
+	// configured → use them. Until now the implicit seat was local-hash-64,
+	// whose meaning-free vectors made Rerank scramble BM25 order at random —
+	// serve ran days in that state because CLUS_EMBED was simply unset.
+	// Explicit operator seats above still win; CLUS_EMBED=hash opts out.
+	if os.Getenv("CLUS_EMBED") == "" && minilm.Available() {
+		if emb, err := minilm.Resolve(); err == nil && emb != nil {
+			return emb.Embed, emb.Dims(), "minilm-l12-384", nil
+		}
+	}
 	loc := cluster.Local{N: 64}
 	return loc.Embed, loc.Dims(), "local-hash-64", nil
 }

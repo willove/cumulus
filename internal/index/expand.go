@@ -171,7 +171,23 @@ func MakeLLMRewriter(completeWithEffort func(ctx context.Context, prompt string,
 // results are garbage matches via common bigrams ("什么" IDF≈0 matching
 // everything) — as useless as zero for vocabulary-gap queries, but they
 // mask the miss from a count-based check.
+//
+// It is a NEAR-ZERO line only: on a real corpus, pure noise can score far
+// above it (measured 2026-10-01 on laws-full, 1,548 docs: "帮信罪是什么"
+// noise-scores 14.2 while a genuine hit scores 54), so this line alone
+// cannot separate garbage from signal. The discriminator for that is
+// VocabGapFraction below.
 const MinRewriteScore = 1.0
+
+// RewriteGapFraction is the vocabulary-gap line: if at least this fraction
+// of the query's IDF mass sits on terms the corpus does not contain at all
+// (df=0), the query is speaking words this corpus has never heard (口语缩写
+// "帮信罪" vs 法条正式名 "帮助信息网络犯罪活动罪" — the abbreviation's
+// bigrams 帮信/信罪 have zero postings while the generic bigrams 什么/罪是
+// match everything weakly). That is the corpus-independent signature of a
+// vocabulary gap, unlike an absolute BM25 score which scales with corpus
+// size and document length.
+const RewriteGapFraction = 0.5
 
 // TopBM25Score returns the BM25 score of the best-matching document for
 // this query. 0 means no matching document at all.
@@ -212,20 +228,70 @@ func (idx *Index) TopBM25Score(query string) float64 {
 	return top
 }
 
-// RewriteWhenEmpty: if BM25's top score is below MinRewriteScore (the
-// results are garbage matches via common bigrams, not real hits), ONE LLM
-// call rewrites the query into corpus language and BM25 retries. This is
-// the "just try once" the user asked for: 帮信罪 → 帮助信息网络犯罪
-// 活动罪 → retry. If the rewrite still yields nothing, the honest empty
+// VocabGapFraction returns the fraction of the query's IDF weight that sits
+// on terms with ZERO postings — terms this corpus has never contained. A
+// high fraction means the query's most discriminative words don't exist in
+// corpus language (帮信/是什 for 帮信罪), so whatever BM25 did match came from
+// generic bigrams and is noise regardless of its score.
+//
+// Weighting is idf² — rarity squared. Measured on laws-full (1,548 docs,
+// 2026-10-01) this is what separates a true vocabulary gap from a working
+// colloquial query whose boundary bigrams also happen to be absent:
+//
+//	帮信罪是什么      gap 0.589 → fires  (survivors 信罪 df4/罪是 df6/
+//	                                什么 df9 are coincidental fragments)
+//	闯红灯会有什么处罚 gap 0.457 → stays (红灯 df3/灯会 df1/处罚 df771 are
+//	                                real content hits, keep their mass)
+//
+// Linear idf weighting cannot separate these two (0.495 vs 0.368): the
+// generic survivors of a legal-language corpus carry too much plain idf.
+// Deterministic, zero-LLM, O(query terms).
+func (idx *Index) VocabGapFraction(query string) float64 {
+	if idx == nil || idx.N == 0 || strings.TrimSpace(query) == "" {
+		return 0
+	}
+	seen := make(map[string]bool)
+	var total, gap float64
+	for _, term := range mcs.Fields(query) {
+		if seen[term] {
+			continue
+		}
+		seen[term] = true
+		df := float64(len(idx.Postings[term]))
+		w := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
+		w *= w
+		total += w
+		if df == 0 {
+			gap += w
+		}
+	}
+	if total <= 0 {
+		return 0
+	}
+	return gap / total
+}
+
+// RewriteWhenEmpty: if BM25's top score is below MinRewriteScore (near-zero
+// signal) OR the query's IDF mass is mostly on terms absent from the corpus
+// vocabulary (VocabGapFraction ≥ RewriteGapFraction — the 帮信案 signature:
+// noise can outscore the absolute line, but the missing terms betray it),
+// ONE LLM call rewrites the query into corpus language and BM25 retries.
+// This is the "just try once" the user asked for: 帮信罪 → 帮助信息网络
+// 犯罪活动罪 → retry. If the rewrite still yields nothing, the honest empty
 // result stands.
 func (idx *Index) RewriteWhenEmpty(ctx context.Context, query string, sources []source.Source, k int, rewrite Rewriter) []source.Source {
 	if idx == nil {
 		return sources
 	}
-	// Confidence check: BM25 top score. High score → real hits, no rewrite.
-	// Low score → garbage matches or nothing → rewrite fires.
+	// Confidence check, two independent miss signatures:
+	//   1. top score below the near-zero line — nothing matched at all;
+	//   2. vocabulary gap — the discriminative terms don't exist in the
+	//      corpus, so any matches are generic-bigram noise by construction.
+	// Only when BOTH are clean (score above the line AND gap small) is the
+	// BM25 result trusted without a rewrite.
 	topScore := idx.TopBM25Score(query)
-	if topScore >= MinRewriteScore || rewrite == nil {
+	gap := idx.VocabGapFraction(query)
+	if (topScore >= MinRewriteScore && gap < RewriteGapFraction) || rewrite == nil {
 		ids := idx.Rank(query, k)
 		if len(ids) == 0 {
 			return sources // no rewriter or no signal — full list

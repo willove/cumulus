@@ -69,6 +69,51 @@ func TestRewriteWhenEmptyNoTrigger(t *testing.T) {
 	}
 }
 
+// TestRewriteFiresOnVocabGapDespiteNoiseScore pins the production pathology
+// measured on laws-full (2026-10-01): "帮信罪是什么" noise-scores 14.2 — far
+// above MinRewriteScore — because fragment bigrams (信罪/罪是/什么) exist in
+// unrelated documents, so the absolute-score trigger alone never fires and
+// the vocabulary gap stays invisible. The idf² VocabGapFraction is what
+// catches it: the query's discriminative bigrams (帮信/是什) have df=0.
+// Regression shape: noise score ABOVE the line + gap fraction ≥ 0.5 →
+// rewrite must still fire and surface the formal-name document.
+func TestRewriteFiresOnVocabGapDespiteNoiseScore(t *testing.T) {
+	srcs := []source.Source{
+		// Gold: formal crime name (bigrams 帮助/助信/信息/… — no 帮信).
+		{ID: "gold", Body: "帮助信息网络犯罪活动罪 刑法第二百八十七条之二 明知他人利用信息网络实施犯罪", Status: source.StatusActive},
+		// Fragment docs: give the query's generic bigrams nonzero df so BM25
+		// produces a confident-looking NOISE top score (the 数罪并罚批复 effect).
+		{ID: "f1", Body: "背信罪是指违背信任委托的犯罪行为 背信罪是指违背信任委托的犯罪行为", Status: source.StatusActive},
+		{ID: "f2", Body: "什么行为构成犯罪 什么行为构成犯罪 什么行为构成犯罪", Status: source.StatusActive},
+		{ID: "f3", Body: "盗窃罪是侵犯财产的犯罪 盗窃罪是侵犯财产的犯罪", Status: source.StatusActive},
+	}
+	idx := Build(srcs)
+
+	// Pin the pathology precondition: noise clears the absolute line…
+	if top := idx.TopBM25Score("帮信罪是什么"); top < MinRewriteScore {
+		t.Fatalf("fixture must reproduce noise above the absolute line, got topScore=%.3f", top)
+	}
+	// …yet the vocabulary gap betrays it.
+	if g := idx.VocabGapFraction("帮信罪是什么"); g < RewriteGapFraction {
+		t.Fatalf("fixture must reproduce the vocab gap, got gapFraction=%.3f", g)
+	}
+
+	stub := func(_ context.Context, q string) (string, error) {
+		if q == "帮信罪是什么" {
+			return "帮助信息网络犯罪活动罪是什么", nil
+		}
+		return "", nil
+	}
+	top := idx.RewriteWhenEmpty(context.Background(), "帮信罪是什么", srcs, 10, stub)
+	if len(top) == 0 || top[0].ID != "gold" {
+		var ids []string
+		for _, s := range top {
+			ids = append(ids, s.ID)
+		}
+		t.Fatalf("vocab-gap rewrite must surface the gold doc first, got %v", ids)
+	}
+}
+
 // TestRewriteWhenEmptyStillEmpty: rewrite produces a term the corpus
 // doesn't have → honest empty result (no fabrication).
 func TestRewriteWhenEmptyStillEmpty(t *testing.T) {
