@@ -19,9 +19,10 @@ set -eu
 cd "$(dirname "$0")/.."
 N="${1:-30}"
 K=2
-STATE="$(pwd)/var/selfplay-probe"
+SRC="${SET_DIR:-$(pwd)/var/semhead-ab}"   # 冻结集；SET_DIR 覆盖（跨语料复验：诗歌集等）
+# 状态目录随冻结集分家：不同语料的复验互不覆盖、互不误续跑。
+STATE="$(pwd)/var/selfplay-probe-$(basename "$SRC")"
 STORE="$STATE/data"
-SRC="$(pwd)/var/semhead-ab"          # 冻结集（与历次判决同源同温）
 ask="$STATE/cumulus-cluster"
 mkdir -p "$STATE"
 go build -o "$ask" ./cmd/cumulus-cluster

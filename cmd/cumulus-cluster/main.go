@@ -1208,7 +1208,21 @@ func calibAutoCycle(ctx context.Context, c cumulite.Port, rowsPath string, fromU
 		if err := calib.NewStore(c).Save(ctx, prop.Proposed, "calib -auto self-test win"); err != nil {
 			return err
 		}
-		printJSON(map[string]any{"applied": prop.Proposed})
+		// Post-apply guardrail (the promised auto-rollback): the applied
+		// line rides the ENV into the guardrail check — the guardrail
+		// store's own KV is empty, so env is the honest way to measure the
+		// NEW line against a baseline taken under the default, same store,
+		// comparable. Alarm → restore the previous line immediately.
+		gr := exec.Command("bash", "scripts/guardrail.sh", "check", "12")
+		gr.Env = append(os.Environ(), fmt.Sprintf("CLUS_ESCALATE_BELOW=%g", prop.Proposed))
+		gr.Stdout, gr.Stderr = os.Stderr, os.Stderr
+		if grErr := gr.Run(); grErr != nil {
+			if rbErr := calib.NewStore(c).Save(ctx, prop.Current, "guardrail alarm — rolled back"); rbErr != nil {
+				return fmt.Errorf("calib -auto: applied %g, guardrail alarmed (%v), AND rollback failed: %v — MANUAL ATTENTION", prop.Proposed, grErr, rbErr)
+			}
+			return fmt.Errorf("calib -auto: guardrail alarmed after apply — rolled back to %g (%v)", prop.Current, grErr)
+		}
+		printJSON(map[string]any{"applied": prop.Proposed, "guardrail": "pass"})
 	}
 	return nil
 }
