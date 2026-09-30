@@ -96,6 +96,12 @@ func (c *ChatClient) complete(ctx context.Context, user string, noThink bool) (s
 		// don't know it drop the unknown field.
 		body["thinking"] = map[string]string{"type": "disabled"}
 	}
+	return c.doChat(ctx, body)
+}
+
+// doChat sends the request body and parses the chat-completions response.
+// Shared by Complete, CompleteStructured, and CompleteWithEffort.
+func (c *ChatClient) doChat(ctx context.Context, body map[string]any) (string, error) {
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(c.BaseURL, "/")+"/chat/completions", bytes.NewReader(raw))

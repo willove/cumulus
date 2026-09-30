@@ -29,6 +29,11 @@ type prodStack struct {
 	// weights absent): the stack still builds with the offline fallback, but
 	// newSearchStack refuses to serve on it.
 	embErr error
+	// stageEffort is the per-stage thinking depth (MiniMax M3.1+/OpenAI
+	// o1+): keys are stage names (ANALYZE, SCORE, SYNTH, JUDGE, EXPAND),
+	// values are ThinkingLevel. Consumers call CompleteWithEffort with the
+	// stage's level instead of the binary Complete/CompleteStructured.
+	stageEffort map[string]llm.ThinkingLevel
 }
 
 func newProdStack() prodStack {
@@ -101,6 +106,18 @@ func newProdStack() prodStack {
 	ps.synth = &llm.AigateSynthesizer{Client: chat}
 	ps.expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
 	ps.rewriter = &llm.AigateHistoryRewriter{Client: chat}
+	// Per-stage thinking depth (MiniMax M3.1+/OpenAI o1+ compatible):
+	// CLUS_THINK_<STAGE>=low|medium|high|xhigh|max overrides per stage.
+	// Defaults: mechanical passes low, quality moments high. Set on the
+	// chat client as the per-request effort when CompleteWithEffort is used
+	// (the Complete/CompleteStructured binary is the degenerate spectrum).
+	ps.stageEffort = map[string]llm.ThinkingLevel{
+		"ANALYZE": llm.StageEffort("ANALYZE", llm.ThinkingLow),
+		"SCORE":   llm.StageEffort("SCORE", llm.ThinkingLow),
+		"SYNTH":   llm.StageEffort("SYNTH", llm.ThinkingHigh),
+		"JUDGE":   llm.StageEffort("JUDGE", llm.ThinkingHigh),
+		"EXPAND":  llm.StageEffort("EXPAND", llm.ThinkingLow),
+	}
 	// Atomic-fact decomposer (P1-4). The offline heuristic is measurably bad:
 	// K=1 for 124/136 real queries, and all 12 K>1 splits are miscuts inside a
 	// title / defined term / enumeration, which become phantom requirements the
