@@ -15,8 +15,10 @@
       <header class="conversation-head">
         <div class="conversation-heading"><span class="status-dot" :class="{ ready: hasBucket && documents.length }"></span><strong>{{ libraryLabel }}</strong><span class="tiny">{{ documents.length }} 篇文档</span></div>
         <div class="form-actions">
-          <eb-button class="history-toggle" type="primary" link size="small" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">历史会话</eb-button>
           <eb-button size="small" @click="pane = 'library'">知识库</eb-button>
+          <eb-button v-if="hasBucket && resetting !== 'done'" size="small" :loading="resetting === 'busy'" @click="clearCache">清除缓存</eb-button>
+          <eb-button v-else-if="resetting === 'done'" size="small" type="success" text @click="resetting = ''">✓ 已清除</eb-button>
+          <eb-button class="history-toggle" type="primary" link size="small" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">历史会话</eb-button>
         </div>
       </header>
       <eb-alert v-if="error" class="conversation-error" type="error" :title="error" :closable="false" show-icon />
@@ -121,12 +123,14 @@ import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { EbChatThreads, EbChatList, EbChatMarkdown, EbChatSources, EbChatSuggestion, EbChatUsage, EbAiPromptBox } from "@wil-works/evoke-chat";
 import { useChatPane, timelineFor, stageText, fmtMS, usageOf, STAGE_ORDER } from "../panes/chat.js";
 import { documents, documentsBusy, documentsError, hasBucket, libraryLabel, loadDocuments, nsSel, pane } from "../state.js";
+import { requestJSON } from "../api.js";
 import SourcePreview from "./SourcePreview.vue";
 
 defineEmits(["create-library"]);
 const { sessions, current, loading, error, messages, onSend, stop, openSession, newSession, delSession,
   liveStages, liveStage, elapsed } = useChatPane();
 const historyOpen = ref(false);
+const resetting = ref("");
 const draft = ref("");
 const previewSource = ref("");
 const previewQuote = ref("");
@@ -173,6 +177,24 @@ const threadItems = computed(() => sessions.value.map(session => {
 }));
 function pickSession(id) { const session = sessions.value.find(item => item.id === id); if (session) selectSession(session); }
 function startSession() { newSession(); historyOpen.value = false; }
+
+async function clearCache() {
+  const ns = nsSel.value;
+  if (!ns || resetting.value === "busy") return;
+  resetting.value = "busy";
+  try {
+    const nsParam = ns ? `?ns=${encodeURIComponent(ns)}` : "";
+    await requestJSON(`/v1/learning/reset${nsParam}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: ns }),
+    });
+    resetting.value = "done";
+    setTimeout(() => { resetting.value = ""; }, 2000);
+  } catch (e) {
+    resetting.value = "";
+  }
+}
 // 会话时间列：固定 YYYY-MM-DD HH:mm:ss，不跟浏览器 locale（en-US 会出 9/28/2026）。
 function fmtSessionTime(ts) {
   const d = new Date(ts);
