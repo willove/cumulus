@@ -570,7 +570,7 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 	// ~half of it that render). The line handed down is the SAME threshold
 	// this engine escalates on, so "deferred" and "escalated" cannot drift
 	// apart; the non-escalating path owes BackfillSynth (see afterBase).
-	if e.KB != nil && e.KB.Fast != nil && os.Getenv("CLUS_FAST_DEFER_SYNTH") == "1" {
+	if e.KB != nil && e.KB.Fast != nil && os.Getenv("CLUS_FAST_DEFER_SYNTH") != "0" {
 		e.KB.Fast.DeferBelow = thr
 		// K>1: the measured escalation trigger for multi-question queries is
 		// cover-incompleteness, not thin confidence — arm the cover arm too,
