@@ -28,6 +28,7 @@ import (
 	"github.com/willove/cumulus/internal/graph"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
+	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/monitor"
@@ -95,6 +96,11 @@ type searchStack struct {
 	// admission ranker closure reads it at call time (after the ledger and
 	// session stack have been folded in), so one stack build serves any query.
 	usage *usageWeights
+	// idx is the in-memory inverted index (P0): built lazily on the first
+	// query, reused for the process lifetime (a corpus change needs a
+	// serve restart — same v1 contract as the vocab table).
+	idx *index.Index
+	idxOnce sync.Once
 }
 
 // usageWeights is the per-request carrier the DEEP admission ranker and the
@@ -302,6 +308,13 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	}
 	if ss.opt.L1Pre {
 		list = ss.narrowL1Pre(ctx, list, query)
+	}
+	// P0: inverted-index BM25 narrowing — replace the O(N) scan downstream
+	// with a top-K candidate set. Falls through to the full list when the
+	// index has no signal (empty query terms, no matching docs).
+	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
+	if ss.idx != nil {
+		list = ss.idx.Narrow(query, list, 50)
 	}
 	return list, nil
 }

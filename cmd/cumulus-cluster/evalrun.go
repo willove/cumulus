@@ -32,6 +32,7 @@ import (
 	"github.com/willove/cumulus/internal/graph"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
+	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/prompts"
@@ -160,6 +161,11 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 			return fmt.Errorf("ensure body_embed: %w", err)
 		}
 	}
+	// P0: build the inverted index once per run (same tokenizer, same
+	// BM25 — serve builds per-request, eval per-run, both zero-LLM).
+	evalIdx := index.Build(list)
+	_ = evalIdx // used in the item loop below
+
 	stack := newProdStack()
 	fe := fast.New(stack.scorer)
 	fe.UsePrior = prior
@@ -261,6 +267,9 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 				runList = narrowed
 			}
 		}
+		// P0: same inverted-index narrowing as serve — eval must measure
+		// the same admission path the user hits.
+		runList = evalIdx.Narrow(it.Query, runList, 50)
 		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, corpusKeys, it)
 		cancel()
 		line, err := json.Marshal(rec)
