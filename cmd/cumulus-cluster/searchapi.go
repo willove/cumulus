@@ -306,40 +306,21 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
 	}
-	// P0: dual-recall narrowing — BM25 lexical top-K ∪ vector KNN semantic
-	// top-K, union'd. The BM25 index is built from the FULL corpus (not
-	// post-L1Pre) so the index covers all N docs. The KNN arm bridges the
-	// vocabulary gap BM25 cannot ("乱扔垃圾" → "固体废物污染环境" shares zero
-	// bigrams but is semantically close in embedding space).
-	full := list
-	if ss.opt.L1Pre {
-		list = ss.narrowL1Pre(ctx, list, query)
-		_ = full // L1Pre may narrow; the index below still uses the full list
-	}
-	ss.idxOnce.Do(func() { ss.idx = index.Build(full) })
+	// P0 corrected: BM25 → minilm Rerank. The old dual-recall (BM25 ∪ KNN
+	// document-level) used minilm for the wrong purpose — document-level
+	// retrieval via body_embed KNN. minilm is a SENTENCE-level comparator,
+	// not a document retriever. The corrected flow: BM25 narrows 9,600 →
+	// top-50 (lexical, precise), then minilm reranks those 50 by direct
+	// query-vs-body cosine (its designed use). L1Pre's KNN arm is retired.
+	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
 	if ss.idx != nil {
-		bm25Top := ss.idx.Narrow(query, full, 50)
-		// Union: BM25 hits ∪ L1Pre hits (if any), deduped, capped at 64.
-		if len(list) > 0 && len(bm25Top) > 0 {
-			seen := make(map[string]bool, len(bm25Top)+len(list))
-			var union []source.Source
-			for _, s := range bm25Top {
-				if !seen[s.ID] {
-					seen[s.ID] = true
-					union = append(union, s)
-				}
+		bm25Top := ss.idx.Narrow(query, list, 50)
+		if len(bm25Top) > 0 {
+			// Rerank: minilm compares query against each candidate's body
+			// (for short law articles ≈ one sentence — minilm's sweet spot).
+			if embedFn, _, _, eerr := embedderFor(); eerr == nil {
+				bm25Top = index.Rerank(ctx, query, bm25Top, embedFn)
 			}
-			for _, s := range list {
-				if !seen[s.ID] {
-					seen[s.ID] = true
-					union = append(union, s)
-				}
-			}
-			if len(union) > 64 {
-				union = union[:64]
-			}
-			list = union
-		} else if len(bm25Top) > 0 {
 			list = bm25Top
 		}
 	}

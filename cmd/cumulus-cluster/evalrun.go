@@ -259,32 +259,13 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if stack.chat != nil {
 			atomic.StoreInt64(budgetBase, stack.chat.TotalTokens())
 		}
-		// P0: dual recall — BM25 lexical top-50 ∪ KNN semantic top-8 (if
-		// l1pre), union'd, same as serve's loadCandidates. The BM25 arm
-		// catches lexical matches, the KNN arm bridges the vocabulary gap.
-		bm25Top := evalIdx.Narrow(it.Query, list, 50)
-		runList := bm25Top
-		if l1pre {
-			if knn, err := narrowByKNN(ctx, c, embedFn, sourcesColl, list, it.Query); err == nil && len(knn) > 0 {
-				seen := make(map[string]bool, len(bm25Top)+len(knn))
-				var union []source.Source
-				for _, s := range bm25Top {
-					if !seen[s.ID] {
-						seen[s.ID] = true
-						union = append(union, s)
-					}
-				}
-				for _, s := range knn {
-					if !seen[s.ID] {
-						seen[s.ID] = true
-						union = append(union, s)
-					}
-				}
-				if len(union) > 64 {
-					union = union[:64]
-				}
-				runList = union
-			}
+		// P0 corrected: BM25 → minilm Rerank (same as serve). The old
+		// dual-recall KNN arm is retired — minilm at document level was the
+		// wrong layer. Now: BM25 top-50, then minilm reranks by direct
+		// query-vs-body cosine (sentence-level comparison, its design goal).
+		runList := evalIdx.Narrow(it.Query, list, 50)
+		if len(runList) > 0 && embedFn != nil {
+			runList = index.Rerank(ctx, it.Query, runList, embedFn)
 		}
 		rec := evalOne(ictx, dE, stack.chat, judgeOn, runList, keyByID, corpusKeys, it)
 		cancel()
