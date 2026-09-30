@@ -33,7 +33,6 @@ import (
 	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/source"
-	"github.com/willove/cumulus/internal/vocab"
 )
 
 // firstNonEmpty picks the per-request override, falling back to the serve-level
@@ -145,15 +144,6 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 		return nil, stack.embErr
 	}
 	fe := fast.New(stack.scorer)
-	// Vocabulary bridge (B1): wired only when the flag is on AND a table
-	// was built — a missing table degrades to exactly today's behaviour.
-	if os.Getenv("CLUS_VOCAB_BRIDGE") == "1" {
-		if embedFn, _, _, eerr := embedderFor(); eerr == nil {
-			if t, terr := vocab.NewStore(c, opt.Namespace).Load(ctx, embedFn); terr == nil && t != nil {
-				fe.Vocab = t
-			}
-		}
-	}
 	fe.UsePrior = opt.Prior
 	fe.Analyzer, fe.Synth, fe.Expander = degradeAnalyzer{inner: stack.analyzer}, stack.synth, stack.expander
 	// 1.6: the prior's history arm reads live clus_evidence (needs the active

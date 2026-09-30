@@ -36,7 +36,6 @@ import (
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/source"
-	"github.com/willove/cumulus/internal/vocab"
 )
 
 // judgePass is the Correct threshold over the judge's 0–10 score.
@@ -163,16 +162,6 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 	}
 	stack := newProdStack()
 	fe := fast.New(stack.scorer)
-	// Vocabulary bridge (B1): same flag as serve so an A/B can measure it —
-	// eval is where the pair discipline lives, the bridge must be reachable
-	// here or it can never earn its default.
-	if os.Getenv("CLUS_VOCAB_BRIDGE") == "1" {
-		if embedFn, _, _, eerr := embedderFor(); eerr == nil {
-			if t, terr := vocab.NewStore(c, namespace).Load(ctx, embedFn); terr == nil && t != nil {
-				fe.Vocab = t
-			}
-		}
-	}
 	fe.UsePrior = prior
 	fe.Analyzer, fe.Synth, fe.Expander = stack.analyzer, stack.synth, stack.expander
 	// 1.6: prior history arm from live clus_evidence (list is already loaded).
