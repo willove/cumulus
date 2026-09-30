@@ -114,7 +114,7 @@ func newProdStack() prodStack {
 	ps.stageEffort = map[string]llm.ThinkingLevel{
 		"ANALYZE": llm.StageEffort("ANALYZE", llm.ThinkingLow),
 		"SCORE":   llm.StageEffort("SCORE", llm.ThinkingLow),
-		"SYNTH":   llm.StageEffort("SYNTH", llm.ThinkingHigh),
+		"SYNTH":   llm.StageEffort("SYNTH", llm.ThinkingMedium),
 		"JUDGE":   llm.StageEffort("JUDGE", llm.ThinkingHigh),
 		"EXPAND":  llm.StageEffort("EXPAND", llm.ThinkingLow),
 	}
