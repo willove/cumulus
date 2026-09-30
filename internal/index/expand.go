@@ -1,33 +1,41 @@
-// Conditional query expansion (Sirchmunk's Expander restored to its correct
-// position): when BM25 recall is insufficient (too few candidates or weak
-// scores), ONE NoThink LLM call generates domain terms the query lacks,
-// and BM25 retries with the enriched query. The 87% of queries where BM25
-// already has good recall pay zero extra latency.
+// Corpus-bounded conditional query expansion (Sirchmunk's Expander, v3):
+// when BM25 recall is insufficient, ONE deep-thinking LLM call SELECTS from
+// the corpus's own vocabulary — never generates new terms. This is the
+// corpus-primacy red line: the LLM matches query intent to existing corpus
+// terms (reading comprehension), it does not invent domain vocabulary from
+// general knowledge (which produced generic terms matching 500+ docs,
+// measured as a net negative in v1/v2).
 package index
 
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/source"
 )
 
-// MinRecall is the candidate count below which expansion fires. Below this,
-// BM25 likely hit a vocabulary gap — the query terms don't match any doc.
+// MinRecall is the candidate count below which expansion fires.
 const MinRecall = 3
 
-// Expander is the one-LLM-call domain term generator. Production wires the
-// chat client's CompleteStructured (NoThink); tests wire a stub.
-type Expander func(ctx context.Context, query string) ([]string, error)
+// VocabSize is how many top corpus terms are offered to the LLM.
+const VocabSize = 200
 
-// MakeLLMExpander builds an Expander from a chat client's structured
-// completion (thinking disabled — keyword association needs no reasoning).
-func MakeLLMExpander(completeStructured func(ctx context.Context, prompt string) (string, error)) Expander {
-	return func(ctx context.Context, query string) ([]string, error) {
-		tmpl := prompts.MustRender(prompts.ExpandTerms, map[string]string{"query": query})
-		raw, err := completeStructured(ctx, tmpl)
+// Expander selects relevant corpus terms for a query.
+type Expander func(ctx context.Context, query string, vocab []string) ([]string, error)
+
+// MakeLLMExpander builds a corpus-bounded Expander: the LLM sees the query
+// plus the corpus's own top terms and SELECTS from that list. It cannot
+// produce terms the corpus doesn't contain — the boundary is structural.
+func MakeLLMExpander(completeWithEffort func(ctx context.Context, prompt string, effort string) (string, error), effort string) Expander {
+	return func(ctx context.Context, query string, vocab []string) ([]string, error) {
+		tmpl := prompts.MustRender(prompts.SelectTerms, map[string]string{
+			"query": query,
+			"terms": strings.Join(vocab, "\n"),
+		})
+		raw, err := completeWithEffort(ctx, tmpl, effort)
 		if err != nil {
 			return nil, err
 		}
@@ -36,10 +44,7 @@ func MakeLLMExpander(completeStructured func(ctx context.Context, prompt string)
 }
 
 // ParseExpandTerms extracts the JSON string array from the LLM response.
-// Returns nil on any parse failure (the caller treats it as "no expansion
-// available" and keeps the original BM25 results).
 func ParseExpandTerms(raw string) []string {
-	// Find the first [...] span.
 	start := strings.Index(raw, "[")
 	if start < 0 {
 		return nil
@@ -52,12 +57,11 @@ func ParseExpandTerms(raw string) []string {
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &terms); err != nil {
 		return nil
 	}
-	// Filter: non-empty, ≤6 runes each, deduplicated.
 	seen := make(map[string]bool, len(terms))
 	var out []string
 	for _, t := range terms {
 		t = strings.TrimSpace(t)
-		if t == "" || len([]rune(t)) > 12 || seen[t] {
+		if t == "" || len([]rune(t)) > 16 || seen[t] {
 			continue
 		}
 		seen[t] = true
@@ -66,42 +70,68 @@ func ParseExpandTerms(raw string) []string {
 	return out
 }
 
-// NarrowWithExpansion is the conditional-expansion Narrow: if the first BM25
-// pass yields < MinRecall candidates, expand the query for ADDITIONAL
-// candidates (union, NOT merged into the original query — merging dilutes
-// BM25's discriminative power, measured 2026-10-01: ev_rec 51.7%→48.3% when
-// terms were concatenated). The union preserves the original ranking;
-// expansion terms only ADD candidates the original query missed.
+// TopVocab returns the top-N corpus terms by document frequency.
+func (idx *Index) TopVocab(n int) []string {
+	if idx == nil || n <= 0 {
+		return nil
+	}
+	type termDF struct {
+		term string
+		df   int
+	}
+	var terms []termDF
+	for term, postings := range idx.Postings {
+		terms = append(terms, termDF{term, len(postings)})
+	}
+	sort.Slice(terms, func(i, j int) bool {
+		if terms[i].df != terms[j].df {
+			return terms[i].df > terms[j].df
+		}
+		return terms[i].term < terms[j].term
+	})
+	if len(terms) > n {
+		terms = terms[:n]
+	}
+	out := make([]string, len(terms))
+	for i, t := range terms {
+		out[i] = t.term
+	}
+	return out
+}
+
+// NarrowWithExpansion: BM25 first → if recall < MinRecall, LLM selects from
+// corpus vocab → BM25 second pass. Selected terms are validated against
+// the index (must exist in Postings) — the corpus-primacy boundary.
 func (idx *Index) NarrowWithExpansion(ctx context.Context, query string, sources []source.Source, k int, expand Expander) []source.Source {
 	if idx == nil {
 		return sources
 	}
 	top := idx.Narrow(query, sources, k)
 	if len(top) >= MinRecall || expand == nil {
-		return top // recall sufficient (or no expander) — done, zero cost
+		return top
 	}
-	// Vocabulary gap: expand for ADDITIONAL candidates (not to replace).
-	terms, err := expand(ctx, query)
-	if err != nil || len(terms) == 0 {
-		return top // expansion failed — keep original results
+	vocab := idx.TopVocab(VocabSize)
+	if len(vocab) == 0 {
+		return top
 	}
-	expanded := strings.Join(terms, " ")
-	extra := idx.Narrow(expanded, sources, 20) // smaller second-pass top-K
-	// Union: original ranking first, expansion additions appended (deduped).
-	seen := make(map[string]bool, len(top)+len(extra))
-	for _, s := range top {
-		seen[s.ID] = true
+	selected, err := expand(ctx, query, vocab)
+	if err != nil || len(selected) == 0 {
+		return top
 	}
-	var union []source.Source
-	union = append(union, top...)
-	for _, s := range extra {
-		if !seen[s.ID] {
-			seen[s.ID] = true
-			union = append(union, s)
+	// Validate: only terms that actually exist in the index.
+	var valid []string
+	for _, t := range selected {
+		if _, ok := idx.Postings[t]; ok {
+			valid = append(valid, t)
 		}
 	}
-	if len(union) > k+20 {
-		union = union[:k+20]
+	if len(valid) == 0 {
+		return top
 	}
-	return union
+	enriched := query + " " + strings.Join(valid, " ")
+	retry := idx.Narrow(enriched, sources, k)
+	if len(retry) > len(top) {
+		return retry
+	}
+	return top
 }

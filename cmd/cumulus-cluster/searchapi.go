@@ -314,7 +314,12 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	if ss.idx != nil {
 		var expand index.Expander
 		if ss.chat != nil {
-			expand = index.MakeLLMExpander(ss.chat.CompleteStructured)
+			// Deep thinking: the LLM must UNDERSTAND the query intent to
+			// select the right corpus terms — this is reading comprehension,
+			// not keyword generation.
+			expand = index.MakeLLMExpander(func(ctx context.Context, prompt, effort string) (string, error) {
+				return ss.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
+			}, string(llm.StageEffort("EXPAND", llm.ThinkingHigh)))
 		}
 		bm25Top := ss.idx.NarrowWithExpansion(ctx, query, list, 50, expand)
 		if len(bm25Top) > 0 {

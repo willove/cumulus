@@ -263,7 +263,9 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		// fallback LLM expansion when recall < MinRecall, then minilm Rerank.
 		var expand index.Expander
 		if stack.chat != nil {
-			expand = index.MakeLLMExpander(stack.chat.CompleteStructured)
+			expand = index.MakeLLMExpander(func(ctx context.Context, prompt, effort string) (string, error) {
+				return stack.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
+			}, string(llm.StageEffort("EXPAND", llm.ThinkingHigh)))
 		}
 		runList := evalIdx.NarrowWithExpansion(ctx, it.Query, list, 50, expand)
 		if len(runList) > 0 && embedFn != nil {

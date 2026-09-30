@@ -19,6 +19,7 @@ const (
 	EvidenceAgree      = "evidence_agree"
 	Paraphrase         = "paraphrase"
 	ExpandTerms        = "expand_terms"
+	SelectTerms        = "select_terms"
 	LearnHypothesis    = "learn_hypothesis"
 	FastAnalyze        = "fast_analyze"
 	KeywordsMultilevel = "keywords_multilevel"
