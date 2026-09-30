@@ -306,15 +306,42 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
 	}
+	// P0: dual-recall narrowing — BM25 lexical top-K ∪ vector KNN semantic
+	// top-K, union'd. The BM25 index is built from the FULL corpus (not
+	// post-L1Pre) so the index covers all N docs. The KNN arm bridges the
+	// vocabulary gap BM25 cannot ("乱扔垃圾" → "固体废物污染环境" shares zero
+	// bigrams but is semantically close in embedding space).
+	full := list
 	if ss.opt.L1Pre {
 		list = ss.narrowL1Pre(ctx, list, query)
+		_ = full // L1Pre may narrow; the index below still uses the full list
 	}
-	// P0: inverted-index BM25 narrowing — replace the O(N) scan downstream
-	// with a top-K candidate set. Falls through to the full list when the
-	// index has no signal (empty query terms, no matching docs).
-	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
+	ss.idxOnce.Do(func() { ss.idx = index.Build(full) })
 	if ss.idx != nil {
-		list = ss.idx.Narrow(query, list, 50)
+		bm25Top := ss.idx.Narrow(query, full, 50)
+		// Union: BM25 hits ∪ L1Pre hits (if any), deduped, capped at 64.
+		if len(list) > 0 && len(bm25Top) > 0 {
+			seen := make(map[string]bool, len(bm25Top)+len(list))
+			var union []source.Source
+			for _, s := range bm25Top {
+				if !seen[s.ID] {
+					seen[s.ID] = true
+					union = append(union, s)
+				}
+			}
+			for _, s := range list {
+				if !seen[s.ID] {
+					seen[s.ID] = true
+					union = append(union, s)
+				}
+			}
+			if len(union) > 64 {
+				union = union[:64]
+			}
+			list = union
+		} else if len(bm25Top) > 0 {
+			list = bm25Top
+		}
 	}
 	return list, nil
 }
