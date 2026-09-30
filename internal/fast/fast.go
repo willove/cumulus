@@ -218,20 +218,6 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	if len(ranked) == 0 {
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
 	}
-	// Vocabulary bridge (B1, zero-LLM): the lexical-gap moment — primary
-	// AND fallback both missed. The corpus's own nearest terms retry for
-	// free before any model call; only when they also miss does the LLM
-	// expander run.
-	if len(ranked) == 0 && e.Vocab != nil {
-		if terms := e.Vocab.Nearest(query, 5); len(terms) > 0 {
-			if bridged := e.rankFields(terms, sources); len(bridged) > 0 {
-				ranked = bridged
-				if e.Verbose != nil {
-					e.Verbose("vocab bridge: %q → corpus terms %v", query, terms)
-				}
-			}
-		}
-	}
 	if len(ranked) == 0 && e.Expander != nil {
 		if ctx.Err() != nil {
 			return Answer{}, ctx.Err()
@@ -251,6 +237,22 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		// A failed expander is a degraded retrieval, not a silent no-op.
 		if xerr != nil && e.Verbose != nil {
 			e.Verbose("expander failed, cascade stays at primary/fallback: %v", xerr)
+		}
+	}
+	// Vocabulary bridge (B1, zero-LLM) — STRICTLY ADDITIVE, the v1 lesson:
+	// it runs only after primary, fallback AND the LLM expander have ALL
+	// missed (the true deep-gap moment). The first version ran BEFORE the
+	// expander and short-circuited it; the pair measured that preemption as
+	// a quality LOSS (ev_rec 17→13, 4/0 against) — a cheaper mechanism must
+	// not elbow out a better one. As the last resort it can only add.
+	if len(ranked) == 0 && e.Vocab != nil {
+		if terms := e.Vocab.Nearest(query, 5); len(terms) > 0 {
+			if bridged := e.rankFields(terms, sources); len(bridged) > 0 {
+				ranked = bridged
+				if e.Verbose != nil {
+					e.Verbose("vocab bridge: %q → corpus terms %v", query, terms)
+				}
+			}
 		}
 	}
 	stage("cascade", t1)

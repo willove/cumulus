@@ -76,6 +76,10 @@ run_arm() { # armname value
 		"$ask" -data "$state/data" ensure
 		"$ask" -data "$state/data" ingest-jsonl -file "$BASE/corpus.jsonl" -job ab
 		"$ask" -data "$state/data" ensure -embed >/dev/null
+		# Corpus vocabulary (B1): zero-LLM local build, seconds — present in
+		# every arm so CLUS_VOCAB_BRIDGE arms can fire and control arms
+		# carry the identical corpus state minus the bridge flag.
+		CLUS_EMBED=minilm "$ask" -data "$state/data" vocab -build >/dev/null 2>&1 || true
 		echo "ab: $name fresh store built"
 	else
 		echo "ab: $name resuming $have/$N"
