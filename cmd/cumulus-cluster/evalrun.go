@@ -259,11 +259,13 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if stack.chat != nil {
 			atomic.StoreInt64(budgetBase, stack.chat.TotalTokens())
 		}
-		// P0 corrected: BM25 → minilm Rerank (same as serve). The old
-		// dual-recall KNN arm is retired — minilm at document level was the
-		// wrong layer. Now: BM25 top-50, then minilm reranks by direct
-		// query-vs-body cosine (sentence-level comparison, its design goal).
-		runList := evalIdx.Narrow(it.Query, list, 50)
+		// P0 corrected + conditional expansion (same as serve): BM25 with
+		// fallback LLM expansion when recall < MinRecall, then minilm Rerank.
+		var expand index.Expander
+		if stack.chat != nil {
+			expand = index.MakeLLMExpander(stack.chat.CompleteStructured)
+		}
+		runList := evalIdx.NarrowWithExpansion(ctx, it.Query, list, 50, expand)
 		if len(runList) > 0 && embedFn != nil {
 			runList = index.Rerank(ctx, it.Query, runList, embedFn)
 		}

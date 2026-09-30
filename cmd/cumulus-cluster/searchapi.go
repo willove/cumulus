@@ -225,7 +225,7 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	ss := &searchStack{fe: fe, kbE: kbE, dE: dE, chat: stack.chat, st: st, c: c, sourcesColl: sourcesColl, opt: opt, usage: &usageWeights{}}
 	dE.RankAdmission = rankFunc(fe, st, c, sourcesColl, ss.usage)
 	// Independent search token budget (3.2): judge never draws from this.
-	if stack.chat != nil {
+	if ss.chat != nil {
 		// Per-STACK budget: serve builds one stack per request, eval one
 		// per run, so the counter must be a delta from stack build. Reading
 		// the process-lifetime TotalTokens directly spent the budget
@@ -306,18 +306,18 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
 	}
-	// P0 corrected: BM25 → minilm Rerank. The old dual-recall (BM25 ∪ KNN
-	// document-level) used minilm for the wrong purpose — document-level
-	// retrieval via body_embed KNN. minilm is a SENTENCE-level comparator,
-	// not a document retriever. The corrected flow: BM25 narrows 9,600 →
-	// top-50 (lexical, precise), then minilm reranks those 50 by direct
-	// query-vs-body cosine (its designed use). L1Pre's KNN arm is retired.
+	// P0 corrected + conditional expansion (Sirchmunk's Expander restored):
+	// BM25 narrows 9,600 → top-50. If recall < MinRecall (vocabulary gap),
+	// ONE NoThink LLM call adds domain terms and BM25 retries — the 87%
+	// with good recall pay zero extra latency. Then minilm reranks.
 	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
 	if ss.idx != nil {
-		bm25Top := ss.idx.Narrow(query, list, 50)
+		var expand index.Expander
+		if ss.chat != nil {
+			expand = index.MakeLLMExpander(ss.chat.CompleteStructured)
+		}
+		bm25Top := ss.idx.NarrowWithExpansion(ctx, query, list, 50, expand)
 		if len(bm25Top) > 0 {
-			// Rerank: minilm compares query against each candidate's body
-			// (for short law articles ≈ one sentence — minilm's sweet spot).
 			if embedFn, _, _, eerr := embedderFor(); eerr == nil {
 				bm25Top = index.Rerank(ctx, query, bm25Top, embedFn)
 			}
