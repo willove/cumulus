@@ -70,7 +70,7 @@ def load_rows(path):
     return [json.loads(l) for l in open(path) if l.strip()]
 
 
-def build_corpus(work, n_questions, n_background, seed=7):
+def build_corpus(work, n_questions, n_background, seed=7, items_path=None, corpus_path=None):
     """One file per document.
 
     Concatenating the corpus into a single .md was tried first and it is
@@ -80,9 +80,9 @@ def build_corpus(work, n_questions, n_background, seed=7):
     questions. Retrieval happens at source granularity — feed it sources.
     """
     corpus = {}
-    for row in load_rows(CORPUS):
+    for row in load_rows(corpus_path or CORPUS):
         corpus[row["key"]] = row
-    items = [it for it in load_rows(ITEMS) if it.get("gold_sources") and it["gold_sources"][0] in corpus]
+    items = [it for it in load_rows(items_path or ITEMS) if it.get("gold_sources") and it["gold_sources"][0] in corpus]
     if len(items) < n_questions:
         raise SystemExit(f"only {len(items)} usable items, need {n_questions}")
     sel = items[:n_questions]
@@ -133,12 +133,29 @@ def main():
     ap.add_argument("--port", type=int, default=18115)
     ap.add_argument("--questions", type=int, default=24)
     ap.add_argument("--background", type=int, default=700)
+    ap.add_argument("--corpus", default=CORPUS,
+                    help="corpus JSONL (key/title/text). Must be the set the item "
+                         "set's gold was drawn from: var/golden has L00X-AXXXXX "
+                         "business-key gold, var/scale-eval has 12-hex digest gold. "
+                         "Pairing one with the other's corpus yields 0 usable items.")
+    ap.add_argument("--items", default=ITEMS,
+                    help="item set. The DEFAULT (var/golden) is the WRONG choice: "
+                         "its questions average 41 chars and are multi-part "
+                         "(\"…要报告给谁？\") — the shape the project already "
+                         "documents as 语料无专门条款, which a stub analyzer cannot "
+                         "answer, so every query refuses and no cluster is written. "
+                         "var/scale-eval averages 15 chars and is the set the "
+                         "archived run demonstrably answered.")
     ap.add_argument("--keep", action="store_true", help="keep the temp workdir")
     ap.add_argument("--out", default="", help="write the report JSON here")
     ap.add_argument("--live", action="store_true",
                     help="talk to the real endpoint (bills tokens). Offline stubs "
                          "refuse these questions, so no cluster is ever written and "
                          "reuse_hits stays 0 — that is why the measurement needs this.")
+    ap.add_argument("--timeout", default="20m",
+                    help="CLUS_TIMEOUT for the ingest step. The 60s default cuts a "
+                         "9.6k-doc ingest off mid-flight; the job cursor resumes, "
+                         "but one clean pass is cheaper.")
     ap.add_argument("--token-cap", type=int, default=0,
                     help="abort the drive once the run reports this many tokens")
     args = ap.parse_args()
@@ -153,7 +170,8 @@ def main():
     subprocess.run(["go", "build", "-o", binary, "./cmd/cumulus-cluster"], cwd=REPO, check=True)
 
     print(f"  build corpus ({args.questions} topics + {args.background} background docs) …", flush=True)
-    items, keys = build_corpus(work, args.questions, args.background)
+    items, keys = build_corpus(work, args.questions, args.background,
+                             items_path=args.items, corpus_path=args.corpus)
     topics = [it["query"] for it in items]
 
     if args.live:
@@ -163,7 +181,8 @@ def main():
         env.pop("CLUS_OFFLINE", None)
     else:
         env = dict(os.environ, CLUS_OFFLINE="1", CLUS_ENV="/dev/null",
-                   CLUS_MODEL_DIR=os.path.join(work, "nomodel"))
+                   CLUS_MODEL_DIR=os.path.join(work, "nomodel"),
+                   CLUS_TIMEOUT=args.timeout)
     print("  ingest …", flush=True)
     r = subprocess.run([binary, "-data", store, "ingest-files",
                         "-dir", os.path.join(work, "docs"), "-recursive", "-job", "j1"],
