@@ -37,3 +37,5 @@ results/
 # whole push (100MB/file limit). They are measurement scratch, not results:
 # run.py, compare.py, scenarios.json and the results-*.json stay tracked.
 scripts/bench/run-*/
+# bench/run.py 的语料快照（每次跑自动从 var/cumulus-cluster 重建，33MB 派生数据）
+scripts/bench/base/
