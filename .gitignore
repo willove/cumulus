@@ -3,6 +3,14 @@
 web/node_modules/
 
 bin/
+# go build ./cmd/<x> drops the binary in the repo root; keep probes out of git.
+# (armprobe was left behind once — build with -o bin/ instead.)
+/armprobe
+/scoreprobe
+/knnprobe
+/thetaprobe
+/agreeprobe
+/anchorgen
 data/
 *.local.json
 /cumulus-cluster
