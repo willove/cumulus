@@ -493,7 +493,6 @@ func clampCovers(covers, facts []string) []string {
 	return out
 }
 
-
 func (s *Scorer) evaluate(ctx context.Context, query string, facts []string, sm mcs.Sample) (EvaluateResult, error) {
 	factsText := "（none）"
 	if len(facts) > 0 {
@@ -604,7 +603,6 @@ var (
 	_ mcs.Scorer       = (*Scorer)(nil)
 	_ cluster.Embedder = (*Embedder)(nil)
 )
-
 
 // Analyzer classifies intent and extracts the keyword cascade via the
 // fast_analyze prompt.

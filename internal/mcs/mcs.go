@@ -23,8 +23,8 @@ type Sample struct {
 	End       int      `json:"end"`
 	Content   string   `json:"content"`
 	Source    string   `json:"source"`
-	Arm       string   `json:"arm,omitempty"`     // lex | local | global
-	Covers    []string `json:"covers,omitempty"`  // fact ids this window supports
+	Arm       string   `json:"arm,omitempty"`    // lex | local | global
+	Covers    []string `json:"covers,omitempty"` // fact ids this window supports
 	Score     float64  `json:"score"`
 	Reasoning string   `json:"reasoning"`
 }

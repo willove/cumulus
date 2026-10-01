@@ -38,11 +38,11 @@ type Query struct {
 	LLMCalls   int       `json:"llm_calls"`
 	Tokens     int64     `json:"tokens"`
 	LatencyMS  int64     `json:"latency_ms"`
-	LatencyUS  int64     `json:"latency_us"`     // preferred: microsecond precision
-	Embedder   string    `json:"embedder"`       // which embedder actually served, e.g. minilm-384
+	LatencyUS  int64     `json:"latency_us"`      // preferred: microsecond precision
+	Embedder   string    `json:"embedder"`        // which embedder actually served, e.g. minilm-384
 	Model      string    `json:"model,omitempty"` // which chat model served (消费追溯；离线桩为空)
-	SelfCorr   bool      `json:"self_corrected"` // bounded self-correction ran
-	Refused    bool      `json:"refused"`        // synthesis refused / insufficient evidence
+	SelfCorr   bool      `json:"self_corrected"`  // bounded self-correction ran
+	Refused    bool      `json:"refused"`         // synthesis refused / insufficient evidence
 	// StopReason is why the DEEP loop ended: sufficient | utility | budget;
 	// "" when no loop ran or candidates ran out. Its distribution is the raw
 	// material for tuning the escalation/budget knobs — without it, tuning

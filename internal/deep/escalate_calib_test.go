@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/cluster"
-	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/kb"
 	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/source"

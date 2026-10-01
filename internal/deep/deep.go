@@ -237,12 +237,12 @@ type Result struct {
 
 // StageTokens is the per-stage token attribution carried on Result.
 type StageTokens struct {
-	Rewrite   int64 `json:"rewrite,omitempty"`
-	Fast      int64 `json:"fast,omitempty"`
-	Rank      int64 `json:"rank,omitempty"`
-	Score     int64 `json:"score,omitempty"`
-	Widen     int64 `json:"widen,omitempty"`
-	Synth     int64 `json:"synth,omitempty"`
+	Rewrite int64 `json:"rewrite,omitempty"`
+	Fast    int64 `json:"fast,omitempty"`
+	Rank    int64 `json:"rank,omitempty"`
+	Score   int64 `json:"score,omitempty"`
+	Widen   int64 `json:"widen,omitempty"`
+	Synth   int64 `json:"synth,omitempty"`
 }
 
 // Engine runs FAST and escalates into DEEP when confidence is thin.
@@ -291,9 +291,9 @@ type Engine struct {
 	// relies on it), so an unkeyed memo fed the first query's requirements to
 	// the second — caught by TestAskLazyLoadsCorpusWhenEscalating. Keying on
 	// the query makes reuse safe regardless of the Engine's lifetime.
-	fxMemoQuery   string
-	fxMemo        []facts.Fact
-	fxMemoSet     bool
+	fxMemoQuery string
+	fxMemo      []facts.Fact
+	fxMemoSet   bool
 	// TokenBudget is an independent stop (LENS Def 3 / Remark 2): when > 0
 	// and TokensUsed is wired, the DEEP loop checks remaining budget before
 	// scoring each admitted file. Judge tokens never enter this budget.
@@ -1179,6 +1179,7 @@ func (e *Engine) begin() func(*int64) {
 	before := e.Meter()
 	return func(slot *int64) { *slot += e.Meter() - before }
 }
+
 // sufficientScore is the "this window is strong enough to end the loop" line.
 const sufficientScore = 8.0
 
@@ -1347,7 +1348,6 @@ func coveredFacts(r facts.Report) int {
 	}
 	return n
 }
-
 
 func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
 	// Sampling telemetry: every admission/widen/self-correct SampleBody call
@@ -1976,24 +1976,24 @@ func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, te
 	if e.Synth != nil {
 		// Both branches report their wall time — an early return from the
 		// streaming path used to leave deep_synth out of the stage split.
-	t0 := time.Now()
-	endSyn := e.begin()
-	if e.SynthDelta != nil {
-		if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
-			if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
-				if e.stageTok != nil {
-					endSyn(&e.stageTok.Synth)
+		t0 := time.Now()
+		endSyn := e.begin()
+		if e.SynthDelta != nil {
+			if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
+				if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+					if e.stageTok != nil {
+						endSyn(&e.stageTok.Synth)
+					}
+					e.stage("deep_synth", t0)
+					return s
 				}
-				e.stage("deep_synth", t0)
-				return s
 			}
 		}
-	}
-	s, err := e.Synth.Synthesize(ctx, query, kept)
-	if e.stageTok != nil {
-		endSyn(&e.stageTok.Synth)
-	}
-	e.stage("deep_synth", t0)
+		s, err := e.Synth.Synthesize(ctx, query, kept)
+		if e.stageTok != nil {
+			endSyn(&e.stageTok.Synth)
+		}
+		e.stage("deep_synth", t0)
 		if err == nil && strings.TrimSpace(s) != "" {
 			return s
 		}

@@ -33,7 +33,7 @@ func TestBM25ProbeLawsFull(t *testing.T) {
 		srcs = append(srcs, source.Source{ID: fi.Name(), Title: fi.Name(), Body: string(b), Status: source.StatusActive})
 		return nil
 	})
-		t.Logf("walk root=%s err=%v docs=%d", root, werr, len(srcs))
+	t.Logf("walk root=%s err=%v docs=%d", root, werr, len(srcs))
 	idx := Build(srcs)
 	if t.Failed() {
 		return

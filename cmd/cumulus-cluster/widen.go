@@ -148,7 +148,6 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl st
 	}
 }
 
-
 // injectWeighted appends usage-weighted documents missing from the sweep.
 // A follow-up phrased with zero lexical overlap ("那赔偿呢") produces a
 // keyword sweep that never mentions the remembered document — promotion

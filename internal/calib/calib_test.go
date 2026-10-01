@@ -43,7 +43,7 @@ func TestProposeReproducesTheHandMining(t *testing.T) {
 		return out
 	}
 	var eps []Episode
-	eps = append(eps, mk(0.50, 0.60, 9, 0, "FAST")...)  // 0/9
+	eps = append(eps, mk(0.50, 0.60, 9, 0, "FAST")...)   // 0/9
 	eps = append(eps, mk(0.68, 0.72, 31, 9, "FAST")...)  // 29%
 	eps = append(eps, mk(0.78, 0.82, 41, 20, "FAST")...) // 49%
 	eps = append(eps, mk(0.87, 0.90, 14, 13, "FAST")...) // 93%
@@ -135,8 +135,8 @@ func TestReadUsagePseudoLabels(t *testing.T) {
 		{"mode": "FAST", "conf": 0.72, "stab": 0.67}, // stable → pseudo-correct
 		{"mode": "FAST", "conf": 0.58, "stab": 0.33}, // wobbly → pseudo-wrong
 		{"mode": "FAST", "conf": 0.90, "stab": -1.0}, // not sampled → skipped
-		{"mode": "FAST", "conf": 0.80},                // no stab column → skipped
-		{"mode": "DEEP", "conf": 0.77, "stab": 0.9},   // not the servable population
+		{"mode": "FAST", "conf": 0.80},               // no stab column → skipped
+		{"mode": "DEEP", "conf": 0.77, "stab": 0.9},  // not the servable population
 	}
 	if _, err := c.Insert(context.Background(), "clus_usage", docs); err != nil {
 		t.Fatal(err)

@@ -1,10 +1,10 @@
 // Package calib is the first brick of the cognitive engine: the minimal
 // closed loop that turns hand calibration into a standing mechanism.
 //
-//     mine (confidence bands × outcomes from the system's own episodes)
-//   → propose (the lowest line whose servable band meets the target rate)
-//   → decide (apply/reject from a paired self-test: quality gain vs cost)
-//   → apply (a store-backed override the engine reads at request time)
+//	  mine (confidence bands × outcomes from the system's own episodes)
+//	→ propose (the lowest line whose servable band meets the target rate)
+//	→ decide (apply/reject from a paired self-test: quality gain vs cost)
+//	→ apply (a store-backed override the engine reads at request time)
 //
 // The loop mechanizes exactly what was done by hand on 2026-09-29/30 (95
 // archived FAST rows mined, 0.35 shown dead, 0.85 proposed, the pair run,
@@ -202,10 +202,10 @@ func (s *Store) Save(ctx context.Context, line float64, because string) error {
 // episode bridge reads — the same rows every A/B already archives, so the
 // loop mines history that exists instead of waiting for new infrastructure.
 type resultRow struct {
-	ID    string `json:"id"`
-	Mode  string `json:"mode"`
-	Conf  float64 `json:"conf"`
-	Eval  *struct {
+	ID   string  `json:"id"`
+	Mode string  `json:"mode"`
+	Conf float64 `json:"conf"`
+	Eval *struct {
 		Correct *bool `json:"correct"`
 		EvRec   *bool `json:"ev_rec"`
 	} `json:"eval"`
@@ -218,11 +218,11 @@ type resultRow struct {
 // (citations ∩ gold set membership — no LLM anywhere), answered share,
 // tokens, and the p90 search latency.
 type GuardrailMetrics struct {
-	N        int     `json:"n"`
-	EvRec    int     `json:"ev_rec"`
-	Answered int     `json:"answered"`
-	Tokens   int64   `json:"tokens"`
-	LatP90MS int64   `json:"latency_p90_ms"`
+	N        int   `json:"n"`
+	EvRec    int   `json:"ev_rec"`
+	Answered int   `json:"answered"`
+	Tokens   int64 `json:"tokens"`
+	LatP90MS int64 `json:"latency_p90_ms"`
 }
 
 // ReadMetrics aggregates one run's result rows into guardrail metrics.

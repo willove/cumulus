@@ -5,10 +5,11 @@
 // (thinking on/off) is the degenerate case of this spectrum.
 //
 // Provider mapping (both fields sent; the endpoint uses what it knows):
-//   MiniMax Anthropic API: output_config.effort = "low"|"medium"|"high"|"xhigh"|"max"
-//   OpenAI o1/o3:         reasoning_effort = "low"|"medium"|"high"
-//   Anthropic native:     thinking.budget_tokens (not mapped here — the
-//                          Anthropic-compatible gateways translate effort)
+//
+//	MiniMax Anthropic API: output_config.effort = "low"|"medium"|"high"|"xhigh"|"max"
+//	OpenAI o1/o3:         reasoning_effort = "low"|"medium"|"high"
+//	Anthropic native:     thinking.budget_tokens (not mapped here — the
+//	                       Anthropic-compatible gateways translate effort)
 package llm
 
 import (

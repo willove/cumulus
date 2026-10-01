@@ -193,9 +193,9 @@ func BuildParts(query string, parts []string) []Fact {
 // indistinguishable, and telling them apart is the first debugging step after
 // a fallback fires.
 const (
-	WhyNone         = ""              // accepted (or trivially empty input)
-	WhyUnits        = "units"         // every part failed IsSemanticUnit
-	WhyCoordination = "coordination"  // units survived, query licenses no list
+	WhyNone         = ""             // accepted (or trivially empty input)
+	WhyUnits        = "units"        // every part failed IsSemanticUnit
+	WhyCoordination = "coordination" // units survived, query licenses no list
 )
 
 // BuildPartsWhy is BuildParts with the veto reason spelled out.

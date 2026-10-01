@@ -63,7 +63,7 @@ func fakeEmbed(syn map[string][4]float64) func(ctx context.Context, texts []stri
 // and the bridge returns it — zero LLM anywhere.
 func TestNearestBridgesTheGap(t *testing.T) {
 	syn := map[string][4]float64{
-		"女儿国": {1, 0, 0, 0},
+		"女儿国":  {1, 0, 0, 0},
 		"西梁女界": {1, 0, 0, 0.01},
 	}
 	tbl := &Table{
