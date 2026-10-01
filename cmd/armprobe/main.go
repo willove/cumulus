@@ -135,8 +135,24 @@ func main() {
 			report["arm3_pipeline"] = r3
 			fmt.Printf("arm3  全管线（读入既往运行）   Ev.Rec %5.1f%%   (%d/%d 题)  [端点档·只记录不设门]\n",
 				pct(r3.EvRec), evHitCount(a3), r3.N)
-			fmt.Printf("      LLM 管线净贡献         %+.1f pp   (口径不同，慎作差)\n",
-				pct(r3.EvRec-r2.EvRec))
+			fmt.Printf("      LLM 管线净贡献         %+.1f pp   (arm1 候选集 vs arm3 引用集，口径不同)\n",
+				pct(r3.EvRec-r1.EvRec))
+			if d, derr := loadArm3Detail(*arm3Path); derr == nil {
+				report["arm3_detail"] = d
+				fmt.Printf("\n      ── arm3 准入 × 引用 交叉表 ──\n")
+				fmt.Printf("      gold 进 admitted 且被引用   %3d   (期望形态)\n", d.Both)
+				fmt.Printf("      gold 进 admitted 但没引用 ★ %3d   ← 证据选择损失\n", d.AdmittedOnly)
+				fmt.Printf("      gold 没进 admitted 但被引用   %3d\n", d.CitedOnly)
+				fmt.Printf("      两者皆无（准入就没进来）      %3d   ← 准入损失\n", d.Neither)
+				switch {
+				case d.AdmittedOnly == 0 && d.Neither > 0:
+					fmt.Printf("      ⇒ 判定：缺口在**准入/检索**（非引用选择）—— arm1 找到了 gold 而管线没让它进候选集\n")
+				case d.AdmittedOnly > 0:
+					fmt.Printf("      ⇒ 判定：缺口在**证据选择**（%d 题 gold 被打分却没被引用）\n", d.AdmittedOnly)
+				default:
+					fmt.Printf("      ⇒ 判定：两处均无异常\n")
+				}
+			}
 		}
 	}
 
@@ -262,6 +278,76 @@ func loadItems(path string) ([]eval.Item, error) {
 // "closed_book" block, so a flat decode silently yields every row false:
 //
 //	{"id":..., "mode":..., "eval":{"ev_rec":...}, "closed_book":{...}}
+//
+// arm3Detail carries the admission-vs-citation cross-tab for a prior run.
+//
+// This is the field that decides which of two very different problems the
+// −33pp gap belongs to:
+//
+//	admitted == cited          → the gap is RETRIEVAL/ADMISSION; the pipeline
+//	                             never let gold into the candidate set
+//	admitted > cited           → the gap is EVIDENCE SELECTION; gold was
+//	                             scored but the answer did not use it
+//
+// The archived run turned out to be the first case, with 0 items in the
+// second bucket — so quoting the gap without this cross-tab would have
+// pointed remediation at the wrong stage.
+type arm3Detail struct {
+	Rows          int
+	Admitted      int
+	Cited         int
+	Both          int
+	AdmittedOnly  int // gold scored but never cited  ← evidence-selection loss
+	CitedOnly     int
+	Neither       int // gold never entered the candidate set ← admission loss
+	AdmittedRates float64
+}
+
+func loadArm3Detail(path string) (arm3Detail, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return arm3Detail{}, fmt.Errorf("read arm3: %w", err)
+	}
+	var d arm3Detail
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row struct {
+			Eval struct {
+				EvRec bool `json:"ev_rec"`
+			} `json:"eval"`
+			Admitted bool `json:"gold_in_admitted"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
+		}
+		d.Rows++
+		if row.Admitted {
+			d.Admitted++
+		}
+		if row.Eval.EvRec {
+			d.Cited++
+		}
+		switch {
+		case row.Admitted && row.Eval.EvRec:
+			d.Both++
+		case row.Admitted && !row.Eval.EvRec:
+			d.AdmittedOnly++
+		case !row.Admitted && row.Eval.EvRec:
+			d.CitedOnly++
+		default:
+			d.Neither++
+		}
+	}
+	if d.Rows == 0 {
+		return d, fmt.Errorf("arm3 file produced no rows")
+	}
+	d.AdmittedRates = float64(d.Admitted) / float64(d.Rows)
+	return d, nil
+}
+
 func loadArm3(path string) ([]eval.ItemScore, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
