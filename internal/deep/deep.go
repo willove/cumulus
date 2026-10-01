@@ -790,18 +790,18 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	// 文档族亲缘: the FAST answer's source votes for its family — answers
 	// cluster within a family (11/13 failures were same-family near-misses).
 	affinity := lawAffinity(map[string]bool{base.Answer.SourceID: base.Answer.SourceID != ""}, deepCorpus)
-	deepAns, cover, loops, wid, sc, admitted, cited, stopReason, err := e.runDeep(ctx, query, deepCorpus, affinity)
+	out, err := e.runDeep(ctx, query, deepCorpus, affinity)
 	if err != nil {
 		return Result{}, err
 	}
-	res.Loops = loops
-	res.StopReason = stopReason
-	res.Answer = deepAns
-	res.Cover = cover
-	res.SelfCorrected = sc
-	res.Widened = wid
-	res.Admitted = admitted
-	res.Citations = BuildCitations(query, deepAns, cited)
+	res.Loops = out.Loops
+	res.StopReason = out.StopReason
+	res.Answer = out.Answer
+	res.Cover = out.Cover
+	res.SelfCorrected = out.SelfCorrected
+	res.Widened = out.Widened
+	res.Admitted = out.Admitted
+	res.Citations = BuildCitations(query, out.Answer, out.Corpus)
 	// Mark unresolved refs when DEEP still cannot pin a quote.
 	unresolved := false
 	for _, r := range res.Citations.Refs {
@@ -816,14 +816,14 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	// knowledge" — skip Persist so G-pollute stays clean.
 	if e.Abstain != nil {
 		top := 0.0
-		for _, sm := range deepAns.Samples {
+		for _, sm := range out.Answer.Samples {
 			if sm.Score > top {
 				top = sm.Score
 			}
 		}
-		f := abstain.FromAnswer(query, len(deepCorpus), len(deepAns.Samples), top,
-			len(cover.Missing), deepAns.Confidence,
-			deepAns.Skipped, deepAns.Refused)
+		f := abstain.FromAnswer(query, len(deepCorpus), len(out.Answer.Samples), top,
+			len(out.Cover.Missing), out.Answer.Confidence,
+			out.Answer.Skipped, out.Answer.Refused)
 		p, act := e.Abstain.Decide(f)
 		res.AbstainP, res.AbstainAction = p, act
 		if act == "refuse" {
@@ -837,7 +837,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 		}
 	}
 
-	sub, err := e.KB.Persist(ctx, deepAns, deepCorpus)
+	sub, err := e.KB.Persist(ctx, out.Answer, deepCorpus)
 	if err != nil {
 		return Result{}, err
 	}
@@ -850,7 +850,7 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	// error used to vanish here entirely).
 	res.Judged, res.JudgeOK, res.JudgeWhy = sub.Judged, sub.JudgeOK, sub.JudgeWhy
 	res.Reused = false
-	res.Sampled = len(deepAns.Samples)
+	res.Sampled = len(out.Answer.Samples)
 	res.BudgetHit = e.BudgetHit
 	return res, nil
 }
@@ -1349,7 +1349,24 @@ func coveredFacts(r facts.Report) int {
 	return n
 }
 
-func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (fast.Answer, facts.Report, int, int, bool, []string, []source.Source, string, error) {
+// deepOutcome is one DEEP pass. It used to be nine positional returns, which
+// made every call site read `_, _, _, _, _, _, _, reason, err` — the reader
+// had to COUNT positions to learn that the eighth value was the stop reason.
+// The five test call sites all did exactly that. Note that Admitted (the
+// rank-admission set) and Corpus (what citations resolve against) are
+// deliberately different things; the positional form invited conflating them.
+type deepOutcome struct {
+	Answer        fast.Answer
+	Cover         facts.Report
+	Loops         int
+	Widened       int
+	SelfCorrected bool
+	Admitted      []string
+	Corpus        []source.Source
+	StopReason    string
+}
+
+func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Source, affinity map[string]bool) (deepOutcome, error) {
 	// Sampling telemetry: every admission/widen/self-correct SampleBody call
 	// accumulates here and is reported once on exit (any exit path). DEEP's
 	// repeated whole-body window scoring is where this corpus's token burn
@@ -1854,10 +1871,19 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 		if reason == "" && e.BudgetHit {
 			reason = "insufficient_after_budget"
 		}
-		return fast.Answer{
-			Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true, Refused: true,
-			Summary: insufficientSummary(query, tried, sources),
-		}, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
+		return deepOutcome{
+			Answer: fast.Answer{
+				Query: query, Mode: ModeDEEP, LLMCalls: loops, Skipped: true, Refused: true,
+				Summary: insufficientSummary(query, tried, sources),
+			},
+			Cover:         rep,
+			Loops:         loops,
+			Widened:       widened,
+			SelfCorrected: selfCorrected,
+			Admitted:      admissionIDs(tried),
+			Corpus:        citationCorpus(sources, widenedDocs),
+			StopReason:    reason,
+		}, nil
 	}
 	// D2: truncate THEN recompute Cover so res.Cover matches what synthesis sees.
 	kept = topKeepsWith(kept, sources)
@@ -1942,7 +1968,16 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 	}
-	return best, rep, loops, widened, selfCorrected, admissionIDs(tried), citationCorpus(sources, widenedDocs), reason, nil
+	return deepOutcome{
+		Answer:        best,
+		Cover:         rep,
+		Loops:         loops,
+		Widened:       widened,
+		SelfCorrected: selfCorrected,
+		Admitted:      admissionIDs(tried),
+		Corpus:        citationCorpus(sources, widenedDocs),
+		StopReason:    reason,
+	}, nil
 }
 
 // insufficientSummary is the honest "no answer" answer. The bare

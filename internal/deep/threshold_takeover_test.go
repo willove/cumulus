@@ -45,21 +45,21 @@ func TestSufficientTakeoverMovesTheStop(t *testing.T) {
 
 	t.Setenv("CLUS_SUFFICIENT_SCORE", "")
 	e := engineWith(&fixedScorer{scores: []float64{9, 9, 9}, pass: true})
-	_, _, _, _, _, _, _, reason0, err := e.runDeep(context.Background(), q, srcs, nil)
+	out, err := e.runDeep(context.Background(), q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason0 != "sufficient" {
-		t.Fatalf("default line: a 9.0 cover must stop sufficient, got %q", reason0)
+	if out.StopReason != "sufficient" {
+		t.Fatalf("default line: a 9.0 cover must stop sufficient, got %q", out.StopReason)
 	}
 
 	t.Setenv("CLUS_SUFFICIENT_SCORE", "9.5")
 	e2 := engineWith(&fixedScorer{scores: []float64{9, 9, 9}, pass: true})
-	_, _, _, _, _, _, _, reason1, err := e2.runDeep(context.Background(), q, srcs, nil)
+	out2, err := e2.runDeep(context.Background(), q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason1 == "sufficient" {
+	if out2.StopReason == "sufficient" {
 		t.Fatal("raised line: the same 9.0 window must NOT stop the loop")
 	}
 }

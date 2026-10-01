@@ -90,12 +90,12 @@ func TestAdjacencyPullsContinuationForward(t *testing.T) {
 	t.Setenv("CLUS_DEEP_ADJACENCY", "1")
 	sc := &markerScorer{}
 	e := adjacencyEngine(t, sc, srcs, order)
-	_, _, _, _, _, _, _, reason, err := e.runDeep(context.Background(), q, srcs, nil)
+	out, err := e.runDeep(context.Background(), q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason != "sufficient" {
-		t.Fatalf("with the pull, the continuation must complete the cover and stop: reason=%q scored=%v", reason, sc.scored)
+	if out.StopReason != "sufficient" {
+		t.Fatalf("with the pull, the continuation must complete the cover and stop: out.StopReason=%q scored=%v", out.StopReason, sc.scored)
 	}
 	if len(sc.scored) < 2 || sc.scored[1] != "continuation" {
 		t.Fatalf("the continuation must be explored SECOND (right after its sibling), got %v", sc.scored)
@@ -111,8 +111,7 @@ func TestAdjacencyOffKeepsRankerOrder(t *testing.T) {
 
 	sc := &markerScorer{}
 	e := adjacencyEngine(t, sc, srcs, order)
-	_, _, _, _, _, _, _, _, err := e.runDeep(context.Background(), q, srcs, nil)
-	if err != nil {
+	if _, err := e.runDeep(context.Background(), q, srcs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sc.scored) < 2 || sc.scored[1] != "junk" {

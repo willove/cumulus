@@ -102,7 +102,7 @@ func TestStageTokensAttributeDeepStages(t *testing.T) {
 		source.New("blk/b", "md", "file://b", "b", "zh", q+" 相关记载。正文内容。", nil),
 		source.New("blk/c", "md", "file://c", "c", "zh", q+" 相关记载。正文内容。", nil),
 	}
-	if _, _, _, _, _, _, _, _, err := e.runDeep(ctx, q, srcs, nil); err != nil {
+	if _, err := e.runDeep(ctx, q, srcs, nil); err != nil {
 		t.Fatal(err)
 	}
 	st := e.stageTok

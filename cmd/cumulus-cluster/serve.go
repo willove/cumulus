@@ -153,7 +153,7 @@ func runServe(ctx context.Context, c cumulite.Port, st *ingest.Store, listen, so
 	evalService := eval.NewService(ctx, c, newEvalExecutor, evalFingerprint)
 	defer evalService.Close()
 	registerEvalV2Face(mux, c, buckets, evalService, serveNS, sourcesColl)
-	registerModelFace(mux, c)
+	registerModelFace(mux, c, ctx)
 	logModelReminder()
 	registerWebFace(mux)
 

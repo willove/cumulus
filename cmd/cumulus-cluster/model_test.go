@@ -95,7 +95,7 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = engine.Close() })
 			mux := http.NewServeMux()
-			registerModelFace(mux, engine)
+			registerModelFace(mux, engine, context.Background())
 			w, out := serveJSON(t, mux, http.MethodGet, "/v1/config", nil)
 			if w.Code != http.StatusOK || out["offline"] != tc.wantOffline || out["reasoning_split"] != tc.wantSplit || out["effective_embedder"] != tc.wantEmbed {
 				t.Fatalf("effective config: %d %v", w.Code, out)
@@ -125,7 +125,7 @@ func TestModelProfileFaceAndUsageLedger(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = engine.Close() })
 	mux := http.NewServeMux()
-	registerModelFace(mux, engine)
+	registerModelFace(mux, engine, context.Background())
 
 	// 创建两个 profile；key 不得回显。
 	w, out := serveJSON(t, mux, http.MethodPost, "/v1/models", map[string]any{

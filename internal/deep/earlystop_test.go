@@ -71,12 +71,12 @@ func TestEarlyStopBudgetArmNeedsRisk(t *testing.T) {
 	// 5.0 < 8. This is the regression guard for the default path.
 	noBudget := engineWith(&fixedScorer{scores: []float64{2, 1, 1, 5, 1, 1}, pass: true})
 	noBudget.MaxLoops = 4
-	_, _, _, _, _, _, _, reason1, err := noBudget.runDeep(ctx, q, srcs, nil)
+	out, err := noBudget.runDeep(ctx, q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason1 == "sufficient" {
-		t.Fatalf("without a budget the loop must not stop on a 5.0 window (regression): %q", reason1)
+	if out.StopReason == "sufficient" {
+		t.Fatalf("without a budget the loop must not stop on a 5.0 window (regression): %q", out.StopReason)
 	}
 	if noBudget.Scorer.(*fixedScorer).n < 4 {
 		t.Fatalf("the answering document was never scored (scored %d)", noBudget.Scorer.(*fixedScorer).n)
@@ -88,12 +88,12 @@ func TestEarlyStopBudgetArmNeedsRisk(t *testing.T) {
 	atRisk.MaxLoops = 4
 	atRisk.TokenBudget = 100
 	atRisk.TokensUsed = func() int64 { return 80 } // 80% ≥ 60%
-	_, _, _, _, _, _, _, reason2, err := atRisk.runDeep(ctx, q, srcs, nil)
+	out2, err := atRisk.runDeep(ctx, q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason2 != "sufficient" {
-		t.Fatalf("at risk, a covering window must end the loop, got %q", reason2)
+	if out2.StopReason != "sufficient" {
+		t.Fatalf("at risk, a covering window must end the loop, got %q", out2.StopReason)
 	}
 	// It must have stopped BEFORE scoring the trailing junk documents.
 	if got := atRisk.Scorer.(*fixedScorer).n; got > 4 {
@@ -109,12 +109,12 @@ func TestEarlyStopStrongWindowStopsWithoutBudget(t *testing.T) {
 	srcs := docsWith(q, "blk/a", "blk/b", "blk/c", "blk/d")
 	e := engineWith(&fixedScorer{scores: []float64{1, 9, 1, 1}, pass: true})
 	e.MaxLoops = 4
-	_, _, _, _, _, _, _, reason, err := e.runDeep(ctx, q, srcs, nil)
+	out3, err := e.runDeep(ctx, q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason != "sufficient" {
-		t.Fatalf("a 9.0 covering window must stop the loop, got %q", reason)
+	if out3.StopReason != "sufficient" {
+		t.Fatalf("a 9.0 covering window must stop the loop, got %q", out3.StopReason)
 	}
 }
 
@@ -128,11 +128,11 @@ func TestEarlyStopWeakWindowNeverStops(t *testing.T) {
 	e.MaxLoops = 2
 	e.TokenBudget = 100
 	e.TokensUsed = func() int64 { return 99 }
-	_, _, _, _, _, _, _, reason, err := e.runDeep(ctx, q, srcs, nil)
+	out4, err := e.runDeep(ctx, q, srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason == "sufficient" {
+	if out4.StopReason == "sufficient" {
 		t.Fatal("a window below the cover line must not stop the loop, even at risk")
 	}
 }

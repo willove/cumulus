@@ -216,12 +216,12 @@ func TestWidenExcludeOnlyTried(t *testing.T) {
 		return []source.Source{last}, nil
 	}
 
-	_, _, _, widened, _, _, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	out, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if widened < 1 {
-		t.Fatalf("D1: widen must admit the never-tried file, got widened=%d", widened)
+	if out.Widened < 1 {
+		t.Fatalf("D1: widen must admit the never-tried file, got out.Widened=%d", out.Widened)
 	}
 }
 
@@ -241,11 +241,11 @@ func TestSelfCorrectAfterFullAdmissionBudget(t *testing.T) {
 	e.RankAdmission = func(_ context.Context, _ string, sources []source.Source, _ map[string]bool) ([]source.Source, error) {
 		return sources, nil
 	}
-	_, _, _, _, selfCorrected, _, _, _, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
+	out2, err := e.runDeep(ctx, "连接池最大是多少 以及 超时多久", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !selfCorrected {
+	if !out2.SelfCorrected {
 		t.Fatal("D4: self-correction must run when admission exhausts MaxLoops and coverage is open")
 	}
 }
@@ -387,7 +387,7 @@ func TestZeroHitPreFilterSkipsScorerCalls(t *testing.T) {
 	e.WidenBudget = 3
 
 	t.Setenv("CLUS_DEEP_SKIP_ZERO_HIT", "1")
-	if _, _, _, _, _, _, _, _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
+	if _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sampled) != 1 || sampled[0] != "a" {
@@ -396,7 +396,7 @@ func TestZeroHitPreFilterSkipsScorerCalls(t *testing.T) {
 
 	sampled = nil
 	t.Setenv("CLUS_DEEP_SKIP_ZERO_HIT", "")
-	if _, _, _, _, _, _, _, _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
+	if _, err := e.runDeep(ctx, "连接池最大连接数是多少端口是多少", srcs, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sampled) != 2 {

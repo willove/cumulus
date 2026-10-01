@@ -77,7 +77,12 @@ func modelDownloadBudget() time.Duration {
 // registerModelFace mounts GET /v1/model, POST /v1/model/install,
 // POST /v1/model/verify, GET/POST /v1/config, the model-profile registry
 // (/v1/models*) and the usage ledger (/v1/usage).
-func registerModelFace(mux *http.ServeMux, c cumulite.Port) {
+//
+// shutdown is the serve lifetime: the weight download is parented to it so a
+// restart stops a 485MB transfer instead of leaving a goroutine that no
+// request is waiting on. Pass context.Background() where there is no serve
+// (tests, one-shot CLI).
+func registerModelFace(mux *http.ServeMux, c cumulite.Port, shutdown context.Context) {
 	api := &modelAPI{}
 	profiles := modelprofile.New(c)
 
@@ -107,7 +112,11 @@ func registerModelFace(mux *http.ServeMux, c cumulite.Port) {
 			// process forever, and a stuck transfer must not hang a goroutine
 			// that no request is waiting on. 485MB over a slow link is the
 			// budget; CLUS_MODEL_TIMEOUT overrides it.
-			bg, cancel := context.WithTimeout(context.Background(), modelDownloadBudget())
+			// Parent the download to the serve lifetime, then bound it. Before
+			// this the only parent was context.Background(), so a restart left
+			// the transfer running: the timeout eventually killed it, but a
+			// 2h default means an operator's restart did not actually stop it.
+			bg, cancel := context.WithTimeout(shutdown, modelDownloadBudget())
 			go func() {
 				defer cancel()
 				_, err := installModel(bg, minilm.DefaultDir(), func(p minilm.Progress) {

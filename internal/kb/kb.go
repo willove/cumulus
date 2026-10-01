@@ -40,8 +40,11 @@ type Engine struct {
 	Fast     *fast.Engine
 	Store    cluster.Store
 	Embedder cluster.Embedder
-	Edges    graph.Store // optional; nil = no expansion
-	Cites    CiteStore   // optional; nil = no cite edges
+	Edges    graph.Store // optional; nil = no expansion (see edgeStore)
+	// edgesOnce guards the lazy materialisation of Edges. It must not be
+	// copied after first use; Engine is only ever handled as *Engine.
+	edgesOnce sync.Once
+	Cites     CiteStore // optional; nil = no cite edges
 	// SourceReader narrows the warm-prior validation to the documents a
 	// cluster anchors on. nil = validation uses the caller's list.
 	SourceReader SourceReader
@@ -567,10 +570,20 @@ func (e *Engine) saveAnswer(ctx context.Context, ans fast.Answer, sources []sour
 	return res, nil
 }
 
+// edgeStore returns the weak-edge store, lazily materialising the in-memory
+// one. It used to be an unguarded `if e.Edges == nil { e.Edges = ... }`,
+// reachable from three write paths (query_seq at :155/:223, co-occurrence at
+// :664) that a serving process can enter concurrently — two first-writers
+// could each build a store and one would be silently discarded, losing every
+// edge that writer added. A package-local mutex is enough: the field is set
+// once and then read, and it is an interface value, so it must not be copied
+// or replaced after publication.
 func (e *Engine) edgeStore() graph.Store {
-	if e.Edges == nil {
-		e.Edges = graph.NewMemory()
-	}
+	e.edgesOnce.Do(func() {
+		if e.Edges == nil {
+			e.Edges = graph.NewMemory()
+		}
+	})
 	return e.Edges
 }
 

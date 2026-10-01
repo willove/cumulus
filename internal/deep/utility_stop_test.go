@@ -33,24 +33,24 @@ func TestUtilityStopHaltsHopelessAdmission(t *testing.T) {
 			strings.Repeat("无关内容。", 60), nil))
 	}
 
-	ans, _, _, wid, sc, _, _, reason, err := e.runDeep(ctx, "连接池最大连接数是多少", srcs, nil)
+	out, err := e.runDeep(ctx, "连接池最大连接数是多少", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason != "utility" {
-		t.Fatalf("stop reason = %q, want utility", reason)
+	if out.StopReason != "utility" {
+		t.Fatalf("stop out.StopReason = %q, want utility", out.StopReason)
 	}
 	if sampled != 3 { // 2 rounds to judge + 1 confirming non-improvement
 		t.Fatalf("files sampled = %d, want 3 (not the whole corpus)", sampled)
 	}
-	if widenCalls != 0 || wid != 0 {
-		t.Fatalf("a utility stop must skip widening: calls=%d widened=%d", widenCalls, wid)
+	if widenCalls != 0 || out.Widened != 0 {
+		t.Fatalf("a utility stop must skip widening: calls=%d widened=%d", widenCalls, out.Widened)
 	}
-	if sc {
+	if out.SelfCorrected {
 		t.Fatal("a utility stop must skip self-correction")
 	}
-	if !ans.Skipped {
-		t.Fatalf("the kept set is empty — answer must be skipped: %+v", ans)
+	if !out.Answer.Skipped {
+		t.Fatalf("the kept set is empty — answer must be skipped: %+v", out.Answer)
 	}
 }
 
@@ -79,17 +79,17 @@ func TestUtilityStopDisabledWalksAllCandidates(t *testing.T) {
 	e.CorrectBudget = len(srcs)
 	e.WidenBudget = len(srcs)
 
-	_, _, _, _, sc, _, _, reason, err := e.runDeep(ctx, "连接池最大连接数是多少", srcs, nil)
+	out2, err := e.runDeep(ctx, "连接池最大连接数是多少", srcs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reason != "" {
-		t.Fatalf("stop reason = %q, want empty (candidates exhausted naturally)", reason)
+	if out2.StopReason != "" {
+		t.Fatalf("stop out2.StopReason = %q, want empty (candidates exhausted naturally)", out2.StopReason)
 	}
 	if sampled != 5 {
 		t.Fatalf("files sampled = %d, want all 5", sampled)
 	}
-	if !sc {
+	if !out2.SelfCorrected {
 		t.Fatal("self-correction must still run when the exit is disabled")
 	}
 }
