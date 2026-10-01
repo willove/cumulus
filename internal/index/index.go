@@ -86,7 +86,7 @@ func Build(sources []source.Source) *Index {
 // Rank scores documents against the query with BM25 and returns the top-K
 // doc IDs. Deterministic: ties broken by doc ID (lexicographic).
 func (idx *Index) Rank(query string, k int) []string {
-	if idx == nil || idx.N == 0 || k <= 0 || strings.TrimSpace(query) == "" {
+	if idx == nil || strings.TrimSpace(query) == "" {
 		return nil
 	}
 	terms := mcs.Fields(query)
@@ -101,6 +101,32 @@ func (idx *Index) Rank(query string, k int) []string {
 			seen[t] = true
 			unique = append(unique, t)
 		}
+	}
+	return idx.RankTerms(unique, k)
+}
+
+// RankTerms is Rank over an already-tokenized term list. It exists because
+// re-ranking a SUBSET of the query's terms cannot go through the query
+// string: mcs.Fields would re-tokenize any string we built and hand back
+// different bigrams than the ones we selected. The vocabulary-gap repair
+// (drop the terms the corpus has never seen, keep the rest) is exactly that
+// case — see VocabGapFraction for what "gap" means. Callers pass terms from
+// mcs.Fields(query); duplicates are ignored.
+func (idx *Index) RankTerms(terms []string, k int) []string {
+	if idx == nil || idx.N == 0 || k <= 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(terms))
+	var unique []string
+	for _, t := range terms {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		unique = append(unique, t)
+	}
+	if len(unique) == 0 {
+		return nil
 	}
 
 	// BM25 scoring: only visit docs that contain at least one query term —
