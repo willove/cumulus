@@ -47,6 +47,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -56,6 +57,7 @@ import (
 	"github.com/willove/cumulus/internal/eval"
 	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/mcs"
+	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/source"
 )
 
@@ -73,7 +75,13 @@ func main() {
 		k          = flag.Int("k", 10, "retrieval depth for every arm")
 		outPath    = flag.String("out", "", "optional JSON report path")
 		verbose    = flag.Bool("v", false, "print per-item detail")
-		idForm     = flag.String("id-form", "key", "corpus doc id form: key (src:<corpus key>, default) | revision (src:<key>#1) | bare (<key> with no prefix)")
+		rankMode   = flag.String("rank", "bm25",
+			"candidate ordering: bm25 (pure lexical, index.Rank) | rerank (production "+
+				"shape: BM25 top-50 then index.Rerank by cosine, needs local MiniLM weights)")
+		poolSize = flag.Int("pool", 50,
+			"candidates handed to the reorder step (production passes 50; the pool is "+
+				"what a reranker can rescue, so it must be wider than -k)")
+		idForm = flag.String("id-form", "key", "corpus doc id form: key (src:<corpus key>, default) | revision (src:<key>#1) | bare (<key> with no prefix)")
 	)
 	flag.Parse()
 	if *itemsPath == "" || *corpusPath == "" {
@@ -100,11 +108,48 @@ func main() {
 	fmt.Printf("armprobe  题=%d  文档=%d  k=%d  id-form=%s\n\n", len(items), idx.N, *k, *idForm)
 
 	// ---- arm1: BM25 as-is -------------------------------------------------
+	// rankIDs reproduces whichever candidate ordering is under test. bm25 is
+	// the pure lexical baseline; rerank mirrors the PRODUCTION path
+	// (searchapi.loadCandidates: BM25 top-50 then index.Rerank), so the two
+	// arms differ in exactly one step.
+	embedder, label, embedErr := rerankEmbedder(*rankMode)
+	if *rankMode == "rerank" && embedErr != nil {
+		fatal(fmt.Errorf("-rank rerank needs local MiniLM weights: %w", embedErr))
+	}
+	if label != "" {
+		fmt.Printf("  rerank embedder = %s, pool = %d, k = %d\n\n", label, *poolSize, *k)
+	}
+	ctx := context.Background()
+	// idOf maps a source back to the id the index stored it under, so the
+	// production ordering and the baseline ordering are scored on the same ids.
+	bySrc := make(map[string]string, len(sources))
+	for _, src := range sources {
+		bySrc[src.ID] = src.ID
+	}
+	rankIDs := func(query string) []string {
+		if embedder == nil {
+			return idx.Rank(query, *k)
+		}
+		// Widen the pool to full sources, rerank, then cut to k — the same
+		// shape as loadCandidates, which reorders Sources and then hands the
+		// list on. The final cut is the maxDeepLoops budget.
+		pool := idx.Narrow(query, sources, *poolSize)
+		reranked := index.Rerank(ctx, query, pool, embedder)
+		if len(reranked) > *k {
+			reranked = reranked[:*k]
+		}
+		out := make([]string, 0, len(reranked))
+		for _, src := range reranked {
+			out = append(out, bySrc[src.ID])
+		}
+		return out
+	}
+
 	var a1, a2 []eval.ItemScore
 	gapFired := 0
 	var repaired []int
 	for _, it := range items {
-		a1 = append(a1, eval.Score(it, eval.Prediction{Query: it.Query, SourceIDs: idx.Rank(it.Query, *k)}))
+		a1 = append(a1, eval.Score(it, eval.Prediction{Query: it.Query, SourceIDs: rankIDs(it.Query)}))
 
 		ids, fired := arm2IDs(idx, it.Query, *k)
 		if fired {
@@ -279,6 +324,25 @@ func loadItems(path string) ([]eval.Item, error) {
 //
 //	{"id":..., "mode":..., "eval":{"ev_rec":...}, "closed_book":{...}}
 //
+// rerankEmbedder returns the production embedder for the rerank arm, or nil
+// for the pure-lexical arm. It is deliberately read-only and local: no
+// endpoint, no tokens, and a missing weight directory is an error rather
+// than a silent fall-back to hash-64 (a hash-64 rerank is random order —
+// that is exactly what the production comment warns about).
+func rerankEmbedder(mode string) (func(context.Context, []string) ([][]float64, error), string, error) {
+	if mode != "rerank" {
+		return nil, "", nil
+	}
+	emb, err := minilm.Resolve()
+	if err != nil {
+		return nil, "", err
+	}
+	if emb == nil {
+		return nil, "", fmt.Errorf("MiniLM weights absent at %s — run `cumulus-cluster model install`", minilm.DefaultDir())
+	}
+	return emb.Embed, "minilm-l12-384", nil
+}
+
 // arm3Detail carries the admission-vs-citation cross-tab for a prior run.
 //
 // This is the field that decides which of two very different problems the
