@@ -1,0 +1,35 @@
+{
+ "ns": "chinalaw",
+ "scenarios": [
+  {
+   "name": "cold-1",
+   "queries": [
+    "行政许可法规定的听证程序有哪些"
+   ]
+  },
+  {
+   "name": "cold-2",
+   "queries": [
+    "治安管理处罚法怎么规定噪音扰民"
+   ]
+  },
+  {
+   "name": "cold-3",
+   "queries": [
+    "最新的劳动合同法是什么时候发布的"
+   ]
+  },
+  {
+   "name": "labor-session",
+   "queries": [
+    "试用期被辞退有赔偿吗"
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "queries": [
+    "道交法中，闯红灯是怎么判罚的"
+   ]
+  }
+ ]
+}

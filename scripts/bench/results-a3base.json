@@ -1,0 +1,319 @@
+{
+ "tag": "a3base",
+ "env": [],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "pet-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "d0a4d6282eaa",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "在家养宠物影响到别人了，会有什么处罚",
+     "wall_ms": 129903,
+     "server_ms": 128365,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.633,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 23082
+    },
+    {
+     "pass": 1,
+     "query": "宠物伤人了怎么办",
+     "wall_ms": 33802,
+     "server_ms": 32325,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.464,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 16941
+    },
+    {
+     "pass": 1,
+     "query": "养狗叫得太吵怎么处理",
+     "wall_ms": 125941,
+     "server_ms": 124433,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.497,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 25476
+    },
+    {
+     "pass": 1,
+     "query": "邻居家狗半夜老叫能管吗",
+     "wall_ms": 140305,
+     "server_ms": 138843,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.45,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 24356
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "follow",
+   "pass": 1,
+   "session": "e9ce4915f98b",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "劳动合同法对试用期有什么规定",
+     "wall_ms": 133644,
+     "server_ms": 132194,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.719,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国劳动合同法实施条例.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 11330
+    },
+    {
+     "pass": 1,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 159349,
+     "server_ms": 157876,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.667,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 31586
+    },
+    {
+     "pass": 1,
+     "query": "那经济补偿金怎么算",
+     "wall_ms": 88544,
+     "server_ms": 87076,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.766,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 17107
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "gap",
+   "pass": 1,
+   "session": "78b773f018a1",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 161337,
+     "server_ms": 159866,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.491,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": true,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 28072
+    },
+    {
+     "pass": 1,
+     "query": "酒后开车怎么处理",
+     "wall_ms": 116958,
+     "server_ms": 115508,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.714,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 19246
+    },
+    {
+     "pass": 1,
+     "query": "驾照被扣满了怎么办",
+     "wall_ms": 81622,
+     "server_ms": 80157,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.45,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 20542
+    }
+   ]
+  },
+  {
+   "name": "cold-1",
+   "tag": "cold",
+   "pass": 1,
+   "session": "020d0730394e",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 106169,
+     "server_ms": 104702,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.657,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国工业产品生产许可证管理条例.txt#1",
+      "src:中华人民共和国治安管理处罚法.txt#2",
+      "src:中华人民共和国行政处罚法.txt#2",
+      "src:中华人民共和国行政许可法.txt#2",
+      "src:人民检察院行政诉讼监督规则.txt#1",
+      "src:最高人民法院关于审理行政许可案件若干问题的规定.txt#1",
+      "src:行政执法监督条例.txt#1"
+     ],
+     "refs": 7,
+     "tokens": 61457
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "cold",
+   "pass": 1,
+   "session": "c2f53f8cb23a",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 115871,
+     "server_ms": 114397,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.746,
+     "loops": 4,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1",
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 2,
+     "tokens": 46317
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "cold",
+   "pass": 1,
+   "session": "95cc42fa8954",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 79799,
+     "server_ms": 78333,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.542,
+     "loops": 7,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1",
+      "src:中华人民共和国劳动合同法实施条例.txt#1",
+      "src:劳动保障监察条例.txt#1",
+      "src:最高人民法院关于审理劳动争议案件适用法律问题的解释（一）.txt#1",
+      "src:最高人民法院关于审理劳动争议案件适用法律问题的解释（二）.txt#1",
+      "src:最高人民法院关于审理涉船员纠纷案件若干问题的规定.txt#1"
+     ],
+     "refs": 6,
+     "tokens": 27219
+    }
+   ]
+  }
+ ],
+ "git_rev": "08f752d",
+ "reset": true,
+ "start_learning": {
+  "namespace": "chinalaw",
+  "docs": {
+   "chinalaw:clus_affinity": 0,
+   "chinalaw:clus_cites": 0,
+   "chinalaw:clus_clusters": 0,
+   "chinalaw:clus_conflicts": 0,
+   "chinalaw:clus_evidence": 0,
+   "chinalaw:clus_weak_edges": 0,
+   "clus_evidence": 0
+  },
+  "kv_keys": 0,
+  "total": 0,
+  "clean": true
+ },
+ "at": "2026-10-02 01:05:22"
+}

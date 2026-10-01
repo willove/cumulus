@@ -1,0 +1,167 @@
+{
+ "tag": "a3early",
+ "env": [],
+ "ns": "chinalaw",
+ "runs": [
+  {
+   "name": "cold-1",
+   "tag": "",
+   "pass": 1,
+   "session": "ac4b2193ffdb",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "行政许可法规定的听证程序有哪些",
+     "wall_ms": 125634,
+     "server_ms": 124084,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.664,
+     "loops": 10,
+     "widened": 3,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国工业产品生产许可证管理条例.txt#1",
+      "src:中华人民共和国治安管理处罚法.txt#2",
+      "src:中华人民共和国行政处罚法.txt#2",
+      "src:中华人民共和国行政许可法.txt#2",
+      "src:人民检察院民事诉讼监督规则.txt#1",
+      "src:最高人民法院关于审理行政许可案件若干问题的规定.txt#1",
+      "src:行政执法监督条例.txt#1"
+     ],
+     "refs": 7,
+     "tokens": 60840
+    }
+   ]
+  },
+  {
+   "name": "cold-2",
+   "tag": "",
+   "pass": 1,
+   "session": "1e50fcab5b08",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "治安管理处罚法怎么规定噪音扰民",
+     "wall_ms": 138929,
+     "server_ms": 137470,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.746,
+     "loops": 4,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国噪声污染防治法.txt#1",
+      "src:中华人民共和国治安管理处罚法.txt#2"
+     ],
+     "refs": 2,
+     "tokens": 42897
+    }
+   ]
+  },
+  {
+   "name": "cold-3",
+   "tag": "",
+   "pass": 1,
+   "session": "beae17d1bd2b",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "最新的劳动合同法是什么时候发布的",
+     "wall_ms": 65418,
+     "server_ms": 63972,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.55,
+     "loops": 7,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国劳动合同法.txt#1",
+      "src:中华人民共和国劳动合同法实施条例.txt#1",
+      "src:劳动保障监察条例.txt#1",
+      "src:最高人民法院关于审理劳动争议案件适用法律问题的解释（一）.txt#1",
+      "src:最高人民法院关于审理劳动争议案件适用法律问题的解释（二）.txt#1",
+      "src:最高人民法院关于审理涉船员纠纷案件若干问题的规定.txt#1"
+     ],
+     "refs": 6,
+     "tokens": 27272
+    }
+   ]
+  },
+  {
+   "name": "labor-session",
+   "tag": "",
+   "pass": 1,
+   "session": "2ad22a2dd927",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "试用期被辞退有赔偿吗",
+     "wall_ms": 53170,
+     "server_ms": 51724,
+     "mode": "FAST",
+     "reused": false,
+     "conf": 0.678,
+     "loops": 0,
+     "widened": 0,
+     "stop": "",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国公务员法.txt#1"
+     ],
+     "refs": 1,
+     "tokens": 8706
+    }
+   ]
+  },
+  {
+   "name": "traffic-session",
+   "tag": "",
+   "pass": 1,
+   "session": "3448aad8c35d",
+   "rows": [
+    {
+     "pass": 1,
+     "query": "道交法中，闯红灯是怎么判罚的",
+     "wall_ms": 156866,
+     "server_ms": 155403,
+     "mode": "DEEP",
+     "reused": false,
+     "conf": 0.491,
+     "loops": 2,
+     "widened": 0,
+     "stop": "sufficient",
+     "insufficient": false,
+     "docs": [
+      "src:中华人民共和国道路交通安全法.txt#2"
+     ],
+     "refs": 1,
+     "tokens": 28418
+    }
+   ]
+  }
+ ],
+ "git_rev": "08f752d",
+ "reset": true,
+ "start_learning": {
+  "namespace": "chinalaw",
+  "docs": {
+   "chinalaw:clus_affinity": 0,
+   "chinalaw:clus_cites": 0,
+   "chinalaw:clus_clusters": 0,
+   "chinalaw:clus_conflicts": 0,
+   "chinalaw:clus_evidence": 0,
+   "chinalaw:clus_weak_edges": 0,
+   "clus_evidence": 0
+  },
+  "kv_keys": 0,
+  "total": 0,
+  "clean": true
+ },
+ "at": "2026-10-02 01:49:19"
+}
