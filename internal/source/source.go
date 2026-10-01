@@ -66,6 +66,18 @@ func IDFor(body string) string {
 // identity is the business identity — key, else title, else the content digest
 // — plus the revision number. Ids keep the "src:" prefix that citation
 // classification and eval accounting key off.
+//
+// A key that itself contains '#' or ':' makes this id ambiguous to a naive
+// parser — splitting on the FIRST '#' would read key="spec" from
+// "src:spec#v2#3". That is a latent risk, not a live bug, and the format is
+// deliberately left alone: the only parser in the tree (eval.canonicalKeys)
+// uses LastIndex, 0 of the 14,313 real business keys contain a delimiter, and
+// changing the id format would mean re-ingesting every stored document — a far
+// bigger risk than the ambiguity it removes. The property that actually
+// protects us is pinned by TestRevisionIDWithDelimitersInTheKeyRoundTrips and
+// TestRevisionIDDelimiterAmbiguityIsPinned in internal/eval: a hostile key
+// still canonicalises back to itself, and switching LastIndex to Index would
+// fail those loudly instead of corrupting eval accounting quietly.
 func RevisionID(businessKey, title, bodyDigest string, version int) string {
 	identity := businessKey
 	if identity == "" {

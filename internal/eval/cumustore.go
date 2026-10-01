@@ -89,12 +89,34 @@ func (s *CumuStore) SaveRun(ctx context.Context, d RunDoc) error {
 	return storedoc.WriteStruct(ctx, s.c, s.coll, d.ID, d, exists)
 }
 
+// The documented per-library budget for runs is 200 (README: 每个库的运行与
+// 题集各上限 200 条). listRunsDefault is what a caller that passed no usable
+// limit gets; listRunsMax is the ceiling an over-eager limit is clamped to.
+const (
+	listRunsDefault = 50
+	listRunsMax     = 200
+)
+
 // ListRuns returns the newest runs first (bounded).
+//
+// The 200 cap is real, so a caller asking beyond it must not silently receive
+// a QUARTER of what it asked for. It used to collapse every limit > 200 — and
+// every non-positive limit — to 50, so `ListRuns(500)` returned 50 rows with no
+// error, no log and no way for the caller to tell it had been shortchanged.
+// Clamp to the documented ceiling instead: the caller gets as much as the
+// budget allows, and a short result is then a true signal that the BUDGET
+// (not the caller's request) is the limit.
 func (s *CumuStore) ListRuns(ctx context.Context, limit int) ([]RunDoc, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	if limit <= 0 {
+		limit = listRunsDefault // "caller did not say" — keep the old default
 	}
-	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: 500})
+	if limit > listRunsMax {
+		limit = listRunsMax
+	}
+	// Read a full ceiling's worth regardless of the clamp: the sort/pagination
+	// below walks the result, and the old code hard-coded 500 while the
+	// effective limit could be 50. Reading 200 is both sufficient and honest.
+	res, err := s.c.Query(ctx, s.coll, contract.Query{Limit: listRunsMax})
 	if err != nil {
 		return nil, err
 	}

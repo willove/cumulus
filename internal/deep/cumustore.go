@@ -125,12 +125,36 @@ func (s *CumuStore) All(ctx context.Context) ([]Conflict, error) {
 				B:      str(d["b"]),
 				Group:  str(d["group"]),
 				Reason: str(d["reason"]),
+				Saved:  stamp(d["saved"]),
 			})
 		}
 		if len(res.Documents) < page {
 			return out, nil
 		}
 	}
+}
+
+// stamp reads back a write timestamp. Save stamps c.Saved on every write and
+// the field is documented as surfaced by the read faces, but All never read
+// it — so every conflict came back with a zero Saved no matter how it was
+// persisted. The engine may hand the value back as a time.Time (in-process
+// store) or as an RFC3339 string (serialised doc), so accept both.
+func stamp(v any) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case string:
+		if t == "" {
+			return time.Time{}
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, t); err == nil {
+			return parsed
+		}
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }
 
 func str(v any) string {
