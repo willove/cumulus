@@ -22,3 +22,10 @@ __pycache__/
 .pytest_cache/
 .zcode/
 results/
+
+# Benchmark run stores (scripts/bench/run-*). These are Badger directories: the
+# .vlog/.mem files are SPARSE on disk (16K each) but git records them at their
+# expanded size — four blobs reached 2047MB and 128MB, and GitHub rejected the
+# whole push (100MB/file limit). They are measurement scratch, not results:
+# run.py, compare.py, scenarios.json and the results-*.json stay tracked.
+scripts/bench/run-*/
