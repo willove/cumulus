@@ -563,7 +563,8 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 	}
 	fx := e.decompose(ctx, query)
 	thr := e.thresholdFor(fx) // B10 γ(I): multi-fact intents stop stricter
-	// Deferred FAST synthesis (CLUS_FAST_DEFER_SYNTH, default off): the FAST
+	// Deferred FAST synthesis (CLUS_FAST_DEFER_SYNTH, default ON — opt out
+	// with =0; flipped from opt-in in 9247333): the FAST
 	// tier runs inside KB.Ask below, and a thin-confidence answer there is
 	// certain to escalate — its render is a duplicate the DEEP tier pays
 	// again (stages_tokens, 2026-09-28: fast bucket 14.6k of a 29.8k query,

@@ -321,7 +321,9 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}
 	mean /= float64(len(kept))
 	conf := mcs.Confidence(mean, cov)
-	// Deferred synthesis (CLUS_FAST_DEFER_SYNTH, default off): when the
+	// Deferred synthesis (CLUS_FAST_DEFER_SYNTH, default ON — opt out with
+	// =0; flipped from opt-in in 9247333 because the discarded FAST render was
+	// a measured 35.9s of a query): when the
 	// caller wired an escalation line and this answer sits under it — or the
 	// caller armed the cover arm and the whole query is not lexically covered
 	// — the render is skipped. Escalation is decided by confidence or fact
