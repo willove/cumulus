@@ -981,11 +981,15 @@ print("ok")' ; check "scan→ingest: skipped files never enter the corpus" $?
 # --- Gate Y: strict embedder gate (A3) ---------------------------------------
 # CLUS_MINILM_REQUIRE=1 turns "weights absent" into a hard failure: the L1
 # precision paths must never read green on a silently degraded embedder.
+# Point the CANONICAL CLUS_MODEL_DIR at a path that has no weights — the
+# legacy CLUS_MINILM_DIR would be shadowed by the isolation that
+# offline-gate.sh exports, so naming it here keeps the intent honest instead
+# of relying on which var DefaultDir happens to check first.
 STRICT=0
-CLUS_EMBED=minilm CLUS_MINILM_REQUIRE=1 CLUS_MINILM_DIR="$WORK/no-such-model" $A ensure -embed >/dev/null 2>&1 || STRICT=1
+CLUS_EMBED=minilm CLUS_MINILM_REQUIRE=1 CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed >/dev/null 2>&1 || STRICT=1
 [ "$STRICT" = "1" ] ; check "strict: CLUS_MINILM_REQUIRE=1 fails when the weights are absent" $?
 # Without the flag the same absence still degrades (documented, echoed).
-SOFT="$(CLUS_EMBED=minilm CLUS_MINILM_DIR="$WORK/no-such-model" $A ensure -embed)"
+SOFT="$(CLUS_EMBED=minilm CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed)"
 echo "$SOFT" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r' ; check "strict: without the flag the absence still degrades to hash-64" $?
 
 # --- Gate Z: model weight face (first-run install surface) --------------------
