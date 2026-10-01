@@ -1417,7 +1417,7 @@ stop_serve "$SERVE5_PID"
 # must not share a config hash (they used to — the fingerprint was 4 booleans,
 # so a model swap looked like a no-op on the scoreboard).
 SHA_A="$($A eval-run -file "$OID" -out "$WORK/evalres2.jsonl" -tag sha-b 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); i=t.index("{"); print(json.loads(t[i:])["frozen"]["config_sha"])')"
-SHA_B="$(AIGATE_CHAT_MODEL=other-model $A eval-run -file "$OID" -out "$WORK/evalres3.jsonl" -tag sha-c 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); i=t.index("{"); print(json.loads(t[i:])["frozen"]["config_sha"])')"
+SHA_B="$(LLM_CHAT_MODEL=other-model $A eval-run -file "$OID" -out "$WORK/evalres3.jsonl" -tag sha-c 2>/dev/null | python3 -c 'import json,sys; t=sys.stdin.read(); i=t.index("{"); print(json.loads(t[i:])["frozen"]["config_sha"])')"
 [ -n "$SHA_A" ] && [ -n "$SHA_B" ] && [ "$SHA_A" != "$SHA_B" ] ; check "scoreboard: a different chat model changes the config binding" $?
 
 echo "clus-e2e: $PASS ok, $FAIL fail"

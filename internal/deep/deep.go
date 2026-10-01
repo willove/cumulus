@@ -250,10 +250,10 @@ type Engine struct {
 	KB        *kb.Engine
 	Conflicts ConflictStore
 	// Scorer rates evidence windows in the DEEP loop. nil = offline
-	// KeywordScorer (gate carrier); production wires llm.AigateScorer (D6).
+	// KeywordScorer (gate carrier); production wires llm.Scorer (D6).
 	Scorer mcs.Scorer
 	// Synth renders DEEP summaries (synthesize_roi). nil = deterministic
-	// template; production wires llm.AigateSynthesizer.
+	// template; production wires llm.Synthesizer.
 	Synth fast.Synthesizer
 	// SampleContext is the session fallback for the sampler (see
 	// fast.Engine.SampleContext): when the raw query keeps no window in an
@@ -342,7 +342,7 @@ type Engine struct {
 
 // QuerySimulator produces complementary phrasings without seeing the raw
 // original in the second call (A.2.1 isolation). Implemented by
-// llm.AigateQuerySimulator in production; offline stubs in tests.
+// llm.QuerySimulator in production; offline stubs in tests.
 type QuerySimulator interface {
 	Complement(ctx context.Context, origin string, tried []string) ([]string, error)
 }

@@ -74,10 +74,10 @@ def load_env(path):
 
 
 def chat(env, sys_msg, user_msg, retries=2):
-    base = os.environ.get("AIGATE_BASE_URL") or env.get("LLM_BASE_URL") or ""
-    key = os.environ.get("AIGATE_API_KEY") or env.get("LLM_API_KEY") or ""
+    base = os.environ.get("LLM_BASE_URL") or env.get("LLM_BASE_URL") or ""
+    key = os.environ.get("LLM_API_KEY") or env.get("LLM_API_KEY") or ""
     # Same alias table the CLI applies (LLM_* -> AIGATE_*, env wins).
-    model = (os.environ.get("AIGATE_CHAT_MODEL") or env.get("LLM_CHAT_MODEL")
+    model = (os.environ.get("LLM_CHAT_MODEL") or env.get("LLM_CHAT_MODEL")
              or env.get("LLM_MODEL_NAME") or "")
     if not base or not key or not model:
         raise SystemExit("generator: endpoint not configured (need AIGATE_*/LLM_* base/key/model)")

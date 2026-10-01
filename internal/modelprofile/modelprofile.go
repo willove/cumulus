@@ -1,7 +1,7 @@
 // Package modelprofile is the model-endpoint registry: multiple saved
 // endpoint profiles (base URL / key / chat+embed model), one of them ACTIVE.
 //
-// The engine itself keeps reading plain env (AIGATE_*) — every request rebuilds
+// The engine itself keeps reading plain env (LLM_*) — every request rebuilds
 // the stack from env, which is what makes activation cheap: activating a
 // profile MATERIALIZES it (writes .env + sets process env) and the next request
 // picks it up with zero stack changes. The registry is the durable, enumerable

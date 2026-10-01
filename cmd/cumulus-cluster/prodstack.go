@@ -1,8 +1,8 @@
 package main
 
-// prodStack bundles the aigate-backed collaborators shared by the search and
+// prodStack bundles the endpoint-backed collaborators shared by the search and
 // eval-run faces (D6). Nil interfaces are the offline stubs that keep gates
-// deterministic without AIGATE_BASE_URL.
+// deterministic without LLM_BASE_URL.
 
 import (
 	"fmt"
@@ -64,20 +64,20 @@ func newProdStack() prodStack {
 	if os.Getenv("CLUS_VERBOSE") == "1" {
 		fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=%s\n", cacheEmbedder)
 	}
-	base := os.Getenv("AIGATE_BASE_URL")
+	base := os.Getenv("LLM_BASE_URL")
 	if base == "" || offlineForced() {
 		// CLUS_OFFLINE=1 pins the offline stubs even with an endpoint
 		// configured — gate harnesses must not reach a live model.
 		return ps
 	}
 	split := strings.Contains(strings.ToLower(base), "minimaxi.com")
-	if v := os.Getenv("AIGATE_REASONING_SPLIT"); v != "" {
+	if v := os.Getenv("LLM_REASONING_SPLIT"); v != "" {
 		split = v == "1" || strings.EqualFold(v, "true")
 	}
 	chat := &llm.ChatClient{
 		BaseURL:        base,
-		APIKey:         os.Getenv("AIGATE_API_KEY"),
-		Model:          envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
+		APIKey:         os.Getenv("LLM_API_KEY"),
+		Model:          envOr("LLM_CHAT_MODEL", "mimo/cascade-pro"),
 		Caller:         "cumulus-cluster",
 		ReasoningSplit: split,
 		// One pooled client for the process. ChatClient.http() builds a fresh
@@ -101,11 +101,11 @@ func newProdStack() prodStack {
 	// (score line × rep.Complete keyword cover), which is what keeps either
 	// mode's wobble from fabricating a stop; flipping this default would need
 	// a hysteresis/confirm design on the stop line itself, not more patience.
-	ps.scorer = &llm.AigateScorer{Client: chat, NoThink: envFlag("CLUS_SCORER_NOTHINK"), Effort: ps.stageEffort["SCORE"]}
-	ps.analyzer = &llm.AigateAnalyzer{Client: chat, Effort: ps.stageEffort["ANALYZE"]}
-	ps.synth = &llm.AigateSynthesizer{Client: chat, Effort: ps.stageEffort["SYNTH"]}
-	ps.expander = &llm.AigateKeywordExpander{Client: chat, Levels: 3}
-	ps.rewriter = &llm.AigateHistoryRewriter{Client: chat}
+	ps.scorer = &llm.Scorer{Client: chat, NoThink: envFlag("CLUS_SCORER_NOTHINK"), Effort: ps.stageEffort["SCORE"]}
+	ps.analyzer = &llm.Analyzer{Client: chat, Effort: ps.stageEffort["ANALYZE"]}
+	ps.synth = &llm.Synthesizer{Client: chat, Effort: ps.stageEffort["SYNTH"]}
+	ps.expander = &llm.KeywordExpander{Client: chat, Levels: 3}
+	ps.rewriter = &llm.HistoryRewriter{Client: chat}
 	// Per-stage thinking depth (MiniMax M3.1+/OpenAI o1+ compatible):
 	// CLUS_THINK_<STAGE>=low|medium|high|xhigh|max overrides per stage.
 	// Defaults: mechanical passes low, quality moments high. Set on the
@@ -123,18 +123,18 @@ func newProdStack() prodStack {
 	// title / defined term / enumeration, which become phantom requirements the
 	// DEEP loop can never satisfy. Wired ONLY when a live endpoint is present,
 	// so every offline gate keeps the deterministic path byte-for-byte (D6).
-	// Embeddings switch only on an explicit AIGATE_EMBED_MODEL: the gateway's
+	// Embeddings switch only on an explicit LLM_EMBED_MODEL: the gateway's
 	// chat surface is the proven path, and a silent embed probe against a
 	// chat-only gateway would fail every search.
-	if os.Getenv("AIGATE_EMBED_MODEL") != "" {
-		ps.emb = &llm.AigateEmbedder{
+	if os.Getenv("LLM_EMBED_MODEL") != "" {
+		ps.emb = &llm.Embedder{
 			BaseURL: base,
-			APIKey:  os.Getenv("AIGATE_API_KEY"),
-			Model:   os.Getenv("AIGATE_EMBED_MODEL"),
+			APIKey:  os.Getenv("LLM_API_KEY"),
+			Model:   os.Getenv("LLM_EMBED_MODEL"),
 			N:       64,
 		}
 		if os.Getenv("CLUS_VERBOSE") == "1" {
-			fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=aigate:%s\n", os.Getenv("AIGATE_EMBED_MODEL"))
+			fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=remote:%s\n", os.Getenv("LLM_EMBED_MODEL"))
 		}
 	}
 	return ps

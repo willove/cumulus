@@ -9,7 +9,8 @@
 // Resolution order (explicit beats implicit):
 //  1. environment variables already set
 //  2. KEY=VALUE lines from $CLUS_ENV (default ./.env)
-//  3. the LLM_* operator convention aliased onto AIGATE_*
+//  3. legacy variable names (AIGATE_* from the retired gateway plan, the
+//     operator's LLM_MODEL_NAME) aliased onto the canonical LLM_* keys
 package envcfg
 
 import (
@@ -24,12 +25,17 @@ import (
 // file into memory at full size.
 const maxEnvBytes = 1 << 20
 
-// aliasPairs maps the operator's LLM_* convention onto the suite's AIGATE_*
-// variables. AIGATE_* wins when both are present.
+// aliasPairs maps legacy names onto the canonical LLM_* variables. The
+// canonical key wins when both are present; a legacy key only fills an
+// unset canonical one, so an older .env written against the AIGATE_*
+// names keeps working unchanged.
 var aliasPairs = [][2]string{
-	{"LLM_BASE_URL", "AIGATE_BASE_URL"},
-	{"LLM_API_KEY", "AIGATE_API_KEY"},
-	{"LLM_MODEL_NAME", "AIGATE_CHAT_MODEL"},
+	{"AIGATE_BASE_URL", "LLM_BASE_URL"},
+	{"AIGATE_API_KEY", "LLM_API_KEY"},
+	{"AIGATE_CHAT_MODEL", "LLM_CHAT_MODEL"},
+	{"AIGATE_EMBED_MODEL", "LLM_EMBED_MODEL"},
+	{"AIGATE_REASONING_SPLIT", "LLM_REASONING_SPLIT"},
+	{"LLM_MODEL_NAME", "LLM_CHAT_MODEL"},
 }
 
 // CheckPath rejects traversal elements in an operator-supplied env-file path.
@@ -95,18 +101,20 @@ func Load() error {
 }
 
 // OfflineForced reports whether this process is pinned to the offline stubs
-// (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_BASE_URL / AIGATE_*
-// in the developer's shell — the documented operator convention — cannot route
-// deterministic gates at a live endpoint: each search would spend real tokens
-// and the assertions would flake (D6: mechanism gates must be reproducible).
-// It only ever removes collaborators; it never invents an endpoint.
+// (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_* endpoint
+// config in the developer's shell — the documented operator convention —
+// cannot route deterministic gates at a live endpoint: each search would
+// spend real tokens and the assertions would flake (D6: mechanism gates
+// must be reproducible). It only ever removes collaborators; it never
+// invents an endpoint.
 func OfflineForced() bool {
 	v := strings.TrimSpace(os.Getenv("CLUS_OFFLINE"))
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// ApplyLLMAliases maps the operator's LLM_* convention onto AIGATE_*.
-func ApplyLLMAliases() {
+// ApplyAliases maps legacy variable names (AIGATE_*, LLM_MODEL_NAME) onto
+// the canonical LLM_* keys, filling only canonical keys that are unset.
+func ApplyAliases() {
 	for _, p := range aliasPairs {
 		if os.Getenv(p[1]) == "" && os.Getenv(p[0]) != "" {
 			_ = os.Setenv(p[1], os.Getenv(p[0]))
@@ -115,11 +123,11 @@ func ApplyLLMAliases() {
 }
 
 // Resolve is the standard two-step every face should call before reading
-// AIGATE_* : Load the suite .env, then apply the LLM_* aliases.
+// LLM_*: Load the suite .env, then apply the legacy aliases.
 func Resolve() error {
 	if err := Load(); err != nil {
 		return err
 	}
-	ApplyLLMAliases()
+	ApplyAliases()
 	return nil
 }

@@ -61,7 +61,7 @@ func registerEvalV2Face(mux *http.ServeMux, c cumulite.Port, buckets *bucket.Sto
 			}
 			model := "offline-keyword"
 			if evalLiveAvailable() {
-				model = envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro")
+				model = envOr("LLM_CHAT_MODEL", "mimo/cascade-pro")
 			}
 			// queue_limit is the real backpressure boundary: a ninth pending run
 			// is refused with 409, so the wizard can explain it before a user

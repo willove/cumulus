@@ -161,8 +161,8 @@ func TestEvalConfigFingerprintCoversModelAndBudgets(t *testing.T) {
 		setup func()
 		want  string
 	}{
-		{"chat model", func() { t.Setenv("AIGATE_CHAT_MODEL", "model-B") }, "model-B"},
-		{"embed model", func() { t.Setenv("AIGATE_EMBED_MODEL", "text-embedding-3-small") }, "text-embedding-3-small"},
+		{"chat model", func() { t.Setenv("LLM_CHAT_MODEL", "model-B") }, "model-B"},
+		{"embed model", func() { t.Setenv("LLM_EMBED_MODEL", "text-embedding-3-small") }, "text-embedding-3-small"},
 		{"minilm seat", func() { t.Setenv("CLUS_EMBED", "minilm") }, "embed_seat=minilm"},
 		{"abstain on", func() { t.Setenv("CLUS_ABSTAIN", "1") }, "abstain=1"},
 		{"query sim on", func() { t.Setenv("CLUS_QUERY_SIM", "1") }, "query_sim=1"},
@@ -184,9 +184,9 @@ func TestEvalConfigFingerprintCoversModelAndBudgets(t *testing.T) {
 	// A different budget/model must produce a different HASH, not just text.
 	var prev string
 	for _, alt := range []func(){
-		func() { t.Setenv("AIGATE_CHAT_MODEL", "m1") },
-		func() { t.Setenv("AIGATE_CHAT_MODEL", "m2") },
-		func() { t.Setenv("AIGATE_CHAT_MODEL", "") },
+		func() { t.Setenv("LLM_CHAT_MODEL", "m1") },
+		func() { t.Setenv("LLM_CHAT_MODEL", "m2") },
+		func() { t.Setenv("LLM_CHAT_MODEL", "") },
 	} {
 		alt()
 		sha := eval.Freeze(nil, nil, []byte(evalConfig(st, false, false, false, "ev")), 0).ConfigSHA

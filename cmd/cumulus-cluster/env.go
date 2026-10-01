@@ -1,7 +1,8 @@
-// Per-suite endpoint configuration: the suite reads its own .env (same
-// LLM_* convention as the operator's other tools) and maps it onto the
-// AIGATE_* variables the CLI consumes. Environment variables already set
-// always win over the file — explicit beats implicit.
+// Per-suite endpoint configuration: the suite reads its own .env (LLM_*
+// convention, same as the operator's other tools) and aliases legacy names
+// (AIGATE_* from the retired gateway plan, LLM_MODEL_NAME) onto the
+// canonical LLM_* keys. Environment variables already set always win over
+// the file — explicit beats implicit.
 package main
 
 import (
@@ -43,16 +44,16 @@ func envFlag(key string) bool {
 func loadDotEnv() error { return envcfg.Load() }
 
 // offlineForced reports whether this process is pinned to the offline stubs
-// (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_BASE_URL / AIGATE_*
+// (CLUS_OFFLINE=1). Gate harnesses set it so an ambient LLM_* endpoint config
 // in the developer's shell — the documented operator convention — cannot route
 // deterministic gates at a live endpoint: each search would spend real tokens
 // and the assertions would flake (D6: mechanism gates must be reproducible).
 // It only ever removes collaborators; it never invents an endpoint.
 func offlineForced() bool { return envcfg.OfflineForced() }
 
-// applyLLMAliases maps the operator's LLM_* convention onto the suite's
-// AIGATE_* variables (AIGATE_* wins if both are present).
-func applyLLMAliases() { envcfg.ApplyLLMAliases() }
+// applyLLMAliases maps legacy names (AIGATE_* from the retired gateway plan,
+// LLM_MODEL_NAME) onto the canonical LLM_* keys, filling only unset ones.
+func applyLLMAliases() { envcfg.ApplyAliases() }
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

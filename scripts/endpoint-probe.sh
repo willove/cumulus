@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # R4 / §6.5 measurement — DIRECT LLM mode (debug/escape-hatch; production
 # stays on the gateway for governance). Talks to the upstream itself:
-#   AIGATE_BASE_URL=https://api.minimaxi.com/v1  AIGATE_CHAT_MODEL=MiniMax-M3
+#   LLM_BASE_URL=https://api.minimaxi.com/v1  LLM_CHAT_MODEL=MiniMax-M3
 #
 # Measures: FAST/DEEP/REUSE behavior on the real model (latency, confidence,
 # resolved citations, reuse hit), plus a token-magnitude estimate sampled from
 # cumulus-cluster's real prompt templates (MiniMax usage field). Recorded, not gated.
 #
 # Usage: bash scripts/endpoint-probe.sh [api_base]
-#   key: AIGATE_API_KEY, or falls back to ~/.sirchmunk/.env (local dev only).
+#   key: LLM_API_KEY, or falls back to ~/.sirchmunk/.env (local dev only).
 set -u
 cd "$(dirname "$0")/.."
-BASE="${1:-${AIGATE_BASE_URL:-https://api.minimaxi.com/v1}}"
-MODEL="${AIGATE_CHAT_MODEL:-MiniMax-M3}"
-if [ -z "${AIGATE_API_KEY:-}" ] && [ -f "$HOME/.sirchmunk/.env" ]; then
+BASE="${1:-${LLM_BASE_URL:-https://api.minimaxi.com/v1}}"
+MODEL="${LLM_CHAT_MODEL:-MiniMax-M3}"
+if [ -z "${LLM_API_KEY:-}" ] && [ -f "$HOME/.sirchmunk/.env" ]; then
 	# Local-dev fallback: the key the operator provisioned for sirchmunk.
-	AIGATE_API_KEY="$(grep '^LLM_API_KEY=' "$HOME/.sirchmunk/.env" | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+	LLM_API_KEY="$(grep '^LLM_API_KEY=' "$HOME/.sirchmunk/.env" | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
 fi
-[ -n "${AIGATE_API_KEY:-}" ] || { echo "endpoint-probe: AIGATE_API_KEY required"; exit 1; }
+[ -n "${LLM_API_KEY:-}" ] || { echo "endpoint-probe: LLM_API_KEY required"; exit 1; }
 
 WORK="$(mktemp -d)"
 STORE="$WORK/data"
@@ -36,7 +36,7 @@ open(os.path.join(w, "manual.md"), "w").write(body)
 PY
 "$WORK/cumulus-cluster" -data "$STORE" put -title "部署手册" -key manual -body-file "$WORK/manual.md" >/dev/null
 
-export AIGATE_BASE_URL="$BASE" AIGATE_CHAT_MODEL="$MODEL" AIGATE_API_KEY
+export LLM_BASE_URL="$BASE" LLM_CHAT_MODEL="$MODEL" LLM_API_KEY
 A=("$WORK/cumulus-cluster" -data "$STORE")
 echo "direct endpoint: $BASE model=$MODEL"
 
@@ -71,9 +71,9 @@ run DEEP "北极狐栖息地的气候特征"
 python3 - "$MODEL" <<'PY'
 import json, os, urllib.request
 
-base = os.environ["AIGATE_BASE_URL"].rstrip("/")
-key = os.environ["AIGATE_API_KEY"]
-model = os.environ["AIGATE_CHAT_MODEL"]
+base = os.environ["LLM_BASE_URL"].rstrip("/")
+key = os.environ["LLM_API_KEY"]
+model = os.environ["LLM_CHAT_MODEL"]
 
 def usage_for(messages, tag):
     body = json.dumps({"model": model, "messages": messages, "temperature": 0, "max_tokens": 300}).encode()

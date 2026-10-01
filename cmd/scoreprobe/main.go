@@ -207,7 +207,7 @@ func main() {
 	flag.Parse()
 
 	// Same endpoint resolution as the search stack (internal/envcfg): the
-	// suite .env plus the LLM_* → AIGATE_* alias. A reliability number
+	// suite .env plus the legacy-name aliases. A reliability number
 	// gathered against a different model is not a number about this suite.
 	if err := envcfg.Resolve(); err != nil {
 		fmt.Fprintln(os.Stderr, "scoreprobe:", err)
@@ -222,9 +222,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "scoreprobe: -repeats must be >= 2 to measure anything")
 		os.Exit(1)
 	}
-	base := os.Getenv("AIGATE_BASE_URL")
+	base := os.Getenv("LLM_BASE_URL")
 	if base == "" {
-		fmt.Fprintln(os.Stderr, "scoreprobe: AIGATE_BASE_URL absent (and no LLM_BASE_URL in the suite .env) — needs a live model (record-only, never gates)")
+		fmt.Fprintln(os.Stderr, "scoreprobe: LLM_BASE_URL absent (and no LLM_BASE_URL in the suite .env) — needs a live model (record-only, never gates)")
 		os.Exit(1)
 	}
 
@@ -246,11 +246,11 @@ func main() {
 
 	chat := &llm.ChatClient{
 		BaseURL: base,
-		APIKey:  os.Getenv("AIGATE_API_KEY"),
-		Model:   envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
+		APIKey:  os.Getenv("LLM_API_KEY"),
+		Model:   envOr("LLM_CHAT_MODEL", "mimo/cascade-pro"),
 		Caller:  "scoreprobe",
 	}
-	sc := &llm.AigateScorer{Client: chat, NoThink: *thinkOff}
+	sc := &llm.Scorer{Client: chat, NoThink: *thinkOff}
 
 	ctx := context.Background()
 	// KeywordScorer is intentional: we only want its WINDOWS, never its

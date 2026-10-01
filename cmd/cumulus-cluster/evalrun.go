@@ -30,9 +30,9 @@ import (
 	"github.com/willove/cumulus/internal/eval"
 	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/graph"
+	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
-	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/ns"
 	"github.com/willove/cumulus/internal/prompts"
@@ -46,20 +46,20 @@ const judgePass = 7.0
 // Token fields are split (LENS Remark 2 / ir-rag 3.2): search vs judge are
 // independent cost centers; judge never rides on the search budget.
 type evalResult struct {
-	ID      string  `json:"id"`
-	Mode    string  `json:"mode,omitempty"`
-	Loops   int     `json:"loops,omitempty"`
-	Widened int     `json:"widened,omitempty"`
+	ID      string `json:"id"`
+	Mode    string `json:"mode,omitempty"`
+	Loops   int    `json:"loops,omitempty"`
+	Widened int    `json:"widened,omitempty"`
 	// StopReason mirrors deep.Result.StopReason ("" on FAST hits and errors).
 	StopReason string `json:"stop_reason,omitempty"`
 	// LatencyMS is the search-phase wall time (deep.Result.LatencyMS):
 	// sealed before any judge/closed-book call, so it measures retrieval
 	// latency uncontaminated — the instrument the batching default decision
 	// reads (v3a's only remaining claim is serial-round-trip collapse).
-	LatencyMS int64 `json:"latency_ms,omitempty"`
-	Conf    float64 `json:"conf,omitempty"`
-	Calls   int     `json:"calls,omitempty"`
-	Tokens  int64   `json:"tokens,omitempty"` // search path only (pre-judge)
+	LatencyMS int64   `json:"latency_ms,omitempty"`
+	Conf      float64 `json:"conf,omitempty"`
+	Calls     int     `json:"calls,omitempty"`
+	Tokens    int64   `json:"tokens,omitempty"` // search path only (pre-judge)
 	// SearchTokens aliases the search-path spend; JudgeTokens is judge_correct
 	// (system arm + closed-book arm when both run). Total = Search+Judge.
 	SearchTokens int64 `json:"search_tokens,omitempty"`
@@ -210,7 +210,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 			}
 		}
 		if os.Getenv("CLUS_QUERY_SIM") == "1" {
-			dE.QuerySim = &llm.AigateQuerySimulator{Client: stack.chat}
+			dE.QuerySim = &llm.QuerySimulator{Client: stack.chat}
 		}
 	} else if os.Getenv("CLUS_ABSTAIN") == "1" {
 		dE.Abstain = abstain.Default()
@@ -221,9 +221,9 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		}
 	}
 	// 扩征（Sirchmunk ReAct 对齐）：覆盖未满时用新关键词向全库再征文件。
-	var refiner *llm.AigateKeywordRefiner
+	var refiner *llm.KeywordRefiner
 	if stack.chat != nil {
-		refiner = &llm.AigateKeywordRefiner{Client: stack.chat}
+		refiner = &llm.KeywordRefiner{Client: stack.chat}
 	}
 	dE.Widen = widenFunc(fe, st, c, sourcesColl, refiner)
 	// DEEP 探索前按关键词级联重排候选（10k 规模：ingest 顺序不可用）
@@ -374,9 +374,9 @@ func evalConfig(stack prodStack, prior, l1pre, judge bool, namespace string) str
 	var b strings.Builder
 	fmt.Fprintf(&b, "prior=%v;l1pre=%v;judge=%v;ns=%s", prior, l1pre, judge, namespace)
 	// Model identity, masked endpoint, and the embedder that actually served.
-	fmt.Fprintf(&b, ";chat_model=%s", envOr("AIGATE_CHAT_MODEL", "<offline-stub>"))
-	fmt.Fprintf(&b, ";base_url=%s", maskHost(os.Getenv("AIGATE_BASE_URL")))
-	fmt.Fprintf(&b, ";embed_model=%s", os.Getenv("AIGATE_EMBED_MODEL"))
+	fmt.Fprintf(&b, ";chat_model=%s", envOr("LLM_CHAT_MODEL", "<offline-stub>"))
+	fmt.Fprintf(&b, ";base_url=%s", maskHost(os.Getenv("LLM_BASE_URL")))
+	fmt.Fprintf(&b, ";embed_model=%s", os.Getenv("LLM_EMBED_MODEL"))
 	if os.Getenv("CLUS_EMBED") == "minilm" {
 		fmt.Fprintf(&b, ";embed_seat=minilm")
 	} else {
@@ -424,8 +424,8 @@ func maskHost(u string) string {
 // embedSeatLabel names the embedder the search stack would actually build, so a
 // silent hash fallback is visible in the binding.
 func embedSeatLabel() string {
-	if os.Getenv("AIGATE_EMBED_MODEL") != "" {
-		return "aigate"
+	if os.Getenv("LLM_EMBED_MODEL") != "" {
+		return "remote"
 	}
 	return "local-hash-64"
 }

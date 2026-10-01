@@ -28,7 +28,7 @@ func uploadFixture(t *testing.T) (*http.ServeMux, *nsEnsurer, string) {
 	t.Helper()
 	t.Setenv("CLUS_OFFLINE", "1")
 	t.Setenv("CLUS_EMBED", "")
-	t.Setenv("AIGATE_BASE_URL", "")
+	t.Setenv("LLM_BASE_URL", "")
 	tmp := t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	engine, err := cumulite.Open("", cumulite.WithInMemory())

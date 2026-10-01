@@ -26,9 +26,9 @@ import (
 	"github.com/willove/cumulus/internal/deep"
 	"github.com/willove/cumulus/internal/fast"
 	"github.com/willove/cumulus/internal/graph"
+	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/kb"
-	"github.com/willove/cumulus/internal/index"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/monitor"
@@ -99,7 +99,7 @@ type searchStack struct {
 	// idx is the in-memory inverted index (P0): built lazily on the first
 	// query, reused for the process lifetime (a corpus change needs a
 	// serve restart — same v1 contract as the vocab table).
-	idx *index.Index
+	idx     *index.Index
 	idxOnce sync.Once
 }
 
@@ -129,8 +129,8 @@ func (u *usageWeights) get() map[string]float64 {
 	return out
 }
 
-// newSearchStack wires the production stack (aigate when configured, offline
-// stubs otherwise) with the ranked admission and widening callbacks.
+// newSearchStack wires the production stack (remote endpoint when configured,
+// offline stubs otherwise) with the ranked admission and widening callbacks.
 func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions) (*searchStack, error) {
 	return newSearchStackWith(ctx, c, st, sourcesColl, opt, newProdStack())
 }
@@ -259,7 +259,7 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	}
 	// Opt-in two-call query simulator (2.4): needs an endpoint.
 	if stack.chat != nil && os.Getenv("CLUS_QUERY_SIM") == "1" {
-		dE.QuerySim = &llm.AigateQuerySimulator{Client: stack.chat}
+		dE.QuerySim = &llm.QuerySimulator{Client: stack.chat}
 	}
 	if len(opt.History) > 0 {
 		dE.History = opt.History
@@ -268,11 +268,11 @@ func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, 
 	return ss, nil
 }
 
-func refinerFor(chat *llm.ChatClient) *llm.AigateKeywordRefiner {
+func refinerFor(chat *llm.ChatClient) *llm.KeywordRefiner {
 	if chat == nil {
 		return nil
 	}
-	return &llm.AigateKeywordRefiner{Client: chat}
+	return &llm.KeywordRefiner{Client: chat}
 }
 
 // kvLastCluster is kb.LastClusterCursor over cumulite KV: the ask sequence's
@@ -562,152 +562,152 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		if !requireHTTPBucket(w, r, buckets, in.NS) {
 			return
 		}
-			// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
-			// collections and KV keys all move to the request's namespace.
-			// Declaring it here (not only on the ingest faces) keeps the
-			// cluster persist from failing on a search-only namespace.
-			if err := ensure.declare(r.Context(), firstNonEmpty(in.NS, serveNS)); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-				return
-			}
-			stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
-			if serr != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]any{"error": serr.Error()})
-				return
-			}
-			opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History, Namespace: firstNonEmpty(in.NS, serveNS)}
-			var sess *sessionStore
-			if in.Session != "" {
-				sess = &sessionStore{c: c, ns: firstNonEmpty(in.NS, serveNS)}
-				hist, _, err := sessionHistory(r.Context(), *sess, in.Session, 6)
-				if err != nil {
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-					return
-				}
-				opt.History = hist
-			}
-			// Per-stage latency telemetry: one recorder per request, fed by
-			// the FAST/DEEP stage hooks. Pure observability — nil-side
-			// behaviour (gates) is unchanged. When the SSE face is active the
-			// same hook also pushes a live "stage" status event, so the
-			// browser can render a progress timeline as the stages complete
-			// instead of one static line of text.
-			var stageMu sync.Mutex
-			stages := map[string]int64{}
-			// streamState carries the SSE face's live sinks (content deltas,
-			// stage events) to the engine hooks; both faces share the delta
-			// counter so "already on screen" is detectable on either.
-			var streamMu sync.Mutex
-			streamed := 0
-			streamSt := &streamState{mu: &streamMu, streamed: &streamed}
-			// recStage/emitDelta read streamSt.onStage/emit WITHOUT st.mu.
-			// That is safe by structure, not by luck: sseSearch installs the
-			// hooks, runs runSearch (whose engine hooks call back
-			// synchronously), and clears them — all in THIS goroutine. If
-			// the engine hooks ever fire from another goroutine, these reads
-			// must take st.mu first, and the lock ORDER against the SSE
-			// writer mutex must be designed then — do not bolt a lock on
-			// here without that design.
-			recStage := func(name string, d time.Duration) {
-				stageMu.Lock()
-				stages[name] = d.Microseconds()
-				stageMu.Unlock()
-				if streamSt.onStage != nil {
-					streamSt.onStage(name, d)
-				}
-			}
-			emitDelta := func(chunk string) {
-				streamMu.Lock()
-				streamed++
-				n := streamed
-				streamMu.Unlock()
-				if streamSt.emit != nil && n > 0 {
-					streamSt.emit("content", map[string]any{"text": chunk})
-				}
-			}
-			ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
+		// Whole-stack scoping: L0 corpus, L1 evidence, L2 cluster
+		// collections and KV keys all move to the request's namespace.
+		// Declaring it here (not only on the ingest faces) keeps the
+		// cluster persist from failing on a search-only namespace.
+		if err := ensure.declare(r.Context(), firstNonEmpty(in.NS, serveNS)); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
+		if serr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": serr.Error()})
+			return
+		}
+		opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History, Namespace: firstNonEmpty(in.NS, serveNS)}
+		var sess *sessionStore
+		if in.Session != "" {
+			sess = &sessionStore{c: c, ns: firstNonEmpty(in.NS, serveNS)}
+			hist, _, err := sessionHistory(r.Context(), *sess, in.Session, 6)
 			if err != nil {
-				// Stack failures (e.g. required weights missing) are failed
-				// queries too. No embedder actually served this request.
-				trackQuery(tracker, in.NS, deep.Result{}, "", err.Error(), nil)
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
-			if verbose || os.Getenv("CLUS_VERBOSE") == "1" {
-				vlog := func(f string, a ...any) {
-					log.Printf("[search %s] %s", in.Query, fmt.Sprintf(f, a...))
-				}
-				ss.dE.Verbose = vlog
-				ss.fe.Verbose = vlog
+			opt.History = hist
+		}
+		// Per-stage latency telemetry: one recorder per request, fed by
+		// the FAST/DEEP stage hooks. Pure observability — nil-side
+		// behaviour (gates) is unchanged. When the SSE face is active the
+		// same hook also pushes a live "stage" status event, so the
+		// browser can render a progress timeline as the stages complete
+		// instead of one static line of text.
+		var stageMu sync.Mutex
+		stages := map[string]int64{}
+		// streamState carries the SSE face's live sinks (content deltas,
+		// stage events) to the engine hooks; both faces share the delta
+		// counter so "already on screen" is detectable on either.
+		var streamMu sync.Mutex
+		streamed := 0
+		streamSt := &streamState{mu: &streamMu, streamed: &streamed}
+		// recStage/emitDelta read streamSt.onStage/emit WITHOUT st.mu.
+		// That is safe by structure, not by luck: sseSearch installs the
+		// hooks, runs runSearch (whose engine hooks call back
+		// synchronously), and clears them — all in THIS goroutine. If
+		// the engine hooks ever fire from another goroutine, these reads
+		// must take st.mu first, and the lock ORDER against the SSE
+		// writer mutex must be designed then — do not bolt a lock on
+		// here without that design.
+		recStage := func(name string, d time.Duration) {
+			stageMu.Lock()
+			stages[name] = d.Microseconds()
+			stageMu.Unlock()
+			if streamSt.onStage != nil {
+				streamSt.onStage(name, d)
 			}
-			ss.fe.Stages = recStage
-			ss.dE.Stages = recStage
-			// 使用先验：本问词元命中的账本权重 ∪ 本会话证据栈，装进 prior
-			// 的 history 臂。失败/关闭都是静默降级，不影响检索本身。
-			applyUsagePrior(r.Context(), c, in.NS, in.Query, in.Session, ss.fe, ss.dE, ss.usage)
-			// 会话采样上下文（词汇鸿沟回退）：本会话近几问原文。仅当主查询
-			// 在选定文档里采不到任何过线窗口时才生效——常见路径零影响。
-			if ctxText := sampleContextText(opt.History); ctxText != "" {
-				ss.fe.SampleContext = ctxText
-				ss.dE.SampleContext = ctxText
+		}
+		emitDelta := func(chunk string) {
+			streamMu.Lock()
+			streamed++
+			n := streamed
+			streamMu.Unlock()
+			if streamSt.emit != nil && n > 0 {
+				streamSt.emit("content", map[string]any{"text": chunk})
 			}
-			// Streaming synthesis: the SSE face consumes deltas live; the
-			// JSON face counts them (no transport) so it can fall back to
-			// the whole-summary response.
-			ss.fe.SynthDelta = emitDelta
-			ss.dE.SynthDelta = emitDelta
-			if !stream {
-				res, err := runSearch(r.Context(), ss, in.Query)
-				if err != nil {
-					// The failure is itself a data point: the tracker's contract
-					// ("a failed query must be visible as an error, not silently
-					// absent") was broken exactly here — every 500 left no trace
-					// and the monitor's error count could never leave zero.
-					trackQuery(tracker, in.NS, deep.Result{}, embedderLabel(ss), err.Error(), stages)
-					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-					return
-				}
-				if sess != nil {
-					extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))
-					if _, aerr := sess.appendTurnDurable(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary, extra); aerr == nil {
-						res.Session = in.Session
-					} else {
-						// A failed session write must be visible, not silent: the
-						// query itself succeeded and the caller has no other signal.
-						log.Printf("[search] session %s: turn not persisted: %v", in.Session, aerr)
-					}
-				}
-				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Answer, res.Citations.Refs)
-				if ss.chat != nil {
-					// Sampled BEFORE the usage snapshot so a self-play draw's
-					// extra paraphrase+search tokens land on this row — the
-					// cost of the label is paid where the label is earned.
-					stab := maybeSelfplay(r.Context(), ss, in.Query, res)
-					prompt, completion, total := ss.chat.SnapshotUsage()
-					recordConsumption(r.Context(), c, in.NS, res.Model, prompt, completion, total, res, stab)
-				}
-				// Before writing the response: the early return below must not
-				// skip the registry bookkeeping.
-				bumpBucket(r.Context(), buckets, in.NS, ss)
-				trackQuery(tracker, in.NS, res, embedderLabel(ss), "", stages)
-				writeJSON(w, http.StatusOK, res)
+		}
+		ss, err := newSearchStack(r.Context(), c, stForReq, sourcesForReq, opt)
+		if err != nil {
+			// Stack failures (e.g. required weights missing) are failed
+			// queries too. No embedder actually served this request.
+			trackQuery(tracker, in.NS, deep.Result{}, "", err.Error(), nil)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if verbose || os.Getenv("CLUS_VERBOSE") == "1" {
+			vlog := func(f string, a ...any) {
+				log.Printf("[search %s] %s", in.Query, fmt.Sprintf(f, a...))
+			}
+			ss.dE.Verbose = vlog
+			ss.fe.Verbose = vlog
+		}
+		ss.fe.Stages = recStage
+		ss.dE.Stages = recStage
+		// 使用先验：本问词元命中的账本权重 ∪ 本会话证据栈，装进 prior
+		// 的 history 臂。失败/关闭都是静默降级，不影响检索本身。
+		applyUsagePrior(r.Context(), c, in.NS, in.Query, in.Session, ss.fe, ss.dE, ss.usage)
+		// 会话采样上下文（词汇鸿沟回退）：本会话近几问原文。仅当主查询
+		// 在选定文档里采不到任何过线窗口时才生效——常见路径零影响。
+		if ctxText := sampleContextText(opt.History); ctxText != "" {
+			ss.fe.SampleContext = ctxText
+			ss.dE.SampleContext = ctxText
+		}
+		// Streaming synthesis: the SSE face consumes deltas live; the
+		// JSON face counts them (no transport) so it can fall back to
+		// the whole-summary response.
+		ss.fe.SynthDelta = emitDelta
+		ss.dE.SynthDelta = emitDelta
+		if !stream {
+			res, err := runSearch(r.Context(), ss, in.Query)
+			if err != nil {
+				// The failure is itself a data point: the tracker's contract
+				// ("a failed query must be visible as an error, not silently
+				// absent") was broken exactly here — every 500 left no trace
+				// and the monitor's error count could never leave zero.
+				trackQuery(tracker, in.NS, deep.Result{}, embedderLabel(ss), err.Error(), stages)
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 				return
 			}
-			bumpBucket(r.Context(), buckets, in.NS, ss)
-			sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt, wire)
-			if serr == nil {
-				recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Answer, sres.Citations.Refs)
-				if ss.chat != nil {
-					stab := maybeSelfplay(r.Context(), ss, in.Query, sres)
-					prompt, completion, total := ss.chat.SnapshotUsage()
-					recordConsumption(r.Context(), c, in.NS, sres.Model, prompt, completion, total, sres, stab)
+			if sess != nil {
+				extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))
+				if _, aerr := sess.appendTurnDurable(r.Context(), in.Session, in.Query, in.Query, res.Answer.Summary, extra); aerr == nil {
+					res.Session = in.Session
+				} else {
+					// A failed session write must be visible, not silent: the
+					// query itself succeeded and the caller has no other signal.
+					log.Printf("[search] session %s: turn not persisted: %v", in.Session, aerr)
 				}
 			}
-			errMsg := ""
-			if serr != nil {
-				errMsg = serr.Error()
+			recordUsage(r.Context(), c, in.NS, in.Query, in.Session, res.Answer, res.Citations.Refs)
+			if ss.chat != nil {
+				// Sampled BEFORE the usage snapshot so a self-play draw's
+				// extra paraphrase+search tokens land on this row — the
+				// cost of the label is paid where the label is earned.
+				stab := maybeSelfplay(r.Context(), ss, in.Query, res)
+				prompt, completion, total := ss.chat.SnapshotUsage()
+				recordConsumption(r.Context(), c, in.NS, res.Model, prompt, completion, total, res, stab)
 			}
-			trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg, stages)
+			// Before writing the response: the early return below must not
+			// skip the registry bookkeeping.
+			bumpBucket(r.Context(), buckets, in.NS, ss)
+			trackQuery(tracker, in.NS, res, embedderLabel(ss), "", stages)
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
+		bumpBucket(r.Context(), buckets, in.NS, ss)
+		sres, serr := sseSearch(w, r, ss, in.Query, sess, in.Session, verbose || os.Getenv("CLUS_VERBOSE") == "1", stages, streamSt, wire)
+		if serr == nil {
+			recordUsage(r.Context(), c, in.NS, in.Query, in.Session, sres.Answer, sres.Citations.Refs)
+			if ss.chat != nil {
+				stab := maybeSelfplay(r.Context(), ss, in.Query, sres)
+				prompt, completion, total := ss.chat.SnapshotUsage()
+				recordConsumption(r.Context(), c, in.NS, sres.Model, prompt, completion, total, sres, stab)
+			}
+		}
+		errMsg := ""
+		if serr != nil {
+			errMsg = serr.Error()
+		}
+		trackQuery(tracker, in.NS, sres, embedderLabel(ss), errMsg, stages)
 	}
 	handle := func(stream bool, wire wireFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -802,7 +802,7 @@ func trackQuery(tr *monitor.Tracker, ns string, res deep.Result, embedder, errMs
 		Confidence: a.Confidence, Coverage: a.Coverage, Samples: len(a.Samples),
 		Loops: res.Loops, Widened: res.Widened, LLMCalls: a.LLMCalls,
 		Tokens: res.Tokens, LatencyMS: res.LatencyMS, LatencyUS: res.LatencyUS, Embedder: embedder,
-		Model: res.Model,
+		Model:    res.Model,
 		SelfCorr: res.SelfCorrected, Refused: a.Refused, Error: errMsg,
 		StopReason: res.StopReason, Stages: stages,
 	})
@@ -980,8 +980,8 @@ func embedderName(emb cluster.Embedder) string {
 		return "minilm-l12-384"
 	case cluster.Local:
 		return fmt.Sprintf("local-hash-%d", emb.N)
-	case *llm.AigateEmbedder:
-		return fmt.Sprintf("aigate-%d", emb.Dims())
+	case *llm.Embedder:
+		return fmt.Sprintf("remote-%d", emb.Dims())
 	default:
 		return fmt.Sprintf("embed-%d", emb.Dims())
 	}

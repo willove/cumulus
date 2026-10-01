@@ -66,7 +66,7 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 	// an inert endpoint and never invoke a model or install weights.
 	t.Setenv("CLUS_MODEL_DIR", t.TempDir())
 	t.Setenv("CLUS_VERBOSE", "")
-	t.Setenv("AIGATE_API_KEY", "test-key-never-returned")
+	t.Setenv("LLM_API_KEY", "test-key-never-returned")
 	for _, tc := range []struct {
 		name, base, forcedOffline, split, embed, remoteEmbed, required string
 		wantOffline, wantSplit                                         bool
@@ -76,18 +76,18 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 		{name: "auto minimax", base: "http://minimaxi.com.invalid", wantSplit: true, wantEmbed: "local-hash-64"},
 		{name: "explicit disable", base: "http://minimaxi.com.invalid", split: "0", wantEmbed: "local-hash-64"},
 		{name: "explicit false", base: "http://minimaxi.com.invalid", split: "false", wantEmbed: "local-hash-64"},
-		{name: "explicit enable", base: "http://model.invalid", split: "1", remoteEmbed: "configured-model", wantSplit: true, wantEmbed: "aigate-64"},
+		{name: "explicit enable", base: "http://model.invalid", split: "1", remoteEmbed: "configured-model", wantSplit: true, wantEmbed: "remote-64"},
 		{name: "explicit true", base: "http://model.invalid", split: "TRUE", wantSplit: true, wantEmbed: "local-hash-64"},
 		{name: "forced offline", base: "http://minimaxi.com.invalid", forcedOffline: "1", split: "1", remoteEmbed: "ignored", wantOffline: true, wantEmbed: "local-hash-64"},
 		{name: "missing minilm fallback", embed: "minilm", wantOffline: true, wantEmbed: "local-hash-64"},
 		{name: "missing minilm required", embed: "minilm", required: "1", wantOffline: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("AIGATE_BASE_URL", tc.base)
+			t.Setenv("LLM_BASE_URL", tc.base)
 			t.Setenv("CLUS_OFFLINE", tc.forcedOffline)
-			t.Setenv("AIGATE_REASONING_SPLIT", tc.split)
+			t.Setenv("LLM_REASONING_SPLIT", tc.split)
 			t.Setenv("CLUS_EMBED", tc.embed)
-			t.Setenv("AIGATE_EMBED_MODEL", tc.remoteEmbed)
+			t.Setenv("LLM_EMBED_MODEL", tc.remoteEmbed)
 			t.Setenv("CLUS_MINILM_REQUIRE", tc.required)
 			engine, err := cumulite.Open("", cumulite.WithInMemory())
 			if err != nil {
@@ -114,7 +114,7 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 // the usage ledger round-trip. CLUS_ENV points the .env write at a temp file so
 // the test never touches the developer's real config.
 func TestModelProfileFaceAndUsageLedger(t *testing.T) {
-	for _, key := range []string{"AIGATE_BASE_URL", "AIGATE_CHAT_MODEL", "AIGATE_EMBED_MODEL", "AIGATE_API_KEY", "AIGATE_REASONING_SPLIT", "LLM_BASE_URL", "LLM_MODEL_NAME", "LLM_API_KEY"} {
+	for _, key := range []string{"LLM_BASE_URL", "LLM_CHAT_MODEL", "LLM_EMBED_MODEL", "LLM_API_KEY", "LLM_REASONING_SPLIT", "LLM_BASE_URL", "LLM_MODEL_NAME", "LLM_API_KEY"} {
 		t.Setenv(key, os.Getenv(key)) // register restore; materialize mutates these
 	}
 	envFile := filepath.Join(t.TempDir(), ".env")
@@ -152,11 +152,11 @@ func TestModelProfileFaceAndUsageLedger(t *testing.T) {
 	if w.Code != http.StatusOK || out["hot_applied"] != true {
 		t.Fatalf("activate: %d %v", w.Code, out)
 	}
-	if os.Getenv("AIGATE_CHAT_MODEL") != "MiniMax-M3" {
-		t.Fatalf("activation not hot-applied: %q", os.Getenv("AIGATE_CHAT_MODEL"))
+	if os.Getenv("LLM_CHAT_MODEL") != "MiniMax-M3" {
+		t.Fatalf("activation not hot-applied: %q", os.Getenv("LLM_CHAT_MODEL"))
 	}
 	raw, rerr := os.ReadFile(envFile)
-	if rerr != nil || !strings.Contains(string(raw), "AIGATE_BASE_URL=https://api.minimaxi.com/v1") {
+	if rerr != nil || !strings.Contains(string(raw), "LLM_BASE_URL=https://api.minimaxi.com/v1") {
 		t.Fatalf("activation must materialize .env: %v %s", rerr, raw)
 	}
 	w, out = serveJSON(t, mux, http.MethodGet, "/v1/models", nil)

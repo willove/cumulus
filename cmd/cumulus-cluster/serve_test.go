@@ -28,7 +28,7 @@ import (
 // registered bucket. The HTTP write gate is tested separately below; changing
 // the HTTP contract must not restrict the internal store/CLI ingest rules.
 func TestLegacyStoreEnsuresNamespacesBeforeFirstWrite(t *testing.T) {
-	t.Setenv("AIGATE_BASE_URL", "") // offline: no network in tests
+	t.Setenv("LLM_BASE_URL", "") // offline: no network in tests
 	ctx := context.Background()
 
 	engine, err := cumulite.Open(t.TempDir())
@@ -75,7 +75,7 @@ func TestLegacyStoreEnsuresNamespacesBeforeFirstWrite(t *testing.T) {
 // declared must still persist its cluster.
 func TestSearchRequiresRegisteredBucket(t *testing.T) {
 	ctx := context.Background()
-	t.Setenv("AIGATE_BASE_URL", "") // offline stubs: no network in tests
+	t.Setenv("LLM_BASE_URL", "") // offline stubs: no network in tests
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func waitHTTPJob(t *testing.T, h http.Handler, path string) map[string]any {
 func TestHTTPIngestRequiresRegisteredBucket(t *testing.T) {
 	t.Setenv("CLUS_OFFLINE", "1")
 	t.Setenv("CLUS_EMBED", "")
-	t.Setenv("AIGATE_BASE_URL", "")
+	t.Setenv("LLM_BASE_URL", "")
 	for _, serveNS := range []string{"", "serve"} {
 		for _, kind := range []string{"source", "directory", "candidates", "adapt"} {
 			t.Run(serveNS+"/"+kind, func(t *testing.T) {

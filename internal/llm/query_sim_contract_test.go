@@ -57,7 +57,7 @@ func TestQuerySimulatorSecondCallIsolatedFromOriginal(t *testing.T) {
 		`{"need": "消费者退货期限与无需说明理由的法定权利"}`,
 		`{"queries": ["退货的合理期限在消保法里怎么规定", "无需说明理由的退货权依据是什么", "七天无理由退货怎么退"]}`,
 	)
-	sim := &AigateQuerySimulator{Client: chat, Tau: 0.5}
+	sim := &QuerySimulator{Client: chat, Tau: 0.5}
 
 	got, err := sim.Complement(context.Background(), orig, nil)
 	if err != nil {
@@ -97,7 +97,7 @@ func TestQuerySimulatorFiltersTriedQueries(t *testing.T) {
 		`{"need": "商标使用的法律定义与构成要件"}`,
 		`{"queries": ["商标使用的定义是什么", "怎样才算商标性使用", "商标性使用的构成要件有哪些"]}`,
 	)
-	sim := &AigateQuerySimulator{Client: chat, Tau: 0.5}
+	sim := &QuerySimulator{Client: chat, Tau: 0.5}
 	tried := []string{"商标使用的定义是什么"}
 	got, err := sim.Complement(context.Background(), orig, tried)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestQuerySimulatorFiltersTriedQueries(t *testing.T) {
 // what must never happen is a partial/garbage candidate list.
 func TestQuerySimulatorDegradesQuietly(t *testing.T) {
 	chat, _ := newStubClient(`not json at all`)
-	sim := &AigateQuerySimulator{Client: chat}
+	sim := &QuerySimulator{Client: chat}
 	got, err := sim.Complement(context.Background(), "任意问题", nil)
 	if len(got) != 0 {
 		t.Fatalf("bad abstraction must yield no complements, got %v", got)

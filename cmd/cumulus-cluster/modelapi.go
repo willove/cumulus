@@ -150,19 +150,19 @@ func registerModelFace(mux *http.ServeMux, c cumulite.Port) {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET/POST only"})
 			return
 		}
-		key := os.Getenv("AIGATE_API_KEY")
+		key := os.Getenv("LLM_API_KEY")
 		// Resolve through the production wiring, without calling a model or
 		// installing weights. Configured values alone hide offline overrides,
-		// MiniLM fallback and AIGATE_REASONING_SPLIT=0/1.
+		// MiniLM fallback and LLM_REASONING_SPLIT=0/1.
 		ps := newProdStack()
 		effectiveEmbedder, embedErr := embedderName(ps.emb), ""
 		if ps.embErr != nil {
 			effectiveEmbedder, embedErr = "", ps.embErr.Error()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_url":           os.Getenv("AIGATE_BASE_URL"),
-			"chat_model":         os.Getenv("AIGATE_CHAT_MODEL"),
-			"embed_model":        os.Getenv("AIGATE_EMBED_MODEL"),
+			"base_url":           os.Getenv("LLM_BASE_URL"),
+			"chat_model":         os.Getenv("LLM_CHAT_MODEL"),
+			"embed_model":        os.Getenv("LLM_EMBED_MODEL"),
 			"api_key_set":        key != "",
 			"api_key_len":        len(key),
 			"reasoning_split":    ps.chat != nil && ps.chat.ReasoningSplit,
@@ -185,7 +185,7 @@ func registerModelFace(mux *http.ServeMux, c cumulite.Port) {
 		}
 		_ = decode(r, &in)
 		var client *llm.ChatClient
-		model := os.Getenv("AIGATE_CHAT_MODEL")
+		model := os.Getenv("LLM_CHAT_MODEL")
 		if in.ProfileID != "" {
 			p, err := profiles.Get(r.Context(), in.ProfileID)
 			if err != nil || p == nil {
@@ -346,26 +346,25 @@ func maskedProfile(p modelprofile.Profile) map[string]any {
 		"chat_model": p.ChatModel, "embed_model": p.EmbedModel,
 		"api_key_set": p.APIKey != "", "api_key_len": len(p.APIKey),
 		"reasoning_split": p.ReasoningSplit,
-		"created_at": p.CreatedAt, "updated_at": p.UpdatedAt, "last_used_at": p.LastUsedAt,
+		"created_at":      p.CreatedAt, "updated_at": p.UpdatedAt, "last_used_at": p.LastUsedAt,
 	}
 }
 
 // materializeProfile writes one profile through to .env (restart-durable) and
-// the process env (hot). Same alias discipline as saveConfig: LLM_* + AIGATE_*.
+// the process env (hot), canonical LLM_* keys only.
 func materializeProfile(p modelprofile.Profile) (string, error) {
 	rs := "0"
 	if p.ReasoningSplit {
 		rs = "1"
 	}
 	file := map[string]string{
-		"LLM_BASE_URL": p.BaseURL, "AIGATE_BASE_URL": p.BaseURL,
-		"LLM_MODEL_NAME": p.ChatModel, "AIGATE_CHAT_MODEL": p.ChatModel,
-		"AIGATE_EMBED_MODEL":     p.EmbedModel,
-		"AIGATE_REASONING_SPLIT": rs,
+		"LLM_BASE_URL":        p.BaseURL,
+		"LLM_CHAT_MODEL":      p.ChatModel,
+		"LLM_EMBED_MODEL":     p.EmbedModel,
+		"LLM_REASONING_SPLIT": rs,
 	}
 	if p.APIKey != "" {
 		file["LLM_API_KEY"] = p.APIKey
-		file["AIGATE_API_KEY"] = p.APIKey
 	}
 	path := envFilePath()
 	if err := writeEnvValues(path, file); err != nil {
@@ -460,15 +459,11 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	file, env := map[string]string{}, map[string]string{}
-	add := func(llmKey, agateKey, value string) {
-		if llmKey != "" {
-			file[llmKey] = value
-		}
-		file[agateKey] = value
-		env[agateKey] = value
-		if llmKey != "" {
-			env[llmKey] = value
-		}
+	// setEnv materializes one profile field into the .env file map and the
+	// live process env under its canonical LLM_* key.
+	setEnv := func(key, value string) {
+		file[key] = value
+		env[key] = value
 	}
 	if in.BaseURL != nil {
 		value := strings.TrimSpace(*in.BaseURL)
@@ -480,7 +475,7 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// 空字符串是「清空」的显式请求（回到离线桩），不是「不修改」。
-		add("LLM_BASE_URL", "AIGATE_BASE_URL", value)
+		setEnv("LLM_BASE_URL", value)
 	}
 	if in.ChatModel != nil {
 		value := strings.TrimSpace(*in.ChatModel)
@@ -488,7 +483,7 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Chat 模型名过长"})
 			return
 		}
-		add("LLM_MODEL_NAME", "AIGATE_CHAT_MODEL", value)
+		setEnv("LLM_CHAT_MODEL", value)
 	}
 	if in.EmbedModel != nil {
 		value := strings.TrimSpace(*in.EmbedModel)
@@ -496,8 +491,8 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Embed 模型名过长"})
 			return
 		}
-		// 嵌入模型没有 LLM_* 别名，只有 AIGATE_EMBED_MODEL。
-		add("", "AIGATE_EMBED_MODEL", value)
+		// 嵌入模型没有 LLM_* 别名，只有 LLM_EMBED_MODEL。
+		setEnv("LLM_EMBED_MODEL", value)
 	}
 	if in.APIKey != nil {
 		value := strings.TrimSpace(*in.APIKey)
@@ -507,7 +502,7 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		// 留空或 "***" = 不修改。密钥从不回显，所以界面拿不到真值，只能这样表达。
 		if value != "" && value != "***" {
-			add("LLM_API_KEY", "AIGATE_API_KEY", value)
+			setEnv("LLM_API_KEY", value)
 		}
 	}
 	if in.ReasoningSplit != nil {
@@ -515,7 +510,7 @@ func (api *modelAPI) saveConfig(w http.ResponseWriter, r *http.Request) {
 		if *in.ReasoningSplit {
 			value = "1"
 		}
-		add("", "AIGATE_REASONING_SPLIT", value)
+		setEnv("LLM_REASONING_SPLIT", value)
 	}
 	if len(file) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "没有需要修改的字段"})

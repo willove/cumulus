@@ -52,13 +52,13 @@ func main() {
 	if key == "" {
 		fatal("ANCHOR_KEY not set")
 	}
-	// Same endpoint convention as the CLI (AIGATE_*/LLM_* via env.go); a
+	// Same endpoint convention as the CLI (LLM_* via env.go); a
 	// hardcoded URL here meant the tool silently ignored -env switching.
-	base := envOr("AIGATE_BASE_URL", "https://api.minimaxi.com/v1")
+	base := envOr("LLM_BASE_URL", "https://api.minimaxi.com/v1")
 	chat := &llm.ChatClient{
 		BaseURL:        base,
 		APIKey:         key,
-		Model:          envOr("AIGATE_CHAT_MODEL", "MiniMax-M3"),
+		Model:          envOr("LLM_CHAT_MODEL", "MiniMax-M3"),
 		Caller:         "anchorgen",
 		ReasoningSplit: strings.Contains(strings.ToLower(base), "minimaxi.com"),
 	}

@@ -157,7 +157,7 @@ def main():
     json.dump(report, open(os.path.join(outdir, "report.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
     json.dump({"domain": args.domain, "tag": args.tag, "manifest": man,
-               "env": {k: env[k] for k in sorted(env) if k.startswith(("CLUS_", "AIGATE_")) and "KEY" not in k},
+               "env": {k: env[k] for k in sorted(env) if k.startswith(("CLUS_", "LLM_", "AIGATE_")) and "KEY" not in k},
                "argv": cmd},
               open(os.path.join(outdir, "config.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)

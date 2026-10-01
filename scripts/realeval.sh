@@ -4,7 +4,7 @@
 # 入语料（难负例是评测点），锚点过真实管线（FAST→DEEP），Closed-Book 直答
 # 对照，端点判官（judge_correct 资产）判 Correct；聚合 EM/Ev.Rec/Ground +
 # 失败四分类 + McNemar（cumulus-cluster vs closed-book）。断点续跑：结果逐项落盘。
-# 端点配置走套件 ./.env（LLM_* → AIGATE_*）；本脚本不隔离 .env。
+# 端点配置走套件 ./.env（LLM_* canonical，旧 AIGATE_*/LLM_MODEL_NAME 别名兼容）；本脚本不隔离 .env。
 # 用法：
 #   scripts/realeval.sh prep [N]   # 取样+建库+摄取（默认 30 锚点，确定性取样）
 #   LIMIT=4 scripts/realeval.sh step   # 跑一小批（默认 4 项）

@@ -58,9 +58,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "agreeprobe: CLUS_OFFLINE=1 pins offline stubs — refusing to run (needs a live model)")
 		os.Exit(1)
 	}
-	base := os.Getenv("AIGATE_BASE_URL")
+	base := os.Getenv("LLM_BASE_URL")
 	if base == "" {
-		fmt.Fprintln(os.Stderr, "agreeprobe: AIGATE_BASE_URL absent — needs a live model")
+		fmt.Fprintln(os.Stderr, "agreeprobe: LLM_BASE_URL absent — needs a live model")
 		os.Exit(1)
 	}
 
@@ -82,10 +82,10 @@ func main() {
 
 	chat := &llm.ChatClient{
 		BaseURL: base,
-		APIKey:  os.Getenv("AIGATE_API_KEY"),
-		Model:   envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro"),
+		APIKey:  os.Getenv("LLM_API_KEY"),
+		Model:   envOr("LLM_CHAT_MODEL", "MiniMax-M3"),
 	}
-	cons := &llm.AigateConsistency{Client: chat}
+	cons := &llm.Consistency{Client: chat}
 
 	take := func(s string, n int) string {
 		r := []rune(s)

@@ -48,9 +48,9 @@ def load_env(path):
     return env
 
 env = load_env(".env")
-base = os.environ.get("AIGATE_BASE_URL") or env.get("LLM_BASE_URL") or ""
-key = os.environ.get("AIGATE_API_KEY") or env.get("LLM_API_KEY") or ""
-model = (os.environ.get("AIGATE_CHAT_MODEL") or env.get("LLM_CHAT_MODEL")
+base = os.environ.get("LLM_BASE_URL") or env.get("LLM_BASE_URL") or ""
+key = os.environ.get("LLM_API_KEY") or env.get("LLM_API_KEY") or ""
+model = (os.environ.get("LLM_CHAT_MODEL") or env.get("LLM_CHAT_MODEL")
          or env.get("LLM_MODEL_NAME") or "")
 if not (base and key and model):
     raise SystemExit("selfplay: endpoint not configured (need AIGATE_*/LLM_* base/key/model)")

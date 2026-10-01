@@ -22,7 +22,7 @@ import (
 	"github.com/willove/cumulus/internal/source"
 )
 
-func widenFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string, refiner *llm.AigateKeywordRefiner) func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
+func widenFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl string, refiner *llm.KeywordRefiner) func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
 	return func(ctx context.Context, query string, exclude map[string]bool, m int, affinity map[string]bool) ([]source.Source, error) {
 		all, err := st.ActiveSources(ctx)
 		if err != nil {

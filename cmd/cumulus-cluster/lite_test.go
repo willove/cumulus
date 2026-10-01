@@ -18,7 +18,7 @@ import (
 // against the embedded cumulite engine with no server anywhere in the process,
 // and it fails the moment a store path grows a dependency outside Port.
 func TestAskRunsOnCumuliteWithoutServer(t *testing.T) {
-	t.Setenv("AIGATE_BASE_URL", "") // offline gates: no network in tests
+	t.Setenv("LLM_BASE_URL", "") // offline gates: no network in tests
 	ctx := context.Background()
 
 	engine, err := cumulite.Open(t.TempDir())

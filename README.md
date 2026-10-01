@@ -6,7 +6,7 @@
 ## 定位
 
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
-本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量一律经 aigate。
+本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量走 OpenAI 兼容直连端点（`LLM_*` 配置）。
 
 当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（门 A–BB，门限 118、现 171 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
 
@@ -142,7 +142,7 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 - **嵌入单元必须 ≤ 嵌入模型窗口**（2026-09-28 写入 `design-plan.md` §D0）：MiniLM 的 SentencePiece 模板有 **128-token 上限**，所以文档级向量只表示前 ~300 汉字。实测一本 1548 万 rune 的书切成 2212 块后，**MiniLM 的块级召回 R@4=1.1%（随机 0.18%），而词法 BM25 同一批块 R@4=99.0%、零嵌入**。因此**长文档由词法倒排承担召回，向量层降级为短文档加速器**（法条/百科条目千字级时它仍然有效）。`CLUS_ADMIT_SEMANTIC_HEAD` 默认因此为 0；
 - **打分器可靠性可测**（2026-09-27，`make score-probe` / `cmd/scoreprobe`）：同一窗口重复打分 N 次，报告决策稳定性、阈值模糊带、金标分离度。实测（live MiniMax-M3，25 窗 × 3 轮）：`score_gap` 5.70、`top_gold_stable` 100%、队首零并列，但**中段判决 36% 会翻转**（thinking 关时 48%）——所以逐窗指标比端到端指标吵得多，而队首选择是稳的。record-only，不设门；
 - **MiniLM 权重是本套件自有资产**：装在 `~/.cumulus/models/<model>`（`CLUS_MODEL_DIR` 可覆盖，**不读其他项目的缓存**）；`CLUS_EMBED=minilm` 时首启检查，缺席则 CLI 交互提示下载 / 工作台「配置」页一键下载（魔搭社区，约 485MB，sha256 校验，下载后自动加载验证）；`CLUS_MINILM_REQUIRE=1` 把缺席升级为硬失败（CI 精度门不空转）；
-- **生产路径全走 aigate**（D6）：打分 `evaluate_sample`、意图/级联关键词 `fast_analyze`、合成 `synthesize_roi`、级联降级 `keywords_multilevel`、多轮改写 `history_rewrite`（`search -history` 传入历史，失败降级原查询）、embedder——设 `AIGATE_BASE_URL` 即切换（`AIGATE_CHAT_MODEL` 默认 `mimo/cascade-pro`，`AIGATE_EMBED_MODEL` 默认 `text-embedding-3-small`）；离线 `RuleAnalyzer`/`KeywordScorer`/模板是门的载体；
+- **生产路径全走远端端点**（D6）：打分 `evaluate_sample`、意图/级联关键词 `fast_analyze`、合成 `synthesize_roi`、级联降级 `keywords_multilevel`、多轮改写 `history_rewrite`（`search -history` 传入历史，失败降级原查询）、embedder——设 `LLM_BASE_URL` 即切换（`LLM_CHAT_MODEL` 选模型，`LLM_EMBED_MODEL` 显式指定才启用远程嵌入）；离线 `RuleAnalyzer`/`KeywordScorer`/模板是门的载体；
 - **档位判定**：FILENAME_ONLY（文件/标题名匹配，0 LLM）/ 闲聊 / 整文档意图 / FAST→DEEP（置信不足必升级）；
 - **B4 先验已接线**：`search -prior` 走五信号融合排序（默认 IDF 级联不变）；`search -hopts <时长>` 开 hopTS 新鲜度剪枝；
 - **抽取**：md/txt/html 树内；DOCX 树内（stdlib zip+xml 段落）；PDF 尽力而为（未压缩/Flate 文本流——加密/CID 字体走外挂 worker 形态）；二进制仍不进引擎。
@@ -150,12 +150,12 @@ search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
 ## 边界（照实）
 
 - v1 DEEP 为**多源重采样 + 确定性合成**（ReAct 形），生成段质量门按 R 轨收口；冲突边首版是数值主张分歧启发式；
-- **离线 KeywordScorer 不是语义评分**——定位与门可断言，质量声明要换 aigate 端点后再测；
+- **离线 KeywordScorer 不是语义评分**——定位与门可断言，质量声明要换真实端点后再测；
 - **摘要模板是确定性拼接**，不是生成式合成；生成段质量门按 R 轨收口，不设确定性线；
 - **引用 `[?]`** = 未能精确回溯原文窗口（源已更新或定位越界）；多源样本逐源定位回原文；
 - **v1 未接线**（设计已声明、触发再做）：PDF 外挂 worker（加密/CID 字体件——树内 best-effort 覆盖未压缩与 Flate 文本流）、写入侧 LLM 自评质量门（端点档，只记录不设线）；tidy 维护动作仍走 CLI；UI v2 已提供目录摄取面板——路径是 serve 所在机器的本地目录（可信本机工具口径，见部署边界）；
 - **Prompt 五类资产已全部进生产路径**（打分/意图/合成/级联降级/多轮改写）；离线桩与冻结回归是门的载体；
-- **端点配置在各套件内**（D6 决策更新 2026-09-22，aigate 暂锁、统一网关后期规划）：套件读 `./.env`（或 `$CLUS_ENV`），沿用操作者 `LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL_NAME` 约定（见 `.env.example`；已设环境变量优先，`cumulus-cluster env` 脱敏查看）。MiniMax 直连已适配：`reasoning_split` 自动（minimaxi 域，`AIGATE_REASONING_SPLIT` 强制）+ `<think>` 内联思维链剥离。实测（2026-09-25，177 篇法律语料 + MiniMax-M3）：**FAST 冷查询 ≈6–10s（受控 A/B；线上采样受端点负载影响 10–15s）/ 簇复用 0.04s / tokens ≈6–10K 每查询**；本会话把同端点冷查询从 67.4s 压到此，三步都有门禁与受控测量背书：① 小文件全文路径（对标 sirchmunk `_FAST_SMALL_FILE_THRESHOLD=100_000`，见 `internal/mcs` DefaultConfig）把一次查询的串行 LLM 调用从 ≈21 次压到 3 次（分析+整文评分+合成），置信度不降反升（0.31→0.85 均值档）；② 修复全文证据被字节截断喂给模型的 bug（scorer/synth 的 2000/800 字节帽 → 15000 字位，`internal/llm` maxSampleRunes）与模型坏 JSON 的修复通道（`repairModelJSON`：法条引用把引号写成未转义 ASCII 引号曾让合成整条落模板拒答）；③ 意图/关键词分析走无思维链变体（`CompleteStructured`，M 系列 `thinking{type:disabled}`）——受控 A/B 8.66s→6.17s，关键词质量不减；其偶发把真问题误判为 chat/doc_summary（不检索直接答"闲聊"）由确定性门复核兜底（`fast.LooksLikeChat/LooksLikeDocSummary`，非问候句式即用带思维链调用复核一次，真问候零成本）；④ 合成提示词要求结构化 Markdown 简报（`internal/prompts/synthesize_roi.md` 规则：列举类内容逐条带条款号与关键参数、三项以上用表格）——对标 sirchmunk 的 Markdown Briefing 契约（其 `llm/prompts.py:ROI_RESULT_SUMMARY`），引用与拒答契约不变；embedder 仅在 `AIGATE_EMBED_MODEL` 显式指定时切换；
+- **端点配置在各套件内**（D6 决策更新 2026-09-22：统一网关暂锁、直连端点即用；命名 2026-10-01 起收敛为 `LLM_*` canonical，旧 `AIGATE_*`/`LLM_MODEL_NAME` 作为别名兼容）：套件读 `./.env`（或 `$CLUS_ENV`），`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_CHAT_MODEL` 为准（见 `.env.example`；已设环境变量优先，`cumulus-cluster env` 脱敏查看）。MiniMax 直连已适配：`reasoning_split` 自动（minimaxi 域，`LLM_REASONING_SPLIT` 强制）+ `<think>` 内联思维链剥离。实测（2026-09-25，177 篇法律语料 + MiniMax-M3）：**FAST 冷查询 ≈6–10s（受控 A/B；线上采样受端点负载影响 10–15s）/ 簇复用 0.04s / tokens ≈6–10K 每查询**；本会话把同端点冷查询从 67.4s 压到此，三步都有门禁与受控测量背书：① 小文件全文路径（对标 sirchmunk `_FAST_SMALL_FILE_THRESHOLD=100_000`，见 `internal/mcs` DefaultConfig）把一次查询的串行 LLM 调用从 ≈21 次压到 3 次（分析+整文评分+合成），置信度不降反升（0.31→0.85 均值档）；② 修复全文证据被字节截断喂给模型的 bug（scorer/synth 的 2000/800 字节帽 → 15000 字位，`internal/llm` maxSampleRunes）与模型坏 JSON 的修复通道（`repairModelJSON`：法条引用把引号写成未转义 ASCII 引号曾让合成整条落模板拒答）；③ 意图/关键词分析走无思维链变体（`CompleteStructured`，M 系列 `thinking{type:disabled}`）——受控 A/B 8.66s→6.17s，关键词质量不减；其偶发把真问题误判为 chat/doc_summary（不检索直接答"闲聊"）由确定性门复核兜底（`fast.LooksLikeChat/LooksLikeDocSummary`，非问候句式即用带思维链调用复核一次，真问候零成本）；④ 合成提示词要求结构化 Markdown 简报（`internal/prompts/synthesize_roi.md` 规则：列举类内容逐条带条款号与关键参数、三项以上用表格）——对标 sirchmunk 的 Markdown Briefing 契约（其 `llm/prompts.py:ROI_RESULT_SUMMARY`），引用与拒答契约不变；远程 embedder 仅在 `LLM_EMBED_MODEL` 显式指定时切换（本地 minilm 权重在即默认启用，见 `embedderFor`）；
 - **`internal/prior`（LENS B4）已接线**：`search -prior` 五信号排序，默认 IDF 级联；
 - **hopTS 新鲜度剪枝**已接线（`search -hopts 168h`），默认关；
 - **R3 实测**（`go test ./internal/mcs -run TestR3AnchorProbe -v`）：CJK bigram 锚点命中率 **0.404**（23/57，噪声大→阶段①分层撒网臂必须保留）；答案入窗率 **0.714**（5/7）；

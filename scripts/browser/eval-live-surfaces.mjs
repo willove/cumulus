@@ -6,7 +6,7 @@
 // cost-consent gate (the submit button must stay disabled until it is ticked).
 // It never submits, so re-running it is free.
 //
-//   EVAL_BASE      base URL of a `serve` with AIGATE_BASE_URL configured (required)
+//   EVAL_BASE      base URL of a `serve` with LLM_BASE_URL configured (required)
 //   EVAL_NS        library (bucket) holding the live run (required)
 //   EVAL_LIVE_RUN  run id; when unset, the newest completed live run is used
 import assert from 'node:assert/strict';

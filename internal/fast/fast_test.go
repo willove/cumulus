@@ -61,7 +61,7 @@ func TestRankPrefersHigherTf(t *testing.T) {
 }
 
 // The deterministic intent gates now back the LLM's chat/doc_summary
-// verdicts (see llm.AigateAnalyzer.Analyze): a real question misread as
+// verdicts (see llm.Analyzer.Analyze): a real question misread as
 // chat must fail the gate so the verify pass can correct it, and a genuine
 // greeting must pass it so no query pays the extra call.
 func TestIntentGates(t *testing.T) {

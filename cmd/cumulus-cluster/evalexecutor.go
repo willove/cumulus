@@ -26,7 +26,7 @@ import (
 )
 
 func evalLiveAvailable() bool {
-	u, err := url.Parse(os.Getenv("AIGATE_BASE_URL"))
+	u, err := url.Parse(os.Getenv("LLM_BASE_URL"))
 	return !offlineForced() && err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }
 func evalFingerprint(cfg eval.Config) string {
@@ -34,10 +34,10 @@ func evalFingerprint(cfg eval.Config) string {
 	// No secret-bearing endpoint paths, credentials, or API keys in artifacts.
 	model, endpoint := "offline-keyword", "offline"
 	if cfg.Mode == "live" {
-		model = envOr("AIGATE_CHAT_MODEL", "mimo/cascade-pro")
-		endpoint = maskHost(os.Getenv("AIGATE_BASE_URL"))
+		model = envOr("LLM_CHAT_MODEL", "mimo/cascade-pro")
+		endpoint = maskHost(os.Getenv("LLM_BASE_URL"))
 	}
-	return fmt.Sprintf("%s;config=%s;model=%s;endpoint=%s;embed=local-hash-64;l1=local-hash-64;reuse_theta=%g;merge_theta=%g;split_cap=%d;max_loops=%d;widen_budget=%d;correct_budget=%d;abstain=%s;early_abstain=%s;query_sim=%s;reasoning_split=%s;search_budget=%s;scoring=rule-substring-numeric-boundary,exact-active-gold,citations-all-resolved;budget=upstream-reported-tokens,in-flight-overshoot-possible;cold-start=true;warm-order=dataset", eval.Protocol, raw, model, endpoint, kb.DefaultReuseTheta, kb.DefaultMergeTheta, cluster.DefaultSplitCap, deep.MaxLoops, deep.WidenBudget, deep.CorrectBudget, os.Getenv("CLUS_ABSTAIN"), os.Getenv("CLUS_EARLY_ABSTAIN"), os.Getenv("CLUS_QUERY_SIM"), os.Getenv("AIGATE_REASONING_SPLIT"), os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"))
+	return fmt.Sprintf("%s;config=%s;model=%s;endpoint=%s;embed=local-hash-64;l1=local-hash-64;reuse_theta=%g;merge_theta=%g;split_cap=%d;max_loops=%d;widen_budget=%d;correct_budget=%d;abstain=%s;early_abstain=%s;query_sim=%s;reasoning_split=%s;search_budget=%s;scoring=rule-substring-numeric-boundary,exact-active-gold,citations-all-resolved;budget=upstream-reported-tokens,in-flight-overshoot-possible;cold-start=true;warm-order=dataset", eval.Protocol, raw, model, endpoint, kb.DefaultReuseTheta, kb.DefaultMergeTheta, cluster.DefaultSplitCap, deep.MaxLoops, deep.WidenBudget, deep.CorrectBudget, os.Getenv("CLUS_ABSTAIN"), os.Getenv("CLUS_EARLY_ABSTAIN"), os.Getenv("CLUS_QUERY_SIM"), os.Getenv("LLM_REASONING_SPLIT"), os.Getenv("CLUS_SEARCH_TOKEN_BUDGET"))
 }
 
 // A transport guard checks before EVERY model request, including internal
@@ -294,7 +294,7 @@ func evalSafeError(err error) string {
 		return ""
 	}
 	msg := err.Error()
-	for _, secret := range []string{os.Getenv("AIGATE_API_KEY"), os.Getenv("AIGATE_BASE_URL")} {
+	for _, secret := range []string{os.Getenv("LLM_API_KEY"), os.Getenv("LLM_BASE_URL")} {
 		if secret != "" {
 			msg = strings.ReplaceAll(msg, secret, "[redacted]")
 		}

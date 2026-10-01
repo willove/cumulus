@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/willove/cumulite"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/monitor"
 	"github.com/willove/cumulus/internal/ns"
-	"github.com/willove/cumulite"
 )
 
 // The OpenAI-compatible chat face speaks chat.completion.chunk frames that the
@@ -25,7 +25,7 @@ import (
 func newChatWireTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	ctx := context.Background()
-	t.Setenv("AIGATE_BASE_URL", "") // offline stubs: no network in tests
+	t.Setenv("LLM_BASE_URL", "") // offline stubs: no network in tests
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
 	if err != nil {
 		t.Fatal(err)

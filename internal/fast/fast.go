@@ -67,7 +67,7 @@ type Analysis struct {
 }
 
 // Analyzer classifies a query and extracts the keyword cascade. Production
-// wires llm.AigateAnalyzer (fast_analyze prompt); RuleAnalyzer is the offline
+// wires llm.Analyzer (fast_analyze prompt); RuleAnalyzer is the offline
 // gate carrier.
 type Analyzer interface {
 	Analyze(ctx context.Context, query string) (Analysis, error)
@@ -621,7 +621,7 @@ func wordsOf(q string) []string {
 
 // LooksLikeChat is the deterministic chat gate: a SHORT greeting-shaped
 // query. It backs the chat verdict of the production analyzer — see
-// llm.AigateAnalyzer.Analyze, which re-verifies with the thinking pass
+// llm.Analyzer.Analyze, which re-verifies with the thinking pass
 // when the fast no-think classify says chat but the query is not greeting
 // shaped (a real question misread as chat never reaches retrieval at all,
 // and costs the user a "（闲聊，不检索）" answer).

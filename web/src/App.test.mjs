@@ -326,7 +326,7 @@ test("settings form never holds the stored key and submits only changed fields",
     if (url === "/v1/config" && (!options || options.method !== "POST")) {
       return json({ base_url: "https://api.example.com/v1", chat_model: "m1", embed_model: "", api_key_set: true, api_key_len: 42, reasoning_split: false, offline: false });
     }
-    if (url === "/v1/config") return json({ saved: ["LLM_MODEL_NAME", "AIGATE_CHAT_MODEL"], env_file: "/repo/.env", hot_applied: true });
+    if (url === "/v1/config") return json({ saved: ["LLM_MODEL_NAME", "LLM_CHAT_MODEL"], env_file: "/repo/.env", hot_applied: true });
     return json({});
   });
   await state.mount("settings");

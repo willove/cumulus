@@ -156,9 +156,9 @@ func TestEvalV2OfflineFlowExportsCompareAndIsolation(t *testing.T) {
 	trap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { network.Add(1); http.Error(w, "must not call live", 500) }))
 	defer trap.Close()
 	t.Setenv("CLUS_OFFLINE", "")
-	t.Setenv("AIGATE_BASE_URL", trap.URL)
-	t.Setenv("AIGATE_API_KEY", "eval-secret-never-export")
-	t.Setenv("AIGATE_EMBED_MODEL", "must-not-call")
+	t.Setenv("LLM_BASE_URL", trap.URL)
+	t.Setenv("LLM_API_KEY", "eval-secret-never-export")
+	t.Setenv("LLM_EMBED_MODEL", "must-not-call")
 	h := newEvalHTTPHarness(t)
 	ctx := context.Background()
 	before := map[string]string{}

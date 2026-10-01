@@ -20,7 +20,7 @@ import (
 // way (JSON-RPC error / isError result) — all against the embedded cumulite
 // engine with no server process anywhere.
 func TestMCPFaceToolsRoundTrip(t *testing.T) {
-	t.Setenv("AIGATE_BASE_URL", "") // offline gates: no network in tests
+	t.Setenv("LLM_BASE_URL", "") // offline gates: no network in tests
 	ctx := context.Background()
 
 	engine, err := cumulite.Open(t.TempDir())
@@ -159,7 +159,7 @@ func TestMCPFaceToolsRoundTrip(t *testing.T) {
 }
 
 func TestMCPFaceErrorsAndNamespaces(t *testing.T) {
-	t.Setenv("AIGATE_BASE_URL", "")
+	t.Setenv("LLM_BASE_URL", "")
 	ctx := context.Background()
 
 	engine, err := cumulite.Open(t.TempDir())

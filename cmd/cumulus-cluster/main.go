@@ -29,11 +29,11 @@ import (
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/learn"
 	"github.com/willove/cumulus/internal/llm"
-	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/ns"
-	"github.com/willove/cumulus/internal/vocab"
+	"github.com/willove/cumulus/internal/prompts"
 	"github.com/willove/cumulus/internal/source"
+	"github.com/willove/cumulus/internal/vocab"
 )
 
 const usage = `cumulus-cluster — cognitive search suite (on cumulite)
@@ -80,15 +80,15 @@ Flags:
                  one tenant's reuse path never sees another's (default library = bare names)
 
 Env:
-  AIGATE_BASE_URL    upstream API root INCLUDING /v1 (e.g. https://api.minimaxi.com/v1)
-  AIGATE_API_KEY     bearer key for the upstream
-  AIGATE_CHAT_MODEL  scorer/synthesis model (e.g. MiniMax-M3 direct, minimax/MiniMax-M3 via gateway)
-  AIGATE_EMBED_MODEL embedder model; unset = offline Local embedder even when AIGATE_BASE_URL is set
-  AIGATE_REASONING_SPLIT 1/0 force MiniMax reasoning_split (default: auto on minimaxi.com hosts)
-  CLUS_ENV            path to the suite's .env (default ./.env); LLM_* keys alias onto AIGATE_*
+  LLM_BASE_URL    upstream API root INCLUDING /v1 (e.g. https://api.minimaxi.com/v1)
+  LLM_API_KEY     bearer key for the upstream
+  LLM_CHAT_MODEL  scorer/synthesis model (e.g. MiniMax-M3 direct, minimax/MiniMax-M3 via gateway)
+  LLM_EMBED_MODEL embedder model; unset = offline Local embedder even when LLM_BASE_URL is set
+  LLM_REASONING_SPLIT 1/0 force MiniMax reasoning_split (default: auto on minimaxi.com hosts)
+  CLUS_ENV            path to the suite's .env (default ./.env); legacy AIGATE_* keys alias onto LLM_*
   CLUS_OFFLINE        1 = pin the offline stubs (no chat client, no remote embedder) even when an
                       endpoint is configured — gate harnesses use this so a developer's ambient
-                      LLM_BASE_URL/AIGATE_* cannot route deterministic gates at a live model
+                      LLM_* endpoint config cannot route deterministic gates at a live model
   CLUS_MCS_WINDOW / _SAMPLES_PER_ROUND / _ROUNDS / _TOP_SEEDS / _SIGMA /
   CLUS_MCS_SMALL_FILE / _MAX_EVIDENCE
                       Monte-Carlo sampler overrides (SSOT 3.3 参数配置驱动)；缺省用内置默认值
@@ -157,7 +157,7 @@ func main() {
 	// calls per query, so production mode gets a wider default. CLUS_TIMEOUT
 	// (duration, e.g. 10m) overrides either way.
 	timeout := 60 * time.Second
-	if os.Getenv("AIGATE_BASE_URL") != "" {
+	if os.Getenv("LLM_BASE_URL") != "" {
 		timeout = 300 * time.Second
 	}
 	if v := os.Getenv("CLUS_TIMEOUT"); v != "" {
@@ -727,15 +727,15 @@ func main() {
 		printJSON(st)
 	case "env":
 		// Resolved endpoint config, masked — the per-suite .env face.
-		base := os.Getenv("AIGATE_BASE_URL")
-		key := os.Getenv("AIGATE_API_KEY")
+		base := os.Getenv("LLM_BASE_URL")
+		key := os.Getenv("LLM_API_KEY")
 		printJSON(map[string]any{
 			"env_file":        envFilePath(),
 			"env_file_loaded": fileExists(envFilePath()),
 			"store":           data, // resolved only; env never opens it
 			"base_url":        base,
-			"chat_model":      os.Getenv("AIGATE_CHAT_MODEL"),
-			"embed_model":     os.Getenv("AIGATE_EMBED_MODEL"),
+			"chat_model":      os.Getenv("LLM_CHAT_MODEL"),
+			"embed_model":     os.Getenv("LLM_EMBED_MODEL"),
 			"api_key_set":     key != "",
 			"api_key_len":     len(key),
 			"reasoning_split": strings.Contains(strings.ToLower(base), "minimaxi.com"),
@@ -1119,7 +1119,7 @@ func main() {
 }
 
 // embedderFor resolves the content-vector embedder by the same rule as
-// search: explicit AIGATE_EMBED_MODEL over AIGATE_BASE_URL, else the offline
+// search: explicit LLM_EMBED_MODEL over LLM_BASE_URL, else the offline
 // Local hash embedder.
 func embedderFor() (ingest.EmbedderFn, int, string, error) {
 	// 纯 Go MiniLM：CLUS_EMBED=minilm 显式开启；权重直接
@@ -1139,14 +1139,14 @@ func embedderFor() (ingest.EmbedderFn, int, string, error) {
 			fmt.Fprintln(os.Stderr, "[embedderFor] CLUS_EMBED=minilm 但权重缺席——退回 local-hash-64（语料向量降级）")
 		}
 	}
-	if base := os.Getenv("AIGATE_BASE_URL"); base != "" && os.Getenv("AIGATE_EMBED_MODEL") != "" && !offlineForced() {
-		fe := &llm.AigateEmbedder{
+	if base := os.Getenv("LLM_BASE_URL"); base != "" && os.Getenv("LLM_EMBED_MODEL") != "" && !offlineForced() {
+		fe := &llm.Embedder{
 			BaseURL: base,
-			APIKey:  os.Getenv("AIGATE_API_KEY"),
-			Model:   os.Getenv("AIGATE_EMBED_MODEL"),
+			APIKey:  os.Getenv("LLM_API_KEY"),
+			Model:   os.Getenv("LLM_EMBED_MODEL"),
 			N:       64,
 		}
-		return fe.Embed, fe.Dims(), os.Getenv("AIGATE_EMBED_MODEL"), nil
+		return fe.Embed, fe.Dims(), os.Getenv("LLM_EMBED_MODEL"), nil
 	}
 	// Default-on (2026-10-01): local weights present and no embed seat
 	// configured → use them. Until now the implicit seat was local-hash-64,

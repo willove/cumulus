@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestAigateSynthesizerRefusalState(t *testing.T) {
+func TestSynthesizerRefusalState(t *testing.T) {
 	const refusal = `{"summary":"Insufficient evidence.","refuse":true}`
 	steps := []struct {
 		name        string
@@ -117,7 +117,7 @@ func TestAigateSynthesizerRefusalState(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	s := &AigateSynthesizer{Client: &ChatClient{
+	s := &Synthesizer{Client: &ChatClient{
 		BaseURL: server.URL, HTTPClient: server.Client(),
 	}}
 	if s.Refused() {

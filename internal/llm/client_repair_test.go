@@ -155,7 +155,7 @@ func TestCompleteStructuredWireContract(t *testing.T) {
 
 	// The analyzer must route through CompleteStructured.
 	bodies = nil
-	an := &AigateAnalyzer{Client: chat}
+	an := &Analyzer{Client: chat}
 	if _, err := an.Analyze(context.Background(), "查询"); err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestAnalyzeChatVerdictVerifiedForRealQuestions(t *testing.T) {
 	}))
 	defer server.Close()
 	chat := &ChatClient{BaseURL: server.URL, HTTPClient: server.Client(), ReasoningSplit: true}
-	an := &AigateAnalyzer{Client: chat}
+	an := &Analyzer{Client: chat}
 
 	// Real question, fast pass wrongly says chat → thinking pass reclassifies.
 	bodies = nil
@@ -239,7 +239,7 @@ func TestSynthesizerNothinkFirstThinkRetry(t *testing.T) {
 	}))
 	defer server.Close()
 	chat := &ChatClient{BaseURL: server.URL, HTTPClient: server.Client(), ReasoningSplit: true}
-	sy := &AigateSynthesizer{Client: chat}
+	sy := &Synthesizer{Client: chat}
 
 	sum, err := sy.Synthesize(context.Background(), "q", nil)
 	if err != nil {

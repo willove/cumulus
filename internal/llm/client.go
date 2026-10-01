@@ -117,7 +117,7 @@ func (c *ChatClient) doChat(ctx context.Context, body map[string]any) (string, e
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	if c.Caller != "" {
-		req.Header.Set("X-Aigate-Caller", c.Caller)
+		req.Header.Set("X-LLM-Caller", c.Caller)
 	}
 	resp, err := c.http().Do(req)
 	if err != nil {
@@ -223,7 +223,7 @@ func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta fu
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 	if c.Caller != "" {
-		req.Header.Set("X-Aigate-Caller", c.Caller)
+		req.Header.Set("X-LLM-Caller", c.Caller)
 	}
 	resp, err := c.http().Do(req)
 	if err != nil {
@@ -310,7 +310,7 @@ func SplitThink(content string) (clean, reasoning string) {
 // Synthesize (no-think-first + thinking retry). The caller is responsible
 // for reconciling partial deltas already on screen with the replacement
 // summary (see searchapi's `replace` content event).
-func (s *AigateSynthesizer) SynthesizeStream(ctx context.Context, query string, samples []mcs.Sample, onDelta func(string)) (string, error) {
+func (s *Synthesizer) SynthesizeStream(ctx context.Context, query string, samples []mcs.Sample, onDelta func(string)) (string, error) {
 	var ev strings.Builder
 	for i, sm := range samples {
 		fmt.Fprintf(&ev, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, truncateRunes(sm.Content, maxSampleRunes))
@@ -334,9 +334,9 @@ func (s *AigateSynthesizer) SynthesizeStream(ctx context.Context, query string, 
 	return out.Summary, nil
 }
 
-// AigateScorer scores samples via the evaluate_sample prompt (v2: emits the
+// Scorer scores samples via the evaluate_sample prompt (v2: emits the
 // per-fact oracle vector when given fact hints).
-type AigateScorer struct {
+type Scorer struct {
 	Client *ChatClient
 	// Effort routes the scoring call through CompleteWithEffort at the
 	// configured depth. When set it supersedes the NoThink binary switch.
@@ -380,7 +380,7 @@ func ParseScoreJSON(raw string) (float64, string, error) {
 }
 
 // Score implements mcs.Scorer (0–10).
-func (s *AigateScorer) Score(ctx context.Context, query string, sm mcs.Sample) (float64, string, error) {
+func (s *Scorer) Score(ctx context.Context, query string, sm mcs.Sample) (float64, string, error) {
 	r, err := s.evaluate(ctx, query, nil, sm)
 	if err != nil {
 		return 0, "", err
@@ -390,7 +390,7 @@ func (s *AigateScorer) Score(ctx context.Context, query string, sm mcs.Sample) (
 
 // ScoreWithFacts implements mcs.FactAware (oracle vector): covers are
 // clamped to the given fact ids.
-func (s *AigateScorer) ScoreWithFacts(ctx context.Context, query string, facts []string, sm mcs.Sample) (float64, string, []string, error) {
+func (s *Scorer) ScoreWithFacts(ctx context.Context, query string, facts []string, sm mcs.Sample) (float64, string, []string, error) {
 	r, err := s.evaluate(ctx, query, facts, sm)
 	if err != nil {
 		return 0, "", nil, err
@@ -421,11 +421,11 @@ func Paraphrase(ctx context.Context, client *ChatClient, query string) (string, 
 	return raw, nil
 }
 
-// AigateConsistency is the pre-synthesis evidence-agreement gate (收益层 2):
+// Consistency is the pre-synthesis evidence-agreement gate (收益层 2):
 // one call sees the kept windows TOGETHER — the cross-window view the
 // per-window scorer structurally lacks (the v3b lesson) — and reports
 // whether they agree on the answer to the query.
-type AigateConsistency struct{ Client *ChatClient }
+type Consistency struct{ Client *ChatClient }
 
 // AgreeResult is the evidence_agree JSON shape.
 type AgreeResult struct {
@@ -449,7 +449,7 @@ func ParseAgreeJSON(raw string) (AgreeResult, error) {
 }
 
 // CheckConsistency implements deep.ConsistencyChecker.
-func (s *AigateConsistency) CheckConsistency(ctx context.Context, query string, windows []mcs.Sample) (bool, string, error) {
+func (s *Consistency) CheckConsistency(ctx context.Context, query string, windows []mcs.Sample) (bool, string, error) {
 	if s == nil || s.Client == nil || len(windows) == 0 {
 		return true, "", nil
 	}
@@ -494,7 +494,7 @@ func clampCovers(covers, facts []string) []string {
 }
 
 
-func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []string, sm mcs.Sample) (EvaluateResult, error) {
+func (s *Scorer) evaluate(ctx context.Context, query string, facts []string, sm mcs.Sample) (EvaluateResult, error) {
 	factsText := "（none）"
 	if len(facts) > 0 {
 		factsText = strings.Join(facts, "\n")
@@ -524,7 +524,7 @@ func (s *AigateScorer) evaluate(ctx context.Context, query string, facts []strin
 
 // call dispatches on NoThink. Kept as a method so Score and ScoreWithFacts can
 // never drift apart on the thinking flag.
-func (s *AigateScorer) call(ctx context.Context, tmpl string) (string, error) {
+func (s *Scorer) call(ctx context.Context, tmpl string) (string, error) {
 	if s.Effort != "" {
 		return s.Client.CompleteWithEffort(ctx, tmpl, s.Effort)
 	}
@@ -534,8 +534,8 @@ func (s *AigateScorer) call(ctx context.Context, tmpl string) (string, error) {
 	return s.Client.Complete(ctx, tmpl)
 }
 
-// AigateEmbedder requests embeddings (OpenAI-compatible /embeddings).
-type AigateEmbedder struct {
+// Embedder requests embeddings (OpenAI-compatible /embeddings).
+type Embedder struct {
 	BaseURL    string
 	APIKey     string
 	Model      string
@@ -543,7 +543,7 @@ type AigateEmbedder struct {
 	HTTPClient *http.Client
 }
 
-func (e *AigateEmbedder) Dims() int {
+func (e *Embedder) Dims() int {
 	if e.N <= 0 {
 		return 64
 	}
@@ -551,7 +551,7 @@ func (e *AigateEmbedder) Dims() int {
 }
 
 // Embed implements cluster.Embedder.
-func (e *AigateEmbedder) Embed(ctx context.Context, texts []string) ([][]float64, error) {
+func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float64, error) {
 	if e.BaseURL == "" {
 		return nil, fmt.Errorf("llm: embed BaseURL required")
 	}
@@ -601,14 +601,14 @@ func (e *AigateEmbedder) Embed(ctx context.Context, texts []string) ([][]float64
 }
 
 var (
-	_ mcs.Scorer       = (*AigateScorer)(nil)
-	_ cluster.Embedder = (*AigateEmbedder)(nil)
+	_ mcs.Scorer       = (*Scorer)(nil)
+	_ cluster.Embedder = (*Embedder)(nil)
 )
 
 
-// AigateAnalyzer classifies intent and extracts the keyword cascade via the
+// Analyzer classifies intent and extracts the keyword cascade via the
 // fast_analyze prompt.
-type AigateAnalyzer struct {
+type Analyzer struct {
 	Client *ChatClient
 	// Effort routes the analyze call through CompleteWithEffort at the
 	// configured depth (empty = existing CompleteStructured behavior).
@@ -630,7 +630,7 @@ type AigateAnalyzer struct {
 // a doc_summary verdict for a query that is not a whole-document
 // imperative, is re-run once with the thinking pass and that verdict wins.
 // Genuine greetings pass the gate and never pay the extra call.
-func (a *AigateAnalyzer) Analyze(ctx context.Context, query string) (fast.Analysis, error) {
+func (a *Analyzer) Analyze(ctx context.Context, query string) (fast.Analysis, error) {
 	tmpl := prompts.MustRender(prompts.FastAnalyze, map[string]string{"query": query})
 	var raw string
 	var err error
@@ -769,9 +769,9 @@ func ParseAnalyzeJSON(raw string) (fast.Analysis, error) {
 	return fast.Analysis{Intent: parsed.Intent, Primary: parsed.Primary, Fallback: parsed.Fallback}, nil
 }
 
-// AigateSynthesizer renders the answer summary via the synthesize_roi prompt
+// Synthesizer renders the answer summary via the synthesize_roi prompt
 // (citation-marked, refuse-capable).
-type AigateSynthesizer struct {
+type Synthesizer struct {
 	Client *ChatClient
 	// Effort routes the synthesis call through CompleteWithEffort at the
 	// configured depth (empty = existing behavior). Synthesis is the quality
@@ -784,14 +784,14 @@ type AigateSynthesizer struct {
 
 // Refused reports whether the last Synthesize was a refusal
 // (synthesize_roi rejected the evidence). fast.RefusalReporter.
-func (s *AigateSynthesizer) Refused() bool {
+func (s *Synthesizer) Refused() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.refused
 }
 
 // Synthesize implements fast.Synthesizer.
-func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, samples []mcs.Sample) (string, error) {
+func (s *Synthesizer) Synthesize(ctx context.Context, query string, samples []mcs.Sample) (string, error) {
 	s.setRefused(false)
 	var ev strings.Builder
 	for i, sm := range samples {
@@ -850,7 +850,7 @@ func (s *AigateSynthesizer) Synthesize(ctx context.Context, query string, sample
 	return out.Summary, nil
 }
 
-func (s *AigateSynthesizer) setRefused(v bool) {
+func (s *Synthesizer) setRefused(v bool) {
 	s.mu.Lock()
 	s.refused = v
 	s.mu.Unlock()
@@ -876,16 +876,16 @@ func ParseSynthesizeJSON(raw string) (SynthesizeResult, error) {
 	return parsed, nil
 }
 
-// AigateKeywordExpander yields N keyword levels via the keywords_multilevel
+// KeywordExpander yields N keyword levels via the keywords_multilevel
 // prompt — the deeper cascade when primary/fallback keywords miss.
-type AigateKeywordExpander struct {
+type KeywordExpander struct {
 	Client *ChatClient
 	Levels int
 } // Expand implements fast.KeywordExpander.
 // Thinking-disabled like Analyze: cascade-level keywords are a mechanical
 // extraction pass and its reasoning is discarded. Only reached when the
 // primary/fallback cascade already missed, so the saving is rare but free.
-func (e *AigateKeywordExpander) Expand(ctx context.Context, query string, levels int) ([][]string, error) {
+func (e *KeywordExpander) Expand(ctx context.Context, query string, levels int) ([][]string, error) {
 	if levels <= 0 {
 		levels = e.Levels
 	}
@@ -903,18 +903,18 @@ func (e *AigateKeywordExpander) Expand(ctx context.Context, query string, levels
 	return ParseMultilevelJSON(raw, levels)
 }
 
-// AigateKeywordRefiner regenerates keywords AFTER a failed match (ReAct
+// KeywordRefiner regenerates keywords AFTER a failed match (ReAct
 // 精炼轮 — the widen loop's second attempt when the whole cascade came up
 // empty). Domain specialization is OPERATOR-declared via CLUS_DOMAIN_HINT and
 // injected as a hint only; the prompt asset itself stays corpus-agnostic
 // (评估纪律：管线资产不得携带评测语料的领域知识).
-type AigateKeywordRefiner struct {
+type KeywordRefiner struct {
 	Client *ChatClient
 }
 
 // Refine returns replacement keywords in the target corpus's register,
 // excluding the failed ones.
-func (r *AigateKeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
+func (r *KeywordRefiner) Refine(ctx context.Context, query string, failed []string) ([]string, error) {
 	domain := strings.TrimSpace(os.Getenv("CLUS_DOMAIN_HINT"))
 	if domain == "" {
 		domain = "通用文档（未指定领域）"
@@ -957,12 +957,12 @@ func ParseMultilevelJSON(raw string, levels int) ([][]string, error) {
 	return out, nil
 }
 
-// AigateQuerySimulator implements Self-Index A.2.1 two-call isolation:
+// QuerySimulator implements Self-Index A.2.1 two-call isolation:
 // call 1 abstracts the information need from the raw query; call 2 writes
 // complementary queries from the abstract only (never sees the original
 // wording — prevents copy-the-source leakage). Results pass Jaccard
 // dissimilarity against the origin and already-tried queries.
-type AigateQuerySimulator struct {
+type QuerySimulator struct {
 	Client *ChatClient
 	// Tau is the Jaccard keep threshold (candidates with Jac < tau survive).
 	// 0 → facts.FilterDissimilar default 0.5.
@@ -970,7 +970,7 @@ type AigateQuerySimulator struct {
 }
 
 // Complement returns 0–N rephrasings distinct from origin+tried.
-func (s *AigateQuerySimulator) Complement(ctx context.Context, origin string, tried []string) ([]string, error) {
+func (s *QuerySimulator) Complement(ctx context.Context, origin string, tried []string) ([]string, error) {
 	if s == nil || s.Client == nil || strings.TrimSpace(origin) == "" {
 		return nil, nil
 	}
@@ -1026,14 +1026,14 @@ func ParseQueryListJSON(raw string) ([]string, error) {
 	return parsed.Queries, nil
 }
 
-// AigateHistoryRewriter folds dialogue/cluster history into a standalone
+// HistoryRewriter folds dialogue/cluster history into a standalone
 // query via the history_rewrite prompt; failures degrade to the raw query.
-type AigateHistoryRewriter struct {
+type HistoryRewriter struct {
 	Client *ChatClient
 }
 
 // Rewrite implements deep.HistoryRewriter.
-func (r *AigateHistoryRewriter) Rewrite(ctx context.Context, history []string, query string) (string, error) {
+func (r *HistoryRewriter) Rewrite(ctx context.Context, history []string, query string) (string, error) {
 	tmpl := prompts.MustRender(prompts.HistoryRewrite, map[string]string{
 		"history": strings.Join(history, "\n"),
 		"query":   query,
@@ -1069,9 +1069,9 @@ func ParseHistoryRewriteJSON(raw string) (HistoryRewriteResult, error) {
 }
 
 var (
-	_ fast.Analyzer        = (*AigateAnalyzer)(nil)
-	_ fast.Synthesizer     = (*AigateSynthesizer)(nil)
-	_ fast.KeywordExpander = (*AigateKeywordExpander)(nil)
+	_ fast.Analyzer        = (*Analyzer)(nil)
+	_ fast.Synthesizer     = (*Synthesizer)(nil)
+	_ fast.KeywordExpander = (*KeywordExpander)(nil)
 )
 
 var jsonRe = regexp.MustCompile(`\{[\s\S]*\}`)
