@@ -945,6 +945,16 @@ func trimAround(s, query string, n int) string {
 	return out
 }
 
+// spanUnresolved marks a window that no declared structure span contains.
+// The project's citation legend already reserves "[?]" for "could not be
+// traced back to a precise source window"; reusing it here keeps the
+// deterministic template honest. It used to stamp src.Structure[0].Label
+// onto such a window — a confident-looking label for a span the window is
+// demonstrably not in (e.g. the small-file full-body path samples [0,len)
+// while Structure only covers part of the document). DEEP's citation face
+// already leaves Span empty in this case; FAST now says the same thing.
+const spanUnresolved = "[?]"
+
 func locate(src source.Source, start, end int) string {
 	for _, sp := range src.Structure {
 		if sp.Start <= start && end <= sp.End {
@@ -952,7 +962,7 @@ func locate(src source.Source, start, end int) string {
 		}
 	}
 	if len(src.Structure) > 0 {
-		return src.Structure[0].Label
+		return spanUnresolved
 	}
 	return "body"
 }
