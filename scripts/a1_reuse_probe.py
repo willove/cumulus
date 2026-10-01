@@ -113,7 +113,7 @@ def paraphrase(q):
     return [s + "？", s + "，具体是什么规定？", "关于这个问题，依据是哪一条？"]
 
 
-def pattern(topics):
+def pattern(topics, variants=3):
     """Bursts, then a revisit pass.
 
     Returns a list of (label, query) where label is the topic index so the
@@ -121,7 +121,7 @@ def pattern(topics):
     """
     seq = []
     for i, q in enumerate(topics):
-        for v in paraphrase(q):
+        for v in paraphrase(q)[:max(1, variants)]:
             seq.append((i, v))
     for i, q in enumerate(topics):          # revisit every topic, later
         seq.append((i, paraphrase(q)[0]))
@@ -156,6 +156,21 @@ def main():
                     help="CLUS_TIMEOUT for the ingest step. The 60s default cuts a "
                          "9.6k-doc ingest off mid-flight; the job cursor resumes, "
                          "but one clean pass is cheaper.")
+    ap.add_argument("--l1pre", action="store_true",
+                    help="enable the L1 prefilter. The archived run that actually "
+                         "answered recorded config_text with l1pre=true and 93,835 "
+                         "search tokens for 60 questions (~1.6k/question); without "
+                         "it the same questions cost ~6.2k each. This is the "
+                         "difference between a 64k and a 250k seeding pass.")
+    ap.add_argument("--seed-only", action="store_true",
+                    help="pass 1: ask each question verbatim, once. Refusal-safe "
+                         "paraphrase variants are a SEPARATE concern (see --variants); "
+                         "clusters can only be seeded by a pass that can actually "
+                         "answer, so seeding wants the plain questions.")
+    ap.add_argument("--variants", type=int, default=3,
+                    help="paraphrases per topic in the reuse pass (default 3). Set 1 "
+                         "to re-ask the identical question — the weakest but the only "
+                         "form the offline path can be expected to match.")
     ap.add_argument("--token-cap", type=int, default=0,
                     help="abort the drive once the run reports this many tokens")
     args = ap.parse_args()
@@ -205,15 +220,24 @@ def main():
             raise SystemExit("serve did not come up")
         http(base + "/v1/buckets", {"name": "law"})
 
-        seq = pattern(topics)
+        seq = ([(i, q) for i, q in enumerate(topics)] if args.seed_only
+               else pattern(topics, args.variants))
+        if not args.seed_only:
+            print("  注意：paraphrase 变体是模板拼的，离线路径多半答不上；"
+                  "播种阶段请用 --seed-only\n", flush=True)
         if args.token_cap:
             print(f"  token cap = {args.token_cap}（超限即停）\n", flush=True)
+        perQuery = 0
+        usedAtLastCheck = 0
         print(f"  drive {len(seq)} queries ({len(topics)} topics x3 + {len(topics)} revisits) …\n", flush=True)
         rows = []
         for n, (topic, q) in enumerate(seq, 1):
             t0 = time.time()
             try:
-                d = http(base + "/v1/search", {"query": q, "ns": "law"}, timeout=90)
+                payload = {"query": q, "ns": "law"}
+                if args.l1pre:
+                    payload["l1pre"] = True
+                d = http(base + "/v1/search", payload, timeout=90)
             except Exception as e:
                 print(f"    {n:2d}. ERROR {e}")
                 continue
@@ -230,9 +254,14 @@ def main():
                   f"conf={a.get('confidence')} refused={a.get('refused')}")
             if args.token_cap:
                 used = get(base + "/v1/monitor/overview").get("llm", {}).get("tokens", 0)
-                if used >= args.token_cap:
-                    print(f"    !! token cap reached ({used} >= {args.token_cap}), 停止")
+                # Look-ahead: the previous probe checked AFTER a query and stopped
+                # at 30,975 against a 25,000 cap, because one query costs ~6.2k.
+                # Stop while there is still room for one more query.
+                if used + perQuery >= args.token_cap:
+                    print(f"    !! 闸门触发：已用 {used}，下一题约需 {perQuery}，"
+                          f"上限 {args.token_cap} → 停在第 {n} 题前")
                     break
+                perQuery = max(perQuery, used - usedAtLastCheck)
 
         snap = get(base + "/v1/monitor/overview")
         r_ = snap.get("retrieval", {})
