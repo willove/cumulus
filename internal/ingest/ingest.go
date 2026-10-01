@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/willove/cumulite"
@@ -49,6 +50,11 @@ type Store struct {
 	clusters  string
 	namespace string
 	jobs      string
+
+	// ensureMu/ensured back EnsureOnce: the suite collections are declared
+	// lazily on the first write and then remembered. See EnsureOnce.
+	ensureMu sync.Mutex
+	ensured  bool
 
 	// EmbedProgress reports backfill progress to stderr. Opt-in, set by the
 	// operator-facing face (CLI ensure -embed) only: eval/search faces share
@@ -88,7 +94,16 @@ const MaxSyncBodyBytes = 256 << 10
 // The retire step is what makes this self-healing: an update interrupted after
 // the insert (the previous revision never marked stale) leaves two live
 // revisions, and the next Put — even of identical bytes — converges them.
+// Put is the synchronous write path. It declares the suite collections first
+// (once, memoized) so a fresh store accepts the first put instead of failing
+// with a raw "collection not found" — see EnsureOnce for why this is
+// memoized rather than a bare Ensure call, and for the two precedents it
+// follows. The Job path calls put() directly and declares for itself, so it
+// neither double-declares nor is affected.
 func (s *Store) Put(ctx context.Context, src source.Source) (Result, error) {
+	if err := s.EnsureOnce(ctx); err != nil {
+		return Result{}, err
+	}
 	return s.put(ctx, src, MaxSyncBodyBytes)
 }
 
@@ -603,6 +618,35 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 		}
 	}
 	return done, nil
+}
+
+// EnsureOnce declares the suite collections at most once per Store and is
+// what the synchronous write path uses. Two constraints pull in opposite
+// directions here and this is the shape that satisfies both:
+//
+//   - The engine fail-closes writes to collections it has never seen, so
+//     `cumulus-cluster put` against a fresh store otherwise dies on a raw
+//     "collection not found" and the operator has to know to run `ensure` by
+//     hand first. The serve face states the same rule and solves it with a
+//     per-namespace memo (cmd/cumulus-cluster/serve.go nsEnsurer); the Job
+//     path calls Ensure explicitly. The CLI put face was the one left out.
+//   - D7 says collection shape is declared once, never per ingest, and
+//     Ensure writes a changelog record — so it must not run per document.
+//
+// Hence: declare lazily on first use, then remember. Only success is
+// remembered, so a transient failure (a cancelled context, a locked store)
+// retries on the next call instead of poisoning the Store for its lifetime.
+func (s *Store) EnsureOnce(ctx context.Context) error {
+	s.ensureMu.Lock()
+	defer s.ensureMu.Unlock()
+	if s.ensured {
+		return nil
+	}
+	if _, err := s.Ensure(ctx); err != nil {
+		return err
+	}
+	s.ensured = true
+	return nil
 }
 
 // Ensure declares the suite's collections (idempotent) — D7: collection shape
@@ -1161,6 +1205,14 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	if len(files) == 0 {
 		return 0, fmt.Errorf("ingest: no files")
 	}
+	// Same rule as ingestFileList: declare before the job cursor reads
+	// clus_sources below. It is also this function's cancellation gate — Ensure
+	// propagates ctx.Err() through the engine, so a cancelled run returns the
+	// cancellation cause and runAdaptJob can record terminal progress, rather
+	// than reaching NewBatchIngester and reading a store it never declared.
+	if err := s.EnsureOnce(ctx); err != nil {
+		return 0, err
+	}
 	if jobKey == "" {
 		jobKey = "adapt"
 	}
@@ -1181,13 +1233,6 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 			t += v
 		}
 		return t
-	}
-	// Declare this namespace's collections first. The engine fail-closes
-	// writes to undeclared collections, so a freshly created bucket pointed at
-	// a corpus would otherwise fail with a raw "collection not found" — the
-	// operator would have to know to run `ensure` by hand.
-	if _, eerr := s.Ensure(ctx); eerr != nil {
-		return 0, eerr
 	}
 	// One revision index for the whole job. The alternative — rebuilding it per
 	// batch — still rescanned the collection every 512 records and kept a
@@ -1419,6 +1464,17 @@ func relKey(dir, p string) string {
 // failure (the engine refusing the upsert) fails the job.
 func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string, uploaded bool) (ingested int, runErr error) {
 	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	// Declare this namespace's collections before ANY read of them. The engine
+	// fail-closes on undeclared collections, and the job cursor is read from
+	// clus_sources a few lines below — so a declaration placed further down,
+	// where this one used to sit (right before NewBatchIngester, with the
+	// comment "declare first"), never ran on a genuinely fresh store:
+	// `cumulus-cluster ingest-files -dir <corpus>` against a new -data died
+	// with a raw `collection "clus_sources": not found`. Memoized like the
+	// synchronous path, so a multi-file job still declares exactly once.
+	if err := s.EnsureOnce(ctx); err != nil {
 		return 0, err
 	}
 	if jobKey == "" {
