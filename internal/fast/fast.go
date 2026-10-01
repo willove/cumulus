@@ -435,9 +435,16 @@ func maxUsageDoc(usage map[string]float64, sources []source.Source) (string, flo
 	return best, bw
 }
 
-// SkipBelow is the FAST confidence floor below which an answer is marked
-// skipped. It mirrors deep.EscalateBelow so tuning one line cannot desynchronize
-// the FAST skip flag from the DEEP escalation line.
+// SkipBelow is the default FAST confidence floor below which an answer is
+// marked skipped — and, because a skipped answer is itself an escalation
+// trigger, it is also the default DEEP escalation line.
+//
+// The guarantee is two-part, and only one part used to hold:
+//   - WHEN CLUS_ESCALATE_BELOW is set, both sides read it (SkipBelowLine
+//     here, escalateBelowLine in deep) with identical bounds. Synchronised.
+//   - WHEN IT IS NOT SET, both fell back to their own literal, so editing
+//     one without the other desynchronised them silently. deep.EscalateBelow
+//     now derives from THIS constant, so there is only one value to edit.
 const SkipBelow = 0.35
 
 // SkipBelowLine is SkipBelow at runtime: the same CLUS_ESCALATE_BELOW knob

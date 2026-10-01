@@ -435,6 +435,13 @@ type searchIn struct {
 	NS      string   `json:"ns"` // explicitly selected, registered bucket
 }
 
+// l1PreK is how many body_embed neighbours the L1 prefilter keeps as
+// candidates. It was a bare 30 in two places; the value is now declared once so
+// the search and eval faces cannot drift apart. There is no measured basis for
+// 30 — it predates the D0 finding that long documents get little from body
+// embeddings at all — so treat it as a tuning knob, not a tuned constant.
+const l1PreK = 30
+
 // narrowL1Pre narrows candidates via body_embed KNN (D7: a missing index
 // materializes once, bounded, then retries; failure → full list, 只慢不错).
 func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, query string) []source.Source {
@@ -445,7 +452,7 @@ func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, qu
 			return nil, fmt.Errorf("embed: %w", err)
 		}
 		return ss.c.KNN(ctx, ss.sourcesColl, contract.KNNRequest{
-			Field: "body_embed", Vector: qv[0], K: 30, Metric: "cosine",
+			Field: "body_embed", Vector: qv[0], K: l1PreK, Metric: "cosine",
 			Index:  "clus_body_embed",
 			Filter: map[string]any{"status": source.StatusActive},
 		})

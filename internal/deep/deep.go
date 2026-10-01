@@ -1,8 +1,17 @@
 // Package deep is the DEEP tier: confidence-gated escalation from FAST,
-// multi-source evidence refinement (ReAct-shaped tool loop, offline stub),
-// conflict detection between clusters, and the citation delivery face ([?]
-// legend for unresolved refs). Low confidence must escalate; conflict
-// pairs must be discoverable; citations must resolve to source offsets.
+// multi-source evidence refinement, conflict detection between clusters, and
+// the citation delivery face ([?] legend for unresolved refs). Low confidence
+// must escalate; conflict pairs must be discoverable; citations must resolve
+// to source offsets.
+//
+// Refinement is DETERMINISTIC: widen the keywords, rank-admit a candidate set,
+// then refine window by window (sample → oracle score → topKeeps → synthesise).
+// The ReAct TOOL loop named in design-plan §4 — keyword_search / read_window /
+// expand_clusters / query_kb — is declared there but has never been wired
+// (all four identifiers are absent from the tree). Do not read "multi-source
+// evidence refinement" as an agent loop; it is not one. When a real case
+// appears that deterministic refinement cannot answer, that is the trigger to
+// build the tools, and this comment is the place to say so.
 package deep
 
 import (
@@ -26,7 +35,18 @@ import (
 
 // EscalateBelow is the confidence line under which FAST upgrades to DEEP
 // (plan D5: 置信不足 → DEEP / ReAct).
-const EscalateBelow = 0.35
+//
+// The value lives in package fast because fast cannot import deep (deep
+// already imports fast for the shared skip line), so this direction is the
+// only one that avoids an import cycle. It used to be a second literal
+// 0.35 — which meant that editing one and not the other silently
+// desynchronised the FAST skip floor from the DEEP escalation line
+// whenever CLUS_ESCALATE_BELOW was unset. One constant, one default.
+//
+// The runtime value both sides read is CLUS_ESCALATE_BELOW; see
+// escalateBelowLine below and fast.SkipBelowLine, which apply identical
+// bounds and fall back here.
+const EscalateBelow = fast.SkipBelow
 
 // escalateBelowLine is the runtime escalation line: the historical constant
 // unless CLUS_ESCALATE_BELOW overrides it (calibration knob, 2026-09-29).

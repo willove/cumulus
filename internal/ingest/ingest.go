@@ -1201,6 +1201,8 @@ func (s *Store) IngestUploaded(ctx context.Context, root string, paths []string,
 //
 // files is walked in order; dir/recursive expand it first. The emit path is
 // streaming, so a 600 MB corpus costs O(1) memory per record.
+// IngestAdapted is the adapt-shaped twin of ingestFileList — see the warning
+// on that function: the two must be changed together.
 func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Fields, jobKey string) (int, error) {
 	if len(files) == 0 {
 		return 0, fmt.Errorf("ingest: no files")
@@ -1462,6 +1464,13 @@ func relKey(dir, p string) string {
 // unextractable file must not strand the rest of the directory, and a resumed
 // run must not re-fail on it forever (P9: skipped 账可查). Only a store-level
 // failure (the engine refusing the upsert) fails the job.
+// ingestFileList and IngestAdapted below are near-duplicates of the same state
+// machine: cursor resume, skip ledger, phase reporting, batch upsert. They
+// MUST be changed together. They drifted once already — a lazy-declaration fix
+// was applied to the wrong one of the pair and left
+// TestAdaptCancelledJobPreservesTerminalProgress nil-dereferencing until the
+// mismatch was found. Collapsing them is a real refactor with a real diff;
+// until then this line is the warning.
 func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string, uploaded bool) (ingested int, runErr error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

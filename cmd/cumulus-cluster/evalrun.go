@@ -431,6 +431,15 @@ func embedSeatLabel() string {
 }
 
 // narrowByKNN narrows the active-source list to the body_embed KNN hits for
+//
+// NOTE this is NOT the same as (*searchStack).narrowL1Pre, despite the shared
+// l1PreK: the search face names the index and materialises it if missing before
+// retrying, and falls back to the full list on any failure (只慢不错); this one
+// does neither and returns the error. So `eval-run -l1pre` and `search -l1pre`
+// are not interchangeable, and archived eval numbers are NOT what the serve
+// face would produce on the same corpus. Aligning them would change archived
+// run semantics, so it is left as a recorded divergence rather than a drive-by
+// fix.
 // one query. Index is deliberately omitted: with no usable ANN structure the
 // engine falls back to a filtered scan, which is the right operating point
 // for small corpora (索引是缓存：只影响快慢，不影响正确性).
@@ -440,7 +449,7 @@ func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn
 		return nil, fmt.Errorf("embed query: %w", err)
 	}
 	knn, err := c.KNN(ctx, sourcesColl, contract.KNNRequest{
-		Field: "body_embed", Vector: qv[0], K: 30, Metric: "cosine",
+		Field: "body_embed", Vector: qv[0], K: l1PreK, Metric: "cosine",
 		Filter: map[string]any{"status": source.StatusActive},
 	})
 	if err != nil {
