@@ -295,6 +295,19 @@ raw = sys.stdin.read()
 assert "型号 AX3000" in raw, raw[:200]
 assert "\"desc\"" not in raw, raw[:200]
 print("ok")' ; check "ingest-jsonl --map renders the body template (Path B)" $?
+# A corpus whose body field is misnamed must not read as success. The default
+# mapping reads only "text", so every record maps to an empty body — this used
+# to print processed:N and exit 0 while the store received nothing (measured
+# 2026-10-02: 9,600 records in, 0 stored).
+cat >"$WORK/misnamed.jsonl" <<'JSONL'
+{"id":"m1","title":"条目甲","body":"正文在 body 字段里"}
+{"id":"m2","title":"条目乙","body":"这一条也在 body 里"}
+JSONL
+$A ingest-jsonl -file "$WORK/misnamed.jsonl" -job misnamed >"$WORK/misnamed.out" 2>/dev/null
+[ $? -ne 0 ] ; check "ingest-jsonl fails loudly when every record maps to an empty body" $?
+cat "$WORK/misnamed.out" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==0 and r["dropped_empty"]==2, r; print("ok")' ; check "ingest-jsonl reports what the store received, not a slot count" $?
+$A ingest-jsonl -file "$WORK/misnamed.jsonl" -job misnamed2 -allow-empty >/dev/null 2>&1
+check "ingest-jsonl -allow-empty accepts the drops and exits 0" $?
 CLL="$($A cluster list)"
 echo "$CLL" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert isinstance(r, list), type(r)' ; check "cluster list reads clus_clusters" $?
 CFL="$($A conflicts list)"

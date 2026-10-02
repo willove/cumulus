@@ -32,7 +32,7 @@ $CLUS model install -y                # 缺席时从魔搭社区下载（约 485
 $CLUS put -title "部署手册" -key handbook -body-file doc.md
 $CLUS put -title "页面" -type html -key page -body-file page.html   # HTML 抽取为正文
 $CLUS put -title "附件" -type docx -key spec -body-file spec.docx   # DOCX 段落抽取
-$CLUS ingest-jsonl -file batch.jsonl -job batch1 [-map map.json]
+$CLUS ingest-jsonl -file batch.jsonl -job batch1 [-map map.json]   # 报 written/unchanged/dropped_empty；有空 body 即退出非 0（-allow-empty 豁免）
 $CLUS ingest-files -dir ./docs -recursive -job docs1
 $CLUS scan -dir ./docs -recursive -limit 200 -out scan.json   # P9 候选发现：规则清单（可 -q 主题 LLM 排名），不开库
 $CLUS ingest-files -candidates scan.json -job docs1   # 只吃清单内的文件（同一 Job 状态机，可续）

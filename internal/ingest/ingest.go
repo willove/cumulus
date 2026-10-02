@@ -209,7 +209,18 @@ type BatchIngester struct {
 
 // NewBatchIngester scans the sources collection once and returns an ingester
 // whose index is the current live-revision state of every business identity.
+//
+// That scan is this path's first read of clus_sources, so the collections are
+// declared here as a backstop for every batch caller. The engine fail-closes
+// on an undeclared collection, and L9 is the record of write faces each
+// growing their own EnsureOnce until one was missed — ingest-jsonl against a
+// fresh -data died on a raw `collection "clus_sources": not found`. Callers
+// that already declare keep working (memoized, so a multi-chunk job still
+// declares exactly once).
 func (s *Store) NewBatchIngester(ctx context.Context) (*BatchIngester, error) {
+	if err := s.EnsureOnce(ctx); err != nil {
+		return nil, err
+	}
 	live := map[string]liveRev{}
 	const page = 1000
 	for skip := 0; ; skip += page {
@@ -572,7 +583,19 @@ func (s *Store) MarkEvidence(ctx context.Context, docID string, start, end int, 
 	return id, nil
 }
 
-// IngestJSONL upserts a batch with a resumable cursor under the job key.
+// IngestCounts is what a bulk write actually did, as opposed to how many
+// records it was handed. PutBatch skips a record for exactly two reasons — an
+// empty body and an unchanged digest — so these three partition the run.
+type IngestCounts struct {
+	Written      int `json:"written"`
+	Unchanged    int `json:"unchanged"`
+	DroppedEmpty int `json:"dropped_empty"`
+}
+
+// Total is the number of records this run examined. A resumed job whose
+// fingerprint is unchanged examines none, so this is 0 rather than len(records).
+func (c IngestCounts) Total() int { return c.Written + c.Unchanged + c.DroppedEmpty }
+
 // IngestJSONL stores a JSONL corpus under a resumable job cursor. It runs
 // through BatchIngester (one revision index per job), NOT per-record Put:
 // the engine has no business_key index, so each Put's revisions() query was
@@ -582,8 +605,13 @@ func (s *Store) MarkEvidence(ctx context.Context, docID string, start, end int, 
 // never migrated. Cursor granularity is now per chunk (512) instead of per
 // record: a resumed job re-processes up to 511 records, which the digest
 // check makes idempotent. Empty bodies are skipped (batch-path contract,
-// same as ingest-adapt), where the per-record path used to fail the job.
-func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[string]any, mapFn func(map[string]any) (source.Source, error)) (int, error) {
+// same as ingest-adapt) and reported in DroppedEmpty: skipping is correct,
+// but a caller that counts chunk slots instead reports every record as
+// processed while the store received none — which is how a 9,600-record
+// corpus with a misnamed body field reported `processed: 9600`, stored 0,
+// and exited 0.
+func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[string]any, mapFn func(map[string]any) (source.Source, error)) (IngestCounts, error) {
+	var counts IngestCounts
 	if jobKey == "" {
 		jobKey = "default"
 	}
@@ -592,32 +620,38 @@ func (s *Store) IngestJSONL(ctx context.Context, jobKey string, records []map[st
 	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(records))
 	bi, berr := s.NewBatchIngester(ctx)
 	if berr != nil {
-		return 0, berr
+		return counts, berr
 	}
 	const chunk = 512
-	done := 0
 	for i := start; i < len(records); i += chunk {
 		end := i + chunk
 		if end > len(records) {
 			end = len(records)
 		}
 		batch := make([]source.Source, 0, end-i)
+		empty := 0
 		for j := i; j < end; j++ {
 			src, err := mapFn(records[j])
 			if err != nil {
-				return done, fmt.Errorf("record %d: %w", j, err)
+				return counts, fmt.Errorf("record %d: %w", j, err)
+			}
+			if src.Body == "" {
+				empty++
 			}
 			batch = append(batch, src)
 		}
-		if _, err := bi.PutBatch(ctx, batch); err != nil {
-			return done, fmt.Errorf("record %d batch: %w", i, err)
+		written, err := bi.PutBatch(ctx, batch)
+		counts.Written += written
+		counts.DroppedEmpty += empty
+		if err != nil {
+			return counts, fmt.Errorf("record %d batch: %w", i, err)
 		}
-		done += end - i
+		counts.Unchanged += len(batch) - empty - written
 		if err := s.saveJobCursor(ctx, cursorKey, fp, end); err != nil {
-			return done, err
+			return counts, err
 		}
 	}
-	return done, nil
+	return counts, nil
 }
 
 // EnsureOnce declares the suite collections at most once per Store and is

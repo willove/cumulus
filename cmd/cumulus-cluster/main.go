@@ -41,7 +41,7 @@ const usage = `cumulus-cluster — cognitive search suite (on cumulite)
 Usage:
   cumulus-cluster put    -title T [-type md] [-uri U] [-key K] [-lang zh] -body-file F
   cumulus-cluster put    -title T -body "text"
-  cumulus-cluster ingest-jsonl -file data.jsonl [-job NAME] [-map map.json]
+  cumulus-cluster ingest-jsonl -file data.jsonl [-job NAME] [-map map.json] [-allow-empty]
   cumulus-cluster ingest-adapt -dir DIR [-recursive] [-job NAME] [-id F] [-title F] [-body F] [-extra a,b]
                                                # 异构语料适配：json/jsonl/csv/txt 自动判别+字段映射
   cumulus-cluster ingest-files -dir D [-recursive] [-job NAME] [-candidates scan.json]  # P9：-candidates 只吃扫描清单
@@ -253,6 +253,7 @@ func main() {
 		file := fs.String("file", "", "jsonl file")
 		job := fs.String("job", "default", "job key (resumable cursor)")
 		mapFile := fs.String("map", "", "Path B map spec (body/title templates)")
+		allowEmpty := fs.Bool("allow-empty", false, "accept records that map to an empty body instead of failing")
 		_ = fs.Parse(rest)
 		raw, err := os.ReadFile(*file)
 		if err != nil {
@@ -295,11 +296,23 @@ func main() {
 			}
 			return source.New(title, typ, "", key, "zh", text, m), nil
 		}
-		n, err := st.IngestJSONL(ctx, *job, recs, mapFn)
+		counts, err := st.IngestJSONL(ctx, *job, recs, mapFn)
 		if err != nil {
 			fatal(err)
 		}
-		printJSON(map[string]any{"processed": n})
+		printJSON(map[string]any{
+			"written":       counts.Written,
+			"unchanged":     counts.Unchanged,
+			"dropped_empty": counts.DroppedEmpty,
+		})
+		if counts.DroppedEmpty > 0 && !*allowEmpty {
+			fmt.Fprintf(os.Stderr, "cumulus-cluster: %d of %d records mapped to an EMPTY body and were not stored.\n"+
+				"The default mapping reads only the \"text\" field — a corpus that spells it \"body\" or\n"+
+				"\"content\" drops every record while still looking like it worked. Rename the fields with\n"+
+				"-map, or pass -allow-empty to accept the drops. The job cursor advanced; a corrected\n"+
+				"file is a new fingerprint and re-runs from the start.\n", counts.DroppedEmpty, len(recs))
+			os.Exit(1)
+		}
 	case "ingest-adapt":
 		// Heterogeneous corpus files: JSON / JSON-lines / CSV / text are
 		// autodetected and field-mapped (adapt package). Flags come before the
