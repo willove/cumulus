@@ -81,7 +81,8 @@ func registerUploadFace(mux *http.ServeMux, ensure *nsEnsurer, buckets *bucket.S
 		}
 		job := "upload-" + hex.EncodeToString(nonce[:])
 		err = queueFileJob(r.Context(), st, job, len(files), func(ctx context.Context) (int, error) {
-			return st.IngestUploaded(ctx, root, files, job)
+			c, err := st.IngestUploaded(ctx, root, files, job)
+			return c.Stored(), err
 		}, func() { _ = os.RemoveAll(root) })
 		if err != nil {
 			writeStoreErr(w, err)

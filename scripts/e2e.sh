@@ -275,10 +275,50 @@ echo "$FNAME" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer
 mkdir -p "$WORK/docs"
 printf '# notes\n文件匹配测试内容。\n' >"$WORK/docs/notes.md"
 printf '纯文本补充说明。\n' >"$WORK/docs/extra.txt"
-$A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
+F1="$($A ingest-files -dir "$WORK/docs" -job fg1)"
 $A ingest-files -dir "$WORK/docs" -job fg1 >/dev/null
 FCNT="$(QQ clus_sources '{"business_key":{"$in":["notes.md","extra.txt"]}}')"
 [ "$FCNT" -le 2 ] ; check "ingest-files is resumable/idempotent (n=$FCNT)" $?
+# The file faces used to print ONE number ("processed") that mixed new and
+# already-present documents and said nothing about the files the run skipped:
+# that ledger lived only in the job doc. On the charset-census corpus (7.6%
+# undecodable, measured) that shape reports success over ~95 dropped files of
+# 1,251 — arithmetic from the measured rate, not a run anyone did. Every file
+# examined now lands in exactly one bucket, on stdout. The ambiguous key is
+# GONE rather than redefined — a consumer of the old field gets a KeyError, not
+# a silently different number.
+echo "$F1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==2 and r["unchanged"]==0 and r["examined"]==2 and r["files"]==2, r; assert "processed" not in r, r; print("ok")' ; check "ingest-files reports written/unchanged, not one ambiguous count" $?
+F2="$($A ingest-files -dir "$WORK/docs" -job fg2)"
+echo "$F2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==0 and r["unchanged"]==2, r; print("ok")' ; check "a re-run under a new job key reports 0 written, not a full count" $?
+F3="$($A ingest-files -dir "$WORK/docs" -job fg2)"
+echo "$F3" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["examined"]==0 and r["files"]==2, r; print("ok")' ; check "a resumed run reports 0 examined (a no-op, not an empty ingest)" $?
+mkdir -p "$WORK/badcorpus"
+printf 'not a zip container' >"$WORK/badcorpus/broken.docx"
+printf '%%PDF-1.4 encrypted binary' >"$WORK/badcorpus/garbage.pdf"
+$A ingest-files -dir "$WORK/badcorpus" -job bad1 >"$WORK/bad.out" 2>"$WORK/bad.err"
+[ $? -ne 0 ] ; check "ingest-files fails loudly when it examined files and stored none" $?
+cat "$WORK/bad.out" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==0 and r["unchanged"]==0, r; assert r["skipped"].get("extract_failed")==1 and r["skipped"].get("empty")==1, r; assert sum(r["skipped"].values())==r["examined"], r; print("ok")' ; check "the per-reason skip ledger is on stdout and partitions the run" $?
+grep -q 'job -job bad1' "$WORK/bad.err" ; check "the refusal names the job command holding per-file reasons" $?
+$A ingest-files -dir "$WORK/badcorpus" -job bad2 -allow-empty >/dev/null 2>&1
+[ $? -eq 0 ] ; check "ingest-files -allow-empty accepts a corpus that stores nothing" $?
+# The adapt twin of the same state machine. Its Written/Unchanged count RECORDS
+# (one file fans out into many) while its skip ledger still counts FILES — the
+# old single "ingested" number conflated the two units and, like "processed",
+# carried no skip information at all.
+printf '{"body":"适配面甲组正文。"}\n{"body":"适配面乙组正文。"}\n' >"$WORK/ad.jsonl"
+AD1="$($A ingest-adapt -job ad1 "$WORK/ad.jsonl")"
+echo "$AD1" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==2 and r["unchanged"]==0, r; assert r["files"]==1 and r["examined"]==1, r; assert "ingested" not in r, r; print("ok")' ; check "ingest-adapt reports record-level written/unchanged beside file-level totals" $?
+AD2="$($A ingest-adapt -job ad2 "$WORK/ad.jsonl")"
+echo "$AD2" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==0 and r["unchanged"]==2, r; print("ok")' ; check "an ingest-adapt re-run reports 0 written, not the same record count" $?
+printf '{"body": "broken"\n' >"$WORK/ad-bad.jsonl"
+$A ingest-adapt -job ad3 "$WORK/ad-bad.jsonl" "$WORK/gone.jsonl" >"$WORK/ad3.out" 2>"$WORK/ad3.err"
+[ $? -ne 0 ] ; check "ingest-adapt fails loudly when it examined files and stored none" $?
+cat "$WORK/ad3.out" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]==0 and r["examined"]==2, r; assert r["skipped"].get("adapt_failed")==1 and r["skipped"].get("unreadable")==1, r; print("ok")' ; check "ingest-adapt names both skip reasons on stdout" $?
+# The escape hatch must also survive being placed AFTER the positional file
+# list: that face reorders argv itself, and a flag missing from flagsFirst's
+# bool list makes the reorderer eat the next argument as its value.
+$A ingest-adapt "$WORK/ad-bad.jsonl" -job ad4 -allow-empty >/dev/null 2>&1
+[ $? -eq 0 ] ; check "ingest-adapt -allow-empty works with the flag after the file list" $?
 FNAME2="$($A search -q "notes.md" -raw)"
 echo "$FNAME2" | python3 -c 'import json,sys; r=json.load(sys.stdin); a=r["answer"]; assert a["mode"]=="FILENAME_ONLY" and a.get("source_id"), r' ; check "extension lookup is FILENAME_ONLY" $?
 cat >"$WORK/map.json" <<'JSON'
@@ -978,7 +1018,7 @@ print("ok")' ; check "scan: rules list candidates and account for skips" $?
 $A scan -dir "$SCANSRC" -recursive -out "$WORK/cands.json" >/dev/null
 [ -s "$WORK/cands.json" ] ; check "scan: -out writes the candidate report" $?
 CJOB="$($A ingest-files -candidates "$WORK/cands.json" -job scando)"
-echo "$CJOB" | python3 -c 'import json,sys; assert json.load(sys.stdin)["processed"]>=2, sys.stdin.read()' ; check "ingest-files -candidates runs the same job state machine" $?
+echo "$CJOB" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["written"]+r["unchanged"]>=2, r; print("ok")' ; check "ingest-files -candidates runs the same job state machine" $?
 SDOG="$($A search -q "连接池最大是多少" -raw)"
 echo "$SDOG" | python3 -c '
 import json,sys

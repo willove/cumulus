@@ -8,14 +8,14 @@
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
 本套件贡献摄取形状、**BM25 倒排检索与词汇鸿沟改写**（`internal/index`）、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝。蒙特卡洛证据窗口采样也在设计里，但**它在生产语料上基本不触发**——正文 < `SmallFileRunes = 100_000` runes 即整体读入，而中文法条语料 p50 ≈ 3.5K 字符（`internal/mcs/mcs.go:147-161` 注释自陈；详见 `docs/baseline-2026-10-02.md` §三）。全文排序由本套件自建的倒排索引在进程内承担（**不是** cumulite 的全文能力），图遍历同样在进程内；模型流量走 OpenAI 兼容直连端点（`LLM_*` 配置）。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（27 个门标 B–AC，其中无门 A、无门 E；**175** 断言，退出判据零容错 `[ "$FAIL" -eq 0 ]`——不存在「下限」这种部分通过）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（27 个门标 B–AC，其中无门 A、无门 E；**187** 断言，退出判据零容错 `[ "$FAIL" -eq 0 ]`——不存在「下限」这种部分通过）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
-make e2e                   # 27 个门标（B–AC，无 A 无 E）· 真 cumulite 嵌入库 · 175 断言零容错
+make e2e                   # 27 个门标（B–AC，无 A 无 E）· 真 cumulite 嵌入库 · 187 断言零容错
                            # 注意：它 source scripts/offline-gate.sh —— LLM 打分与语义嵌入都被换成
                            # 离线 stub / hash-64，所以全绿**不构成任何语义质量保证**
 make browser-check         # 浏览器联调门（可选：自起离线 serve，打生产内嵌 /ui/）
@@ -36,8 +36,11 @@ $CLUS put -title "页面" -type html -key page -body-file page.html   # HTML 抽
 $CLUS put -title "附件" -type docx -key spec -body-file spec.docx   # DOCX 段落抽取
 $CLUS ingest-jsonl -file batch.jsonl -job batch1 [-map map.json]   # 报 written/unchanged/dropped_empty；有空 body 即退出非 0（-allow-empty 豁免）
 $CLUS ingest-files -dir ./docs -recursive -job docs1
+                                  # 报 files/examined/written/unchanged/skipped（按原因）；
+                                  # 看了文件却零入库即退出非 0（-allow-empty 豁免）。
+                                  # 旧输出是单个 processed，它把新写与已存在混算、且不带跳过账
 $CLUS scan -dir ./docs -recursive -limit 200 -out scan.json   # P9 候选发现：规则清单（可 -q 主题 LLM 排名），不开库
-$CLUS ingest-files -candidates scan.json -job docs1   # 只吃清单内的文件（同一 Job 状态机，可续）
+$CLUS ingest-files -candidates scan.json -job docs1   # 只吃清单内的文件（同一 Job 状态机、同一输出形状，可续）
 $CLUS job -job docs1                  # 摄取任务状态（queued/running/done/failed）
 $CLUS search -q "连接池最大连接数" [-hopts 168h] [-prior]
 $CLUS search -q "那它最大是多少" -history "连接池最大连接数是多少|端口是多少"  # 多轮改写
@@ -59,6 +62,8 @@ $CLUS eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS �
 # 以下 9 个子命令此前既不在本文、其中 6 个也不在 `cumulus-cluster -h` 的 usage 里
 $CLUS ingest-adapt -dir DIR [-recursive] [-id F] [-title F] [-body F] [-extra a,b]
                                   # 异构语料适配：json/jsonl/csv/txt 自动判别 + 字段映射
+                                  # 输出同 ingest-files，但 written/unchanged 数的是**记录**
+                                  # （一个文件可展开成多条），skipped 数的是**文件**
 $CLUS env                         # 生效的端点配置（脱敏）；只解析不打开库
 $CLUS bucket list | new <name> [label] [note] | rm <name> | show <name>
                                   # 桶/命名空间登记——多租户与 -ns 的入口

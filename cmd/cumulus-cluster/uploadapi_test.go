@@ -412,7 +412,8 @@ func TestPlainCancelledJobPreservesProgress(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	runFileJob(ctx, st, "cancelled", func(ctx context.Context) (int, error) {
-		return st.IngestCandidates(ctx, []string{"unused.txt"}, "cancelled")
+		c, err := st.IngestCandidates(ctx, []string{"unused.txt"}, "cancelled")
+		return c.Stored(), err
 	})
 	got, err := st.GetJobDoc(context.Background(), "cancelled")
 	if err != nil {

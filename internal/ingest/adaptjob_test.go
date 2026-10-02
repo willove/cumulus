@@ -42,8 +42,8 @@ func TestIngestAdaptedSkipAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 5 {
-		t.Fatalf("records stored = %d, want 5", n)
+	if n.Stored() != 5 {
+		t.Fatalf("records stored = %d, want 5 (%+v)", n.Stored(), n)
 	}
 	doc, err := st.GetJobDoc(ctx, "jacc")
 	if err != nil {
@@ -96,8 +96,8 @@ func TestIngestAdaptedRecordsIsThisRunOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
-		t.Fatalf("records stored this run = %d, want 3", n)
+	if n.Stored() != 3 {
+		t.Fatalf("records stored this run = %d, want 3 (%+v)", n.Stored(), n)
 	}
 	doc, err := st.GetJobDoc(ctx, "jr")
 	if err != nil {

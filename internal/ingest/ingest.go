@@ -1206,28 +1206,89 @@ func WalkIngestable(dir string, recursive bool) ([]string, error) {
 	return files, nil
 }
 
-func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, jobKey string) (int, error) {
+// FileCounts is the file-face analogue of IngestCounts. These faces used to
+// return one int that mixed newly-written and unchanged documents and said
+// nothing about the files the run skipped — the skip ledger lived only in the
+// JobDoc, so `ingest-files` could print a success-shaped number and exit 0 over
+// a corpus it had largely dropped. On the charset census that is ~95 of 1,251
+// files, arithmetic from the measured 7.6% undecodable rather than a run I did.
+// A re-run under a fresh job key printed the same full count while storing
+// nothing new.
+//
+// Units differ by path, and that is the corpus's shape rather than an
+// oversight:
+//
+//   - the file walk stores at most one document per file, so Written and
+//     Unchanged count FILES and Written+Unchanged+Skips() == Processed exactly.
+//     A file split into blocks by CLUS_INGEST_BLOCKS still counts once, as
+//     written if any block was new; PutBlock's own BlockResult carries the
+//     per-block counts.
+//   - the adapt path fans one file out into many records, so Written and
+//     Unchanged count RECORDS while Skipped still counts FILES. Its invariant
+//     is Processed-Skips() == files that reached the store.
+type FileCounts struct {
+	// Files is the list length; Processed is how many of them this run
+	// examined, which is fewer after a resume (the cursor parks mid-list).
+	// The JSON name matches the CLI key ("examined") so there is one
+	// vocabulary for this shape, not two.
+	Files     int `json:"files"`
+	Processed int `json:"examined"`
+	Written   int `json:"written"`
+	Unchanged int `json:"unchanged"`
+	// Skipped is the per-reason file ledger (unreadable / undecodable /
+	// extract_failed / empty / adapt_failed) — the same map the JobDoc carries,
+	// now also on the face the operator is looking at.
+	Skipped map[string]int `json:"skipped,omitempty"`
+}
+
+// Skips is the sum over reasons. It must not read one key: this pair of faces
+// has already shipped a bug where Skipped read `skip["file"]`, a key nothing
+// writes, so the job reported Skipped=0 forever while SkipReasons held the
+// real counts.
+func (c FileCounts) Skips() int {
+	n := 0
+	for _, v := range c.Skipped {
+		n += v
+	}
+	return n
+}
+
+// Stored is what the single int used to mean: documents this run accounted
+// for, new or already present. Callers that only need "did the job do its
+// work" (the HTTP job queue) keep using this and lose nothing they had.
+func (c FileCounts) Stored() int { return c.Written + c.Unchanged }
+
+// Empty reports the case that must never look like success: the run examined
+// files and stored none of them. A resume examined nothing, so it is a no-op
+// rather than an empty run — the distinction is why Processed is in the
+// predicate instead of Files.
+func (c FileCounts) Empty() bool { return c.Processed > 0 && c.Stored() == 0 }
+
+func (c *FileCounts) skip(reason string) {
+	if c.Skipped == nil {
+		c.Skipped = map[string]int{}
+	}
+	c.Skipped[reason]++
+}
+
+func (s *Store) IngestFiles(ctx context.Context, dir string, recursive bool, jobKey string) (FileCounts, error) {
 	files, err := WalkIngestable(dir, recursive)
 	if err != nil {
-		return 0, err
+		return FileCounts{}, err
 	}
 	return s.IngestFileList(ctx, dir, files, jobKey)
 }
 
 // IngestFileList retains the discovery root when deriving document identities.
-func (s *Store) IngestFileList(ctx context.Context, root string, paths []string, jobKey string) (int, error) {
+func (s *Store) IngestFileList(ctx context.Context, root string, paths []string, jobKey string) (FileCounts, error) {
 	return s.ingestFileList(ctx, root, paths, jobKey, false)
 }
 
 // IngestUploaded keeps source identities and URIs independent of temporary staging paths.
-func (s *Store) IngestUploaded(ctx context.Context, root string, paths []string, jobKey string) (int, error) {
+func (s *Store) IngestUploaded(ctx context.Context, root string, paths []string, jobKey string) (FileCounts, error) {
 	return s.ingestFileList(ctx, root, paths, jobKey, true)
 }
 
-// IngestCandidates ingests an explicit file list (a trimmed scan report or a
-// hand-written one) through the SAME state machine as IngestFiles: resumable
-// cursor, phase reporting, digest-idempotent upserts. P9's discovery step
-// hands its survivors here — the walk is replaced, the pipeline is not.
 // IngestAdapted streams one or more heterogeneous corpus files through the
 // adapt package (JSON / JSON-lines / CSV / text autodetect) into the same
 // content-addressed source store. It reuses the job state machine and cursor so
@@ -1237,9 +1298,11 @@ func (s *Store) IngestUploaded(ctx context.Context, root string, paths []string,
 // streaming, so a 600 MB corpus costs O(1) memory per record.
 // IngestAdapted is the adapt-shaped twin of ingestFileList — see the warning
 // on that function: the two must be changed together.
-func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Fields, jobKey string) (int, error) {
+func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Fields, jobKey string) (FileCounts, error) {
+	var counts FileCounts
+	counts.Files = len(files)
 	if len(files) == 0 {
-		return 0, fmt.Errorf("ingest: no files")
+		return counts, fmt.Errorf("ingest: no files")
 	}
 	// Same rule as ingestFileList: declare before the job cursor reads
 	// clus_sources below. It is also this function's cancellation gate — Ensure
@@ -1247,7 +1310,7 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	// cancellation cause and runAdaptJob can record terminal progress, rather
 	// than reaching NewBatchIngester and reading a store it never declared.
 	if err := s.EnsureOnce(ctx); err != nil {
-		return 0, err
+		return counts, err
 	}
 	if jobKey == "" {
 		jobKey = "adapt"
@@ -1255,97 +1318,87 @@ func (s *Store) IngestAdapted(ctx context.Context, files []string, f adapt.Field
 	fp := listFingerprint(files)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
 	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(files))
-	skip := map[string]int{}
 	skipErr := map[string]string{}
-	doneFiles := 0 // files fully processed (the unit Total counts)
-	records := 0   // documents stored (reported separately)
-	// skipTotal is the Skipped headline: the SUM over reasons. It used to read
-	// skip["file"] — a key nobody writes on this path (reasons here are
-	// "unreadable"/"adapt_failed"), so the job reported Skipped=0 forever while
-	// SkipReasons held the real counts.
-	skipTotal := func() int {
-		t := 0
-		for _, v := range skip {
-			t += v
-		}
-		return t
-	}
 	// One revision index for the whole job. The alternative — rebuilding it per
 	// batch — still rescanned the collection every 512 records and kept a
 	// quadratic term (107k records did not finish inside 10 minutes).
 	bi, berr := s.NewBatchIngester(ctx)
 	if berr != nil {
-		return 0, berr
+		return counts, berr
 	}
 	progress := func(phase string) {
 		_ = s.PutJobDoc(ctx, jobKey, JobDoc{
 			State: "running", Phase: phase, Total: len(files),
 			// Done is FILES, matching Total — it used to be record counts
 			// against a file total, so a 16k-record run reported
-			// done=16384 total=3 and never looked finished.
-			Done: start + doneFiles, Skipped: skipTotal(),
-			SkipReasons: skip, SkipErrors: skipErr,
-			// Records counts DOCUMENTS this run stored — start is a FILE index
-			// from the resume cursor; adding it here mixed units and inflated
-			// the count by the resumed offset on every continued job.
-			Records: records,
+			// done=16384 total=3 and never looked finished. Processed is
+			// this run's file count; start is the resumed offset.
+			Done: start + counts.Processed, Skipped: counts.Skips(),
+			SkipReasons: counts.Skipped, SkipErrors: skipErr,
+			// Records counts DOCUMENTS this run accounted for — start is a FILE
+			// index from the resume cursor; adding it here mixed units and
+			// inflated the count by the resumed offset on every continued job.
+			// It is Stored() (written + unchanged) on both file faces, so the
+			// number means the same thing whichever face produced it.
+			Records: counts.Stored(),
 		})
 	}
 	progress("extracting")
 	for i := start; i < len(files); i++ {
 		if err := ctx.Err(); err != nil {
-			return records, err
+			return counts, err
 		}
 		path := files[i]
 		fh, err := os.Open(path)
 		if err != nil {
 			// Unreadable file: skip it and keep going (same rule as the plain
 			// file walk — one bad file must not strand a corpus).
-			skip["unreadable"]++
+			counts.skip("unreadable")
 			// Keyed by the path AS LISTED: base names collide across
 			// directories (a/doc.md vs b/doc.md), and the loser's reason —
 			// the thing the operator is here to read — silently disappears.
 			skipErr[path] = err.Error()
-			doneFiles++
+			counts.Processed++
 			if cerr := s.saveJobCursor(ctx, cursorKey, fp, i+1); cerr != nil {
-				return records, cerr
+				return counts, cerr
 			}
 			progress("extracting")
 			continue
 		}
-		n, aerr := s.adaptOne(ctx, bi, path, f)
+		written, unchanged, aerr := s.adaptOne(ctx, bi, path, f)
 		fh.Close()
 		var sf *storeFailure
 		if aerr != nil && errors.As(aerr, &sf) {
 			// Storage refused the write (or the ctx ended): the file is not
 			// malformed, so it must NOT become an adapt_failed skip — the job
 			// fails here, the cursor stays at this file, a re-run retries it.
-			return records, aerr
+			return counts, aerr
 		}
 		if aerr != nil {
 			// An unrecognized container or a malformed record is a skipped
 			// file with an auditable reason — INCLUDING the reason itself. A
 			// bare count says "one file failed" without saying why, which is
 			// exactly when the operator needs it.
-			skip["adapt_failed"]++
+			counts.skip("adapt_failed")
 			skipErr[path] = aerr.Error()
 		} else {
-			records += n
+			counts.Written += written
+			counts.Unchanged += unchanged
 		}
-		doneFiles++
+		counts.Processed++
 		if cerr := s.saveJobCursor(ctx, cursorKey, fp, i+1); cerr != nil {
-			return records, cerr
+			return counts, cerr
 		}
 		progress("upserting")
 	}
 	if err := s.PutJobDoc(ctx, jobKey, JobDoc{
 		State: "done", Phase: "upserting", Total: len(files),
-		Done: start + doneFiles, Skipped: skipTotal(), SkipReasons: skip,
-		SkipErrors: skipErr, Records: records,
+		Done: start + counts.Processed, Skipped: counts.Skips(), SkipReasons: counts.Skipped,
+		SkipErrors: skipErr, Records: counts.Stored(),
 	}); err != nil {
-		return records, err
+		return counts, err
 	}
-	return records, nil
+	return counts, nil
 }
 
 // storeFailure marks storage-level failures inside the adapt stream: the file
@@ -1358,30 +1411,41 @@ func (e *storeFailure) Error() string { return e.err.Error() }
 func (e *storeFailure) Unwrap() error { return e.err }
 
 // adaptOne streams one open file into the store, returning how many records it
-// stored. Bodyless or unreadable records are skipped; a store-level error fails
-// the file (and therefore the job), matching the plain walk's rule.
-func (s *Store) adaptOne(ctx context.Context, b *BatchIngester, path string, f adapt.Fields) (int, error) {
+// newly wrote and how many were already there under the same digest. A bodyless
+// or unreadable file is skipped by the caller; a store-level error fails the
+// file (and therefore the job), matching the plain walk's rule.
+func (s *Store) adaptOne(ctx context.Context, b *BatchIngester, path string, f adapt.Fields) (written, unchanged int, err error) {
 	// Bounded batches: memory stays flat while the revision index — built ONCE
 	// per job by NewBatchIngester — makes each record O(1).
 	const batchSize = 512
 	var batch []source.Source
-	n := 0
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
-		put, err := b.PutBatch(ctx, batch)
-		n += put
-		if err != nil {
-			return &storeFailure{err}
+		// PutBatch returns how many it actually stored; the remainder of the
+		// batch is digest-unchanged. `len(batch) - put` is exact here because
+		// every reader upstream refuses to emit a bodyless Doc (adapt.docFrom
+		// returns ok=false), so the third PutBatch skip reason cannot occur.
+		// The jsonl face has no such guarantee and subtracts its empties
+		// explicitly — keep the two arithmetic forms apart on purpose.
+		put, perr := b.PutBatch(ctx, batch)
+		written += put
+		unchanged += len(batch) - put
+		if perr != nil {
+			return &storeFailure{perr}
 		}
 		batch = batch[:0]
 		return nil
 	}
 	// StreamFile dispatches parquet to its own reader; everything else is
 	// streamed from the handle we were given.
-	err := adapt.StreamFile(ctx, path, f, func(d adapt.Doc) error {
+	err = adapt.StreamFile(ctx, path, f, func(d adapt.Doc) error {
 		if strings.TrimSpace(d.Body) == "" {
+			// NOT WIRED as a count: no shipped reader reaches this line, so a
+			// counter here could never be made red and would only look like
+			// coverage. Records the adapt package drops for having no body are
+			// counted nowhere — see open-decisions §三.4.
 			return nil
 		}
 		if len(d.Body) > maxAdaptBodyBytes {
@@ -1403,7 +1467,7 @@ func (s *Store) adaptOne(ctx context.Context, b *BatchIngester, path string, f a
 	if ferr := flush(); err == nil {
 		err = ferr
 	}
-	return n, err
+	return written, unchanged, err
 }
 
 // maxAdaptBodyBytes keeps one adapted record inside a sane L0 document. A
@@ -1423,9 +1487,13 @@ func detectLang(s string) string {
 	return "zh"
 }
 
-func (s *Store) IngestCandidates(ctx context.Context, paths []string, jobKey string) (int, error) {
+// IngestCandidates ingests an explicit file list (a trimmed scan report or a
+// hand-written one) through the SAME state machine as IngestFiles: resumable
+// cursor, phase reporting, digest-idempotent upserts. P9's discovery step
+// hands its survivors here — the walk is replaced, the pipeline is not.
+func (s *Store) IngestCandidates(ctx context.Context, paths []string, jobKey string) (FileCounts, error) {
 	if len(paths) == 0 {
-		return 0, fmt.Errorf("ingest: candidate list is empty")
+		return FileCounts{}, fmt.Errorf("ingest: candidate list is empty")
 	}
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
@@ -1498,16 +1566,17 @@ func relKey(dir, p string) string {
 // unextractable file must not strand the rest of the directory, and a resumed
 // run must not re-fail on it forever (P9: skipped 账可查). Only a store-level
 // failure (the engine refusing the upsert) fails the job.
-// ingestFileList and IngestAdapted below are near-duplicates of the same state
+// ingestFileList and IngestAdapted above are near-duplicates of the same state
 // machine: cursor resume, skip ledger, phase reporting, batch upsert. They
 // MUST be changed together. They drifted once already — a lazy-declaration fix
 // was applied to the wrong one of the pair and left
 // TestAdaptCancelledJobPreservesTerminalProgress nil-dereferencing until the
 // mismatch was found. Collapsing them is a real refactor with a real diff;
 // until then this line is the warning.
-func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string, uploaded bool) (ingested int, runErr error) {
+func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, jobKey string, uploaded bool) (counts FileCounts, runErr error) {
+	counts.Files = len(files)
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return counts, err
 	}
 	// Declare this namespace's collections before ANY read of them. The engine
 	// fail-closes on undeclared collections, and the job cursor is read from
@@ -1518,7 +1587,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 	// with a raw `collection "clus_sources": not found`. Memoized like the
 	// synchronous path, so a multi-file job still declares exactly once.
 	if err := s.EnsureOnce(ctx); err != nil {
-		return 0, err
+		return counts, err
 	}
 	if jobKey == "" {
 		jobKey = "files"
@@ -1526,9 +1595,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 	fp := listFingerprint(files)
 	cursorKey := s.jobs + jobKey + jobCursorSuffix
 	start := loadJobCursor(ctx, s.c, cursorKey, fp, len(files))
-	skip := map[string]int{}
 	skipErr := map[string]string{}
-	skipped := 0
 	phase := "extracting"
 	fileLabel := func(p string) string {
 		if uploaded {
@@ -1537,16 +1604,16 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		return p
 	}
 	bump := func(p, reason, detail string) {
-		skip[reason]++
+		counts.skip(reason)
 		skipErr[fileLabel(p)] = detail
-		skipped++
+		counts.Processed++
 	}
 	// A resumed file offset must not inflate this run's document count.
 	snapshot := func(state string) JobDoc {
 		return JobDoc{
 			State: state, Phase: phase, Total: len(files),
-			Done: start + ingested + skipped, Skipped: skipped, SkipReasons: skip,
-			SkipErrors: skipErr, Records: ingested,
+			Done: start + counts.Processed, Skipped: counts.Skips(), SkipReasons: counts.Skipped,
+			SkipErrors: skipErr, Records: counts.Stored(),
 		}
 	}
 	// Persist the actual counters even when the ingestion context has expired.
@@ -1569,7 +1636,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 	progress("extracting")
 	for i := start; i < len(files); i++ {
 		if err := ctx.Err(); err != nil {
-			return ingested, err
+			return counts, err
 		}
 		p := files[i]
 		progress("extracting")
@@ -1577,7 +1644,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		if err != nil {
 			bump(p, "unreadable", err.Error())
 			if cerr := advance(i); cerr != nil {
-				return ingested, cerr
+				return counts, cerr
 			}
 			progress("extracting")
 			continue
@@ -1598,7 +1665,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		if cerr != nil {
 			bump(p, "undecodable", cerr.Error())
 			if aerr := advance(i); aerr != nil {
-				return ingested, aerr
+				return counts, aerr
 			}
 			progress("extracting")
 			continue
@@ -1616,7 +1683,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			if derr != nil {
 				bump(p, "extract_failed", derr.Error())
 				if cerr := advance(i); cerr != nil {
-					return ingested, cerr
+					return counts, cerr
 				}
 				progress("extracting")
 				continue
@@ -1630,7 +1697,7 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		if text == "" {
 			bump(p, "empty", "no text after extraction and normalization")
 			if cerr := advance(i); cerr != nil {
-				return ingested, cerr
+				return counts, cerr
 			}
 			progress("normalizing")
 			continue
@@ -1659,23 +1726,49 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 		// Long-document splitting is opt-in (CLUS_INGEST_BLOCKS) and routes
 		// through PutBlock, which falls through to the plain put when the
 		// switch is off — so the default path is the same call as before.
+		//
+		// The counting unit stays FILES, so a split document counts once. put
+		// has always answered whether it stored anything — Result.Status is
+		// "unchanged" on a digest match — and this call site used to throw the
+		// answer away with `_`. That is why a re-run under a fresh job key
+		// reported a full count over zero new writes.
+		newDoc := true
 		if blkCfg := EnvBlockConfig(); blkCfg.enabled() {
-			if _, err := s.PutBlock(ctx, src, blkCfg); err != nil {
-				return ingested, fmt.Errorf("file %s: %w", fileLabel(p), err)
+			br, err := s.PutBlock(ctx, src, blkCfg)
+			if err != nil {
+				return counts, fmt.Errorf("file %s: %w", fileLabel(p), err)
 			}
-		} else if _, err := s.put(ctx, src, 0); err != nil {
-			return ingested, fmt.Errorf("file %s: %w", fileLabel(p), err)
+			// Status mirrors the single-document result only on the UNSPLIT
+			// path and is empty once the body became blocks, where the per-block
+			// counts are the only signal. Reading br.Written alone would be
+			// wrong on the whole path: BlockResult derives it from
+			// `Status == "created"`, so an edited file ("updated") looks
+			// unwritten. TestIngestFilesCountsAnEditedFileAsWritten pins this.
+			if br.Status != "" {
+				newDoc = br.Status != "unchanged"
+			} else {
+				newDoc = br.Written > 0
+			}
+		} else if res, err := s.put(ctx, src, 0); err != nil {
+			return counts, fmt.Errorf("file %s: %w", fileLabel(p), err)
+		} else {
+			newDoc = res.Status != "unchanged"
 		}
-		ingested++
+		if newDoc {
+			counts.Written++
+		} else {
+			counts.Unchanged++
+		}
+		counts.Processed++
 		if err := advance(i); err != nil {
-			return ingested, err
+			return counts, err
 		}
 	}
 	phase = "upserting"
 	if err := s.PutJobDoc(ctx, jobKey, snapshot("done")); err != nil {
-		return ingested, err
+		return counts, err
 	}
-	return ingested, nil
+	return counts, nil
 }
 
 // MapSpec is the declarative Path B mapping (ingest-jsonl --map): body/title/

@@ -126,8 +126,8 @@ func TestJobPathStillDeclaresForItself(t *testing.T) {
 	if err != nil {
 		t.Fatalf("job path on an undeclared store must succeed, got: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("ingested=%d, want 1", n)
+	if n.Stored() != 1 {
+		t.Fatalf("ingested=%d, want 1 (%+v)", n.Stored(), n)
 	}
 	if cp.declared() == 0 {
 		t.Fatal("job path did not declare the suite collections")

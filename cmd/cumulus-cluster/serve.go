@@ -332,8 +332,12 @@ func registerIngestFace(mux *http.ServeMux, ensure *nsEnsurer, buckets *bucket.S
 				return
 			}
 			files := in.Candidates
+			// The queue only needs the error; every counter the HTTP caller can
+			// read is in the JobDoc the pipeline writes as it goes. Stored() is
+			// the int this closure used to return.
 			run := func(ctx context.Context) (int, error) {
-				return rst.IngestCandidates(ctx, files, in.Job)
+				c, err := rst.IngestCandidates(ctx, files, in.Job)
+				return c.Stored(), err
 			}
 			if len(files) == 0 {
 				if in.Dir == "" {
@@ -350,7 +354,8 @@ func registerIngestFace(mux *http.ServeMux, ensure *nsEnsurer, buckets *bucket.S
 					return
 				}
 				run = func(ctx context.Context) (int, error) {
-					return rst.IngestFileList(ctx, in.Dir, files, in.Job)
+					c, err := rst.IngestFileList(ctx, in.Dir, files, in.Job)
+					return c.Stored(), err
 				}
 			}
 			if err := queueFileJob(r.Context(), rst, in.Job, len(files), run, nil); err != nil {

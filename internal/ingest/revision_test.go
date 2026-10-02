@@ -194,15 +194,15 @@ func TestIngestFilesResumeSurvivesJobDoc(t *testing.T) {
 		}
 	}
 	first, err := st.IngestFiles(ctx, dir, false, "fg")
-	if err != nil || first != 2 {
-		t.Fatalf("first run processed %d, err = %v; want 2", first, err)
+	if err != nil || first.Stored() != 2 {
+		t.Fatalf("first run processed %+v, err = %v; want 2", first, err)
 	}
 	second, err := st.IngestFiles(ctx, dir, false, "fg")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second != 0 {
-		t.Fatalf("second run processed %d files, want 0 — the job state write clobbered the cursor", second)
+	if second.Stored() != 0 {
+		t.Fatalf("second run processed %+v, want 0 — the job state write clobbered the cursor", second)
 	}
 	d, err := st.GetJobDoc(ctx, "fg")
 	if err != nil {

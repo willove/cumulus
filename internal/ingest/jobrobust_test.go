@@ -44,8 +44,8 @@ func TestIngestFileListSkipsBadFilesAndAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a bad file must not fail the job: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("ingested=%d, want 2 (the two readable md files)", n)
+	if n.Stored() != 2 {
+		t.Fatalf("ingested=%d, want 2 (the two readable md files)", n.Stored())
 	}
 	doc, err := st.GetJobDoc(context.Background(), "j1")
 	if err != nil {
@@ -71,8 +71,8 @@ func TestIngestFileListSkipsBadFilesAndAdvances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	if n2 != 0 {
-		t.Fatalf("resume ingested=%d, want 0", n2)
+	if n2.Stored() != 0 {
+		t.Fatalf("resume ingested=%d, want 0", n2.Stored())
 	}
 	doc, err = st.GetJobDoc(context.Background(), "j1")
 	if err != nil || doc.Records != 0 || doc.Done != 4 {
@@ -123,8 +123,8 @@ func TestPlainTerminalFailureRetainsCurrentCounters(t *testing.T) {
 		}
 	}
 	n, err := st.IngestFiles(ctx, dir, false, "failure")
-	if n != 1 || !errors.Is(err, context.Canceled) {
-		t.Fatalf("ingest: %d %v", n, err)
+	if n.Stored() != 1 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ingest: %+v %v", n, err)
 	}
 	doc, err := st.GetJobDoc(context.Background(), "failure")
 	if err != nil || doc.State != "failed" || doc.Total != 3 || doc.Done != 2 || doc.Records != 1 || doc.Skipped != 1 || doc.Error != context.Canceled.Error() {
@@ -156,8 +156,8 @@ func TestJobPathStoresOverSyncCapBodies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("job path must accept an over-cap body: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("ingested=%d, want 1", n)
+	if n.Stored() != 1 {
+		t.Fatalf("ingested=%d, want 1 (a split document still counts as one FILE)", n.Stored())
 	}
 }
 
@@ -184,8 +184,8 @@ func TestCandidatesKeepDistinctIdentitiesAcrossDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("ingested=%d, want 2 — same-named candidates must not collapse", n)
+	if n.Stored() != 2 {
+		t.Fatalf("ingested=%d, want 2 — same-named candidates must not collapse", n.Stored())
 	}
 	live, err := st.ActiveSources(context.Background())
 	if err != nil {

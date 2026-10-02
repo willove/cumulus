@@ -108,8 +108,8 @@ func TestIngestCandidatesThroughJobMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ingest candidates: %v", err)
 	}
-	if n != 2 {
-		t.Fatalf("processed = %d, want 2", n)
+	if n.Stored() != 2 {
+		t.Fatalf("processed = %+v, want 2 stored", n)
 	}
 	d, err := st.GetJobDoc(ctx, "cand1")
 	if err != nil {
@@ -121,11 +121,11 @@ func TestIngestCandidatesThroughJobMachine(t *testing.T) {
 	// A fresh job key over the same files: the digest-addressed upserts are
 	// idempotent, so no duplicate sources appear. Re-running the SAME job key
 	// is a resume (cursor past the end) — zero processed, not a re-ingest.
-	if n, err := st.IngestCandidates(ctx, []string{a, b}, "cand2"); err != nil || n != 2 {
-		t.Fatalf("rerun under a new job key: n=%d err=%v", n, err)
+	if c, err := st.IngestCandidates(ctx, []string{a, b}, "cand2"); err != nil || c.Stored() != 2 {
+		t.Fatalf("rerun under a new job key: %+v err=%v", c, err)
 	}
-	if n, err := st.IngestCandidates(ctx, []string{a, b}, "cand1"); err != nil || n != 0 {
-		t.Fatalf("same-key rerun must resume to zero: n=%d err=%v", n, err)
+	if c, err := st.IngestCandidates(ctx, []string{a, b}, "cand1"); err != nil || c.Stored() != 0 {
+		t.Fatalf("same-key rerun must resume to zero: %+v err=%v", c, err)
 	}
 	list, err := st.ActiveSources(ctx)
 	if err != nil {

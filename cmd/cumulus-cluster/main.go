@@ -42,9 +42,12 @@ Usage:
   cumulus-cluster put    -title T [-type md] [-uri U] [-key K] [-lang zh] -body-file F
   cumulus-cluster put    -title T -body "text"
   cumulus-cluster ingest-jsonl -file data.jsonl [-job NAME] [-map map.json] [-allow-empty]
-  cumulus-cluster ingest-adapt -dir DIR [-recursive] [-job NAME] [-id F] [-title F] [-body F] [-extra a,b]
+  cumulus-cluster ingest-adapt -dir DIR [-recursive] [-job NAME] [-allow-empty] [-id F] [-title F] [-body F] [-extra a,b]
                                                # 异构语料适配：json/jsonl/csv/txt 自动判别+字段映射
-  cumulus-cluster ingest-files -dir D [-recursive] [-job NAME] [-candidates scan.json]  # P9：-candidates 只吃扫描清单
+  cumulus-cluster ingest-files -dir D [-recursive] [-job NAME] [-allow-empty] [-candidates scan.json]  # P9：-candidates 只吃扫描清单
+                                               # 两个文件面报 files/examined/written/unchanged/skipped（按原因）：
+                                               # 看了文件却零入库即 exit 1，-allow-empty 显式豁免。
+                                               # written/unchanged 在 adapt 面数记录、在 files 面数文件
   cumulus-cluster scan -dir D [-recursive] [-limit N] [-newer-than 168h] [-q "主题"] [-out scan.json]
                                             # 摄取候选发现（P9）：规则清单 + LLM 主题排名（opt-in），不开库
   cumulus-cluster search -q "query" [-session ID] [-raw] [-hopts 168h]
@@ -325,8 +328,9 @@ func main() {
 		fTitle := fs.String("title", "", "record field holding the title (default autodetect)")
 		fBody := fs.String("body", "", "record field holding the text (default autodetect)")
 		fExtra := fs.String("extra", "", "comma-separated record fields copied into meta")
+		allowEmpty := fs.Bool("allow-empty", false, "accept a run that examined files but stored none, instead of exiting 1")
 		// Flags may follow the file list; reorder so the flag package sees them.
-		_ = fs.Parse(flagsFirst(rest, "recursive"))
+		_ = fs.Parse(flagsFirst(rest, "recursive", "allow-empty"))
 		var files []string
 		if *dir != "" {
 			var werr error
@@ -358,38 +362,41 @@ func main() {
 				extra = append(extra, e)
 			}
 		}
-		n, err := st.IngestAdapted(ctx, files, adapt.Fields{
+		counts, err := st.IngestAdapted(ctx, files, adapt.Fields{
 			ID: *fID, Title: *fTitle, Body: *fBody, Extra: extra,
 		}, *job)
 		if err != nil {
 			fatal(err)
 		}
-		printJSON(map[string]any{"ingested": n, "files": len(files)})
+		printJSON(fileCountsJSON(counts))
+		reportEmptyRun(counts, *allowEmpty, "ingest-adapt", *job)
 	case "ingest-files":
 		fs := flag.NewFlagSet("ingest-files", flag.ExitOnError)
 		dir := fs.String("dir", "", "directory of .md/.txt files")
 		recursive := fs.Bool("recursive", false, "walk subdirectories")
 		job := fs.String("job", "files", "job key (resumable cursor)")
 		candidates := fs.String("candidates", "", "ingest only the files in this scan report (JSON; P9)")
+		allowEmpty := fs.Bool("allow-empty", false, "accept a run that examined files but stored none, instead of exiting 1")
 		_ = fs.Parse(rest)
-		var n int
+		var counts ingest.FileCounts
 		var err error
 		if *candidates != "" {
 			cf, lerr := ingest.LoadCandidateFile(*candidates)
 			if lerr != nil {
 				fatal(lerr)
 			}
-			n, err = st.IngestCandidates(ctx, cf.Paths(), *job)
+			counts, err = st.IngestCandidates(ctx, cf.Paths(), *job)
 		} else {
 			if *dir == "" {
 				fatal(fmt.Errorf("ingest-files: -dir (or -candidates) required"))
 			}
-			n, err = st.IngestFiles(ctx, *dir, *recursive, *job)
+			counts, err = st.IngestFiles(ctx, *dir, *recursive, *job)
 		}
 		if err != nil {
 			fatal(err)
 		}
-		printJSON(map[string]any{"processed": n})
+		printJSON(fileCountsJSON(counts))
+		reportEmptyRun(counts, *allowEmpty, "ingest-files", *job)
 	case "scan":
 		// P9 candidate discovery: rules over a directory, optional LLM topic
 		// rank. Touches no store — a pure pre-ingest step (like env).
@@ -1194,6 +1201,64 @@ func printJSON(v any) {
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "cumulus-cluster:", err)
+	os.Exit(1)
+}
+
+// fileCountsJSON is the one shape both file faces print. Keeping it in a single
+// place is the same discipline the pipeline itself is under: ingestFileList and
+// IngestAdapted are near-duplicates that must be changed together, and the two
+// CLI faces reporting them had already drifted — one printed "processed", the
+// other "ingested", and neither carried the skip ledger.
+func fileCountsJSON(c ingest.FileCounts) map[string]any {
+	// An empty ledger marshals as {}, not null: a consumer that indexes
+	// skipped["undecodable"] must not have to nil-check first.
+	skips := c.Skipped
+	if skips == nil {
+		skips = map[string]int{}
+	}
+	return map[string]any{
+		"files":     c.Files,
+		"examined":  c.Processed,
+		"written":   c.Written,
+		"unchanged": c.Unchanged,
+		"skipped":   skips,
+	}
+}
+
+// reportEmptyRun is the exit-code rule for the two file faces. A run that
+// examined files and stored NONE of them is the case that must not look like
+// success — before this it printed a zero and exited 0, indistinguishable from
+// a directory that legitimately had nothing in it.
+//
+// Partial skips deliberately do NOT fail the run: an undecodable tail is a
+// property of a real corpus (7.6% of the 1,251-file charset census), so failing
+// on any skip would turn the normal ingest of that corpus into an error. What
+// changed for the partial case is that the ledger is now on stdout, so
+// "95 of 1,251 dropped, and why" is readable without querying the job.
+func reportEmptyRun(c ingest.FileCounts, allowEmpty bool, face, jobKey string) {
+	if !c.Empty() || allowEmpty {
+		return
+	}
+	reasons := make([]string, 0, len(c.Skipped))
+	for r := range c.Skipped {
+		reasons = append(reasons, r)
+	}
+	sort.Strings(reasons)
+	var b strings.Builder
+	for i, r := range reasons {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s=%d", r, c.Skipped[r])
+	}
+	why := b.String()
+	if why == "" {
+		why = "no file was skipped: they were read and produced no document"
+	}
+	fmt.Fprintf(os.Stderr, "cumulus-cluster: %s examined %d file(s) and stored NONE of them (%s).\n"+
+		"Exiting 1 so a mispointed -dir or an unsupported corpus cannot pass as a successful ingest.\n"+
+		"Per-file reasons: cumulus-cluster job -job %s\n"+
+		"Pass -allow-empty to accept this outcome.\n", face, c.Processed, why, jobKey)
 	os.Exit(1)
 }
 

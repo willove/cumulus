@@ -22,8 +22,8 @@ func TestFileCursorDoesNotLeapAcrossDirectories(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n, err := st.IngestFiles(context.Background(), dir1, false, "files"); err != nil || n != 3 {
-		t.Fatalf("dir1: n=%d err=%v, want 3", n, err)
+	if c, err := st.IngestFiles(context.Background(), dir1, false, "files"); err != nil || c.Stored() != 3 {
+		t.Fatalf("dir1: n=%d err=%v, want 3", c.Stored(), err)
 	}
 	dir2 := t.TempDir()
 	for _, name := range []string{"x.md", "y.md"} {
@@ -35,8 +35,8 @@ func TestFileCursorDoesNotLeapAcrossDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("dir2 under the same job key: ingested=%d, want 2 — the cursor leapt across directories", n)
+	if n.Stored() != 2 {
+		t.Fatalf("dir2 under the same job key: ingested=%d, want 2 — the cursor leapt across directories", n.Stored())
 	}
 	// The job doc must tell the same story: dir2 fully done, nothing phantom.
 	doc, err := st.GetJobDoc(context.Background(), "files")
@@ -79,8 +79,8 @@ func TestFileCursorResumeAndLegacyRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("resumed run ingested=%d, want 2 (only the files after the cursor)", n)
+	if n.Stored() != 2 {
+		t.Fatalf("resumed run ingested=%d, want 2 (only the files after the cursor)", n.Stored())
 	}
 	// The legacy bare-integer cursor must restart, not skip.
 	if err := st.c.KVPut(context.Background(), cursorKey, []byte("2"), 0); err != nil {
@@ -90,7 +90,12 @@ func TestFileCursorResumeAndLegacyRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 3 {
-		t.Fatalf("legacy cursor run ingested=%d, want 3 (restart from zero)", n)
+	// All three are already in the store, so this run is 0 written / 3
+	// unchanged: Stored() is the count, and a Written-only reading would be 0.
+	if n.Stored() != 3 {
+		t.Fatalf("legacy cursor run ingested=%d, want 3 (restart from zero)", n.Stored())
+	}
+	if n.Written != 0 || n.Unchanged != 3 {
+		t.Fatalf("legacy cursor restart = %+v, want written 0 unchanged 3", n)
 	}
 }
