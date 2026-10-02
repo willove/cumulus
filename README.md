@@ -6,16 +6,18 @@
 ## 定位
 
 对持续增长的本地语料做自然语言检索：**原文是契约（L0）、索引是缓存（L1）、知识图是加速（L2）**。
-本套件贡献摄取形状、蒙特卡洛证据采样、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝；存储是 cumulite 的文档/KV/向量三面（全文排序与图遍历在进程内完成），模型流量走 OpenAI 兼容直连端点（`LLM_*` 配置）。
+本套件贡献摄取形状、**BM25 倒排检索与词汇鸿沟改写**（`internal/index`）、FAST/DEEP 分层、知识簇生命周期与图/时序剪枝。蒙特卡洛证据窗口采样也在设计里，但**它在生产语料上基本不触发**——正文 < `SmallFileRunes = 100_000` runes 即整体读入，而中文法条语料 p50 ≈ 3.5K 字符（`internal/mcs/mcs.go:147-161` 注释自陈；详见 `docs/baseline-2026-10-02.md` §三）。全文排序由本套件自建的倒排索引在进程内承担（**不是** cumulite 的全文能力），图遍历同样在进程内；模型流量走 OpenAI 兼容直连端点（`LLM_*` 配置）。
 
-当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（门 A–BB，门限 118、现 171 断言）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
+当前进度：**P0–P5 + LENS B1–B10 + 六模协同 + 产品闭环 + 簇整理 + UI v1 簇浏览 + UI v2 目录摄取 + UI v3（evoke-business-ui 壳重构：证据卡/簇证据星图/监控 hero/深色令牌化，见 docs/ui-v3-design.md）+ P8 MCP 工具面 + P9 摄取候选发现 + P4 富边认知层（pathway/barrier）+ B3 评测记分牌 + 评测工作台 v2（题集向导/进度/逐题冻结证据/对比/导出 + 后台隔离执行与持久化，见「评测工作台（eval-v2）」）全部落地**（27 个门标 B–AC，其中无门 A、无门 E；**175** 断言，退出判据零容错 `[ "$FAIL" -eq 0 ]`——不存在「下限」这种部分通过）：P1 搜索 HTTP/SSE 面 → P2 KV 会话 → P3 命名空间作用域 → P6 cluster tidy → UI v1 簇浏览（GET /v1/clusters + 工作台知识簇面板）→ UI v2 摄取面板（POST /v1/ingest/jobs 指定服务器本地目录异步摄取 + 任务状态轮询）→ P8 MCP（POST /mcp 三工具 + stdio 代理）→ P9 候选发现（`scan` 目录扫描 + `ingest-files -candidates` 清单摄取 + 工作台「摄取」面板扫描→勾选→提交，POST /v1/scan）。设计 SSOT 见 design-plan.md。
 
 ## 快速开始
 
 ```bash
 make check                 # fmt + vet + test
 make build                 # bin/cumulus-cluster
-make e2e                   # 门 A–BB（真 cumulite 嵌入库，门限 118、现 171 断言）
+make e2e                   # 27 个门标（B–AC，无 A 无 E）· 真 cumulite 嵌入库 · 175 断言零容错
+                           # 注意：它 source scripts/offline-gate.sh —— LLM 打分与语义嵌入都被换成
+                           # 离线 stub / hash-64，所以全绿**不构成任何语义质量保证**
 make browser-check         # 浏览器联调门（可选：自起离线 serve，打生产内嵌 /ui/）
 bash scenarios/run.sh      # 案例语料（manual-qa / project-kb，离线门，隔离见 scripts/offline-gate.sh）
 bash scripts/realdata-probe.sh  # 真实语料对抗基线（~/datasets/cn-law-rag，缺则跳过）
@@ -52,6 +54,27 @@ $CLUS conflicts list                  # 冲突边（clus_conflicts）
 $CLUS cites  list                     # 簇→源证据边（clus_cites）
 $CLUS session new | list | show <id> | rm <id>   # 会话（P2 KV）
 $CLUS eval-run -file items.jsonl -out results.jsonl [-judge] [-l1pre]  # LENS 式评测（R-E1，可续跑）
+                                  # ⚠ search 面没有 -l1pre：传入即被拒绝（它曾经被接受却什么都不做）
+
+# 以下 9 个子命令此前既不在本文、其中 6 个也不在 `cumulus-cluster -h` 的 usage 里
+$CLUS ingest-adapt -dir DIR [-recursive] [-id F] [-title F] [-body F] [-extra a,b]
+                                  # 异构语料适配：json/jsonl/csv/txt 自动判别 + 字段映射
+$CLUS env                         # 生效的端点配置（脱敏）；只解析不打开库
+$CLUS bucket list | new <name> [label] [note] | rm <name> | show <name>
+                                  # 桶/命名空间登记——多租户与 -ns 的入口
+$CLUS calib -rows R.jsonl [-usage] [-auto] [-apply] | -guardrail baseline|check -rows R.jsonl
+                                  # 阈值自调参：挖档→提线→配对自检→受控应用；不加 -apply 只记录
+                                  # -guardrail 是金题护栏基线（见「质量门」）
+$CLUS learn [-dry] [-budget N]    # 自进化单周期：零 LLM 挖异常 → 一次假设调用（白名单恰三枚旋钮）
+                                  # → 委托 calib -auto 自跑对 → 应用后由护栏校验、掉线即回滚
+                                  # → clus_learning 全程落盘；默认 40 万 token 硬顶；无护栏基线拒跑
+$CLUS learning                    # 学习状态计数（「现在是干净的吗」「这轮学到了什么」）
+$CLUS reset learned [-ns NS] [-yes] [-dry-run]
+                                  # 清空某命名空间学过的东西（簇/证据/账本/边/会话），语料不动
+                                  # ——复验前的必要动作：旧簇会掩蔽新代码路径
+$CLUS vocab -build [-top N]       # 语料自描述词表（纯统计挖词 + 本地嵌入，零 LLM）
+                                  # ⚠ 只建表：查询期的桥接钩子已于 3e29a09 撤除，当前不进检索路径
+$CLUS affinity                    # 诊断：查账本里某词元的文档权重（衰减后按分排序）
 $CLUS serve -listen 127.0.0.1:8484    # HTTP 面：摄取 + POST /v1/search(JSON) + /v1/search/stream(SSE)
                                   #   + 会话 REST + 内嵌工作台 /ui/（会话/知识簇/目录摄取/评测四面板）
                                   #   + POST /mcp（MCP：search/list_clusters/get_cluster）
@@ -115,7 +138,7 @@ GET  /v1/eval/compare?ns=LIB&left=A&right=B        # 不可比时只给理由，
 ./bin/cumulus-cluster -data ~/stores/law ensure                     # 换目录（-data 覆盖默认）
 ```
 
-- **一条 Port 契约**：存储面收敛为 16 方法接口 `cumulite.Port`，本仓只经它消费——不为引擎改一行存储代码；
+- **一条 Port 契约**：存储面收敛为 17 方法接口 `cumulite.Port`（16 + `Subscribe`），本仓只经它消费——不为引擎改一行存储代码；
 - **cumulite 是独立仓库**（`../db-works/cumulite`，契约类型在其 `contract/` 包维护）；
 - **单进程独占**：Badger 对目录取排他锁，同一 store 同时只能有一个进程打开——`serve` 与 CLI **不能**指向同一目录并跑，写入侧要走 serve 的 `/v1/ingest/*`；
 - **边界**：KNN 为精确扫描（无 ANN），无 CAS/自增，collection 是声明标记而非 schema；运维注意（fsync、压缩、命名空间合成）见 cumulite README；
@@ -124,13 +147,28 @@ GET  /v1/eval/compare?ns=LIB&left=A&right=B        # 不可比时只给理由，
 ## 架构
 
 ```
-put / ingest-jsonl ─► internal/ingest ─► clus_sources（内容寻址 src:<digest16>）
-                           │                 clus_evidence（窗口+失效）
-                           ▼
-search ─► internal/kb（复用-or-检索 · 簇演化 · query_seq 边）
+put / ingest-jsonl / ingest-adapt / ingest-files / HTTP ingest ─► internal/ingest
+        │   批量写面共享 NewBatchIngester（集合在那里懒声明）
+        │   存储身份是 source.RevisionID = src:<业务身份>#<版本号>
+        │   ——业务身份取 key→title→摘要，正文改动产生新版本，
+        │     不再是内容摘要本身（A→B→A 与「删除后重导判 unchanged」都源于旧绑法）
+        ▼
+search ─► internal/deep  AskLazy 编排，真实顺序是：
+        ①effectiveQuery（会话/历史改写）
+        ②decompose + thresholdFor
+        ③internal/kb TryReuseNarrow（L2 簇复用尝试，命中可不碰语料）
+        ④loadCandidates ─► **internal/index**：ActiveSources 全量读 → BM25 倒排
+        │   Build/Score → RewriteWhenEmpty（词汇鸿沟一次 LLM 改写）→ 条件 Rerank
+        │   （倒排索引每请求重建，非进程级缓存；Rerank 只认语义座位）
+        ⑤askEffective：fast.MatchFilename → FAST → mcs → 置信不足升 DEEP
+           （defer-synth 默认开：低置信直接升级、不先合成）
               ├─ L2 graph.Expand（weak_edges 1..2 跳 + hopKNN）
-              └─ internal/fast ─► internal/mcs（分层/锚点/高斯采样）
-                     └─ internal/facts（多跳覆盖 B1/B2）· internal/eval（证据质量 B3）
+              ├─ internal/mcs（证据窗口；**生产语料走整文件捷径**，见上）
+              ├─ internal/facts（多跳覆盖 B1/B2）· internal/eval（记分牌 B3）
+              └─ internal/calib + internal/learn（自动调参；由金题护栏否决回滚）
+
+        internal/vocab 在树但**未接线**（钩子已于 3e29a09 撤除）；
+        internal/index 的 v3 扩展链（NarrowWithExpansion 等）同样**未接线**。
 ```
 
 - **摄取单元 = 源文档**（`body` + `structure` 定位映射），**不是 chunk**；
