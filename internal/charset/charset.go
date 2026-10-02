@@ -3,10 +3,26 @@
 //
 // WHY THIS EXISTS (measured on a 1,251-file Chinese web-novel corpus):
 //
-//	pure GB18030   1,150 files  91.9%   → transcode once, at ingest
-//	pure UTF-8        68 files   5.4%   → keep as-is
-//	undecodable       33 files   2.6%   → REFUSE (previously stored as mojibake)
-//	silent mis-decode  5 files   0.4%   → detectable in principle, NOT handled here
+//	GB18030          1,088 files  87.0%   → transcode once, at ingest
+//	pure UTF-8          68 files   5.4%   → keep as-is
+//	undecodable         95 files   7.6%   → REFUSE (previously stored as mojibake)
+//	silent mis-decode    ~5 files  0.4%   → detectable in principle, NOT handled here
+//
+// RE-COMPUTED 2026-10-03 at HEAD 9a9d0a6 by `TestCorpusTierCensus`
+// (CHARSET_CORPUS=<corpus> go test ./internal/charset/ -run TestCorpusTierCensus),
+// which runs the shipped Decode over the tree rather than restating a table.
+// It reproduced docs/perf-plan.md §5.3's table exactly and contradicted the
+// 1,150/33 split this comment previously carried — that older split is what
+// drifted, not the code. The same section's heading ("98.2% 非 UTF-8") matches
+// neither: 1,088 + 95 = 1,183 of 1,251 = 94.6%.
+//
+// Census caveat, because it is the kind that silently eats 2.5% of a sample:
+// the corpus is 1,220 `.txt` + 31 `.TXT`. A case-sensitive `.txt` filter drops
+// the 31 uppercase ones, and those are the Windows-era downloads — precisely
+// the likely-GB18030 tail.
+//
+// The ~5 silent mis-decodes sit INSIDE the 1,088 accepted tier (they decode
+// cleanly), which is why the three measurable tiers sum to exactly 1,251.
 //
 // Without this, a GBK novel is stored byte-for-byte and read as UTF-8: every
 // CJK character becomes one RuneError, the document's rune count is wrong
