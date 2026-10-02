@@ -261,8 +261,8 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		if stack.chat != nil {
 			atomic.StoreInt64(budgetBase, stack.chat.TotalTokens())
 		}
-		// P0 corrected + conditional expansion (same as serve): BM25 with
-		// fallback LLM expansion when recall < MinRecall, then minilm Rerank.
+		// Same arms as serve's loadCandidates (v4): BM25, then RewriteWhenEmpty
+		// on a vocabulary gap, then Rerank — not the never-wired v3 expander.
 		var rewriter index.Rewriter
 		if stack.chat != nil {
 			rewriter = index.MakeLLMRewriter(func(ctx context.Context, prompt, effort string) (string, error) {
@@ -430,19 +430,18 @@ func embedSeatLabel() string {
 	return "local-hash-64"
 }
 
-// narrowByKNN narrows the active-source list to the body_embed KNN hits for
+// narrowByKNN narrows the active-source list to the body_embed KNN hits for one
+// query. Index is deliberately omitted: with no usable ANN structure the engine
+// falls back to a filtered scan, which is the right operating point for small
+// corpora (索引是缓存：只影响快慢，不影响正确性).
 //
-// NOTE this is NOT the same as (*searchStack).narrowL1Pre, despite the shared
-// l1PreK: the search face names the index and materialises it if missing before
-// retrying, and falls back to the full list on any failure (只慢不错); this one
-// does neither and returns the error. So `eval-run -l1pre` and `search -l1pre`
-// are not interchangeable, and archived eval numbers are NOT what the serve
-// face would produce on the same corpus. Aligning them would change archived
-// run semantics, so it is left as a recorded divergence rather than a drive-by
-// fix.
-// one query. Index is deliberately omitted: with no usable ANN structure the
-// engine falls back to a filtered scan, which is the right operating point
-// for small corpora (索引是缓存：只影响快慢，不影响正确性).
+// NOTE this is the only L1 prefilter left in the tree, despite the shared
+// l1PreK (the search face's is gone — see errSearchL1Pre). It also differs in
+// kind: it returns its error rather than falling back to the full list. So
+// `eval-run -l1pre` and what serve does are NOT interchangeable, and archived
+// eval numbers are NOT what the serve face would produce on the same corpus.
+// Aligning them would change archived run semantics, so it is left as a
+// recorded divergence rather than a drive-by fix.
 func narrowByKNN(ctx context.Context, c cumulite.Port, embedFn ingest.EmbedderFn, sourcesColl string, list []source.Source, query string) ([]source.Source, error) {
 	qv, err := embedFn(ctx, []string{query})
 	if err != nil || len(qv) != 1 {

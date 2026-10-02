@@ -480,12 +480,14 @@ s=json.load(sys.stdin)
 assert "连接池最大 256。" in s["body"], s["body"][:80]
 assert "w:p" not in s["body"], s["body"][:80]
 print("ok")' ; check "docx body is paragraph text (stdlib zip+xml)" $?
-L1="$($A search -q "连接池参数" -l1pre -raw)"
-echo "$L1" | python3 -c '
-import json,sys
-r=json.load(sys.stdin); a=r["answer"]
-assert a.get("samples") or a.get("cluster_id"), r
-print("ok")' ; check "search -l1pre narrows via body_embed and still answers" $?
+# This used to assert "search -l1pre narrows via body_embed and still answers"
+# — a green gate pinning a no-op. narrowL1Pre had a definition and no call site,
+# so the flag narrowed nothing and the answer was the plain un-narrowed one.
+# The search face now refuses the knob; the arm that really narrows is
+# `eval-run -l1pre`, asserted below in the evalrun gate.
+L1RC=0
+$A search -q "连接池参数" -l1pre -raw >/dev/null 2>&1 || L1RC=1
+[ "$L1RC" = "1" ] ; check "search -l1pre is refused instead of silently ignored" $?
 PR="$($A search -q "连接池最大连接数" -prior -raw)"
 echo "$PR" | python3 -c '
 import json,sys

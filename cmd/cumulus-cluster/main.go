@@ -437,7 +437,7 @@ func main() {
 		history := fs.String("history", "", "pipe-separated follow-up history (rewrite query)")
 		sessionID := fs.String("session", "", "chat session id (KV): folds recent turns, appends this turn")
 		priorRank := fs.Bool("prior", false, "rank candidates with the LENS B4 prior")
-		l1pre := fs.Bool("l1pre", false, "narrow candidates via body_embed KNN (L1 cache)")
+		l1pre := fs.Bool("l1pre", false, "UNSUPPORTED on the search face (rejected): the KNN-narrowed arm is `eval-run -l1pre`")
 		_ = fs.Parse(rest)
 		opt := SearchOptions{Prior: *priorRank, L1Pre: *l1pre, HopTS: *hopts, MinHot: *minhot, MinConf: *minconf, Namespace: namespace}
 		if *history != "" {

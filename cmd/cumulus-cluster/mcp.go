@@ -76,7 +76,6 @@ func mcpToolList() []mcpToolDef {
 					"ns":      map[string]any{"type": "string", "description": "命名空间（多租户分域）；缺省用 serve 级 -ns"},
 					"session": map[string]any{"type": "string", "description": "会话 ID（多轮上下文折叠，可选）"},
 					"prior":   map[string]any{"type": "boolean", "description": "五信号先验融合排序（默认关，与 CLI/REST 一致）"},
-					"l1pre":   map[string]any{"type": "boolean", "description": "内容向量 KNN 收窄候选（索引缺席时自动跳过）"},
 				},
 				"required": []string{"query"},
 			},
@@ -210,6 +209,10 @@ func mcpCallTool(ctx context.Context, c cumulite.Port, st *ingest.Store, sources
 		if eerr := ensure.declare(ctx, nsForReq); eerr != nil {
 			return mcpErrJSON(fmt.Sprintf("ensure ns %q: %v", nsForReq, eerr)), true
 		}
+		// l1pre is still read although the tool schema no longer advertises it:
+		// a client that sends it must be refused (newSearchStackWith returns
+		// errSearchL1Pre), not quietly ignored — quietly ignoring it is exactly
+		// the defect this replaces.
 		opt := SearchOptions{
 			Prior:     argBool(args, "prior", false),
 			L1Pre:     argBool(args, "l1pre", false),

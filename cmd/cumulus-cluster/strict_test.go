@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -73,21 +74,71 @@ func TestSearchStackFailureIsTracked(t *testing.T) {
 	mux := http.NewServeMux()
 	registerSearchFace(mux, engine, st, "clus_sources", "", false,
 		newNSEnsurer(engine, st, "", "clus_sources"), buckets, tr)
+	// l1pre is refused at the request boundary (see TestSearchFaceRejectsL1Pre)
+	// and never reaches the stack, so this stays on the plain path and counts
+	// only the embedder-initialization failures.
 	for _, path := range []string{"/v1/search", "/v1/search/stream"} {
-		for _, l1pre := range []bool{false, true} {
-			w, out := serveJSON(t, mux, http.MethodPost, path, map[string]any{
-				"query": "test", "ns": "tenant", "l1pre": l1pre,
-			})
-			if w.Code != http.StatusInternalServerError || !strings.Contains(fmt.Sprint(out["error"]), "weights absent") {
-				t.Fatalf("stack failure: %d %v", w.Code, out)
-			}
+		w, out := serveJSON(t, mux, http.MethodPost, path, map[string]any{
+			"query": "test", "ns": "tenant",
+		})
+		if w.Code != http.StatusInternalServerError || !strings.Contains(fmt.Sprint(out["error"]), "weights absent") {
+			t.Fatalf("stack failure: %d %v", w.Code, out)
 		}
 	}
 	s := tr.Snapshot(0, "")
-	if s.Queries != 4 || s.Retrieval.Errors != 4 || s.Retrieval.ColdCount != 0 || s.Retrieval.Embedder != "" {
+	if s.Queries != 2 || s.Retrieval.Errors != 2 || s.Retrieval.ColdCount != 0 || s.Retrieval.Embedder != "" {
 		t.Fatalf("initialization errors not tracked accurately: %+v", s)
 	}
-	if len(s.Namespaces) != 1 || s.Namespaces[0].Namespace != "tenant" || s.Namespaces[0].Queries != 4 {
+	if len(s.Namespaces) != 1 || s.Namespaces[0].Namespace != "tenant" || s.Namespaces[0].Queries != 2 {
 		t.Fatalf("failure namespace lost: %+v", s.Namespaces)
+	}
+}
+
+// `search -l1pre` / `{"l1pre":true}` used to be accepted and narrow nothing
+// (see errSearchL1Pre); it is refused now, and the message names the arm that
+// does exist. Rejection rather than rename, because the eval faces really do
+// narrow — see the NOTE on narrowByKNN in evalrun.go.
+func TestSearchFaceRejectsL1Pre(t *testing.T) {
+	t.Setenv("CLUS_OFFLINE", "1")
+	t.Setenv("CLUS_EMBED", "")
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	st := ingest.New(engine, "", "", "", "")
+	buckets := bucket.New(engine)
+	ctx := context.Background()
+	if _, err := buckets.Create(ctx, "tenant", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerSearchFace(mux, engine, st, "clus_sources", "", false,
+		newNSEnsurer(engine, st, "", "clus_sources"), buckets, monitor.New())
+
+	for _, path := range []string{"/v1/search", "/v1/search/stream"} {
+		w, out := serveJSON(t, mux, http.MethodPost, path, map[string]any{
+			"query": "test", "ns": "tenant", "l1pre": true,
+		})
+		// 400, not 500: this is a caller mistake, and a 5xx would tell a
+		// retrying client to keep retrying a request that can never succeed.
+		if w.Code != http.StatusBadRequest || !strings.Contains(fmt.Sprint(out["error"]), "eval-run -l1pre") {
+			t.Fatalf("l1pre must be refused as a client error on %s: %d %v", path, w.Code, out)
+		}
+	}
+
+	// The same face must still serve the plain request — same store, same
+	// query, the knob is the only difference. Probed: 200 without it, 400 with.
+	if w, out := serveJSON(t, mux, http.MethodPost, "/v1/search", map[string]any{"query": "test", "ns": "tenant"}); w.Code != http.StatusOK {
+		t.Fatalf("a request without l1pre must still be served: %d %v", w.Code, out)
+	}
+
+	// The choke point catches any caller that builds options directly (CLI and
+	// MCP route through here too).
+	if _, err := newSearchStackWith(ctx, engine, st, "clus_sources", SearchOptions{L1Pre: true}, newProdStack()); !errors.Is(err, errSearchL1Pre) {
+		t.Fatalf("newSearchStackWith must return errSearchL1Pre, got %v", err)
+	}
+	if _, err := newSearchStackWith(ctx, engine, st, "clus_sources", SearchOptions{}, newProdStack()); errors.Is(err, errSearchL1Pre) {
+		t.Fatal("the plain path must not hit the l1pre refusal")
 	}
 }

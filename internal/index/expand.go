@@ -1,10 +1,26 @@
-// Corpus-bounded conditional query expansion (Sirchmunk's Expander, v3+v4):
-// v3: when BM25 recall is insufficient, LLM selects from corpus vocabulary.
-// v4 (RewriteWhenEmpty): when BM25 returns ZERO results, ONE LLM call
-// rewrites the query from colloquial to formal corpus language ("帮信罪"
-// → "帮助信息网络犯罪活动罪"), then BM25 retries. Only fires on complete
-// failure — partial results never trigger it. The answer still comes from
-// the corpus; the LLM only bridges the vocabulary of the QUESTION.
+// Corpus-bounded query vocabulary bridging — this file holds two generations
+// and only one of them runs.
+//
+// v4 (RewriteWhenEmpty) — LIVE, wired in searchapi.go loadCandidates and
+// evalrun.go. On a vocabulary gap, ONE LLM call rewrites the whole question from
+// colloquial to the corpus's own formal language ("帮信罪" →
+// "帮助信息网络犯罪活动罪"), then BM25 retries. The trigger has been
+// `top score < MinRewriteScore OR VocabGapFraction ≥ RewriteGapFraction` since
+// 2124b76 — NOT "BM25 returned zero", and NOT "partial results never trigger
+// it": on the 1,548-document law corpus a pure-noise match scored 14.2 against
+// an absolute line of 1.0, so an absolute threshold could not separate gap from
+// noise there. The answer still comes from the corpus; the LLM only bridges the
+// vocabulary of the QUESTION.
+//
+// v3 (NarrowWithExpansion, MakeLLMExpander, Expander, VocabSize,
+// ParseExpandTerms, MinRecall) — NOT WIRED. Zero production call sites; only
+// expand_test.go reaches it. It added corpus-derived terms when recall fell
+// under MinRecall, where v4 rewrites the question instead. Kept as the
+// comparison arm for the open admission-ranking gap
+// (docs/open-decisions.md §一 — v3-vs-v4 has never been measured), not because
+// anything uses it. Do not describe it as restored or as "Sirchmunk's Expander
+// back in place": two comments in cmd/cumulus-cluster asserted exactly that
+// until 2026-10-02 and were wrong.
 package index
 
 import (
@@ -20,6 +36,7 @@ import (
 )
 
 // MinRecall is the candidate count below which expansion fires.
+// NOT WIRED — v3 only; see the package comment.
 const MinRecall = 3
 
 // VocabSize is how many top corpus terms are offered to the LLM.
@@ -31,6 +48,8 @@ type Expander func(ctx context.Context, query string, vocab []string) ([]string,
 // MakeLLMExpander builds a corpus-bounded Expander: the LLM sees the query
 // plus the corpus's own top terms and SELECTS from that list. It cannot
 // produce terms the corpus doesn't contain — the boundary is structural.
+//
+// NOT WIRED — v3 only; see the package comment.
 func MakeLLMExpander(completeWithEffort func(ctx context.Context, prompt string, effort string) (string, error), effort string) Expander {
 	return func(ctx context.Context, query string, vocab []string) ([]string, error) {
 		tmpl := prompts.MustRender(prompts.SelectTerms, map[string]string{
@@ -104,6 +123,10 @@ func (idx *Index) TopVocab(n int) []string {
 // NarrowWithExpansion: BM25 first → if recall < MinRecall, LLM selects from
 // corpus vocab → BM25 second pass. Selected terms are validated against
 // the index (must exist in Postings) — the corpus-primacy boundary.
+//
+// NOT WIRED — v3, superseded by RewriteWhenEmpty; see the package comment.
+// expand_test.go is the only caller, and it is what holds the corpus-primacy
+// contract that v4's own rewrite_test.go does not restate term-by-term.
 func (idx *Index) NarrowWithExpansion(ctx context.Context, query string, sources []source.Source, k int, expand Expander) []source.Source {
 	if idx == nil {
 		return sources

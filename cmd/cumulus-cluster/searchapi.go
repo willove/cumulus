@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -18,7 +19,6 @@ import (
 	"time"
 
 	"github.com/willove/cumulite"
-	"github.com/willove/cumulite/contract"
 	"github.com/willove/cumulus/internal/abstain"
 	"github.com/willove/cumulus/internal/bucket"
 	"github.com/willove/cumulus/internal/calib"
@@ -69,7 +69,9 @@ func storeForNS(c cumulite.Port, st *ingest.Store, serveNS, reqNS, serveSources 
 
 // SearchOptions carries the CLI flags and HTTP body knobs on one shape.
 type SearchOptions struct {
-	Prior   bool          `json:"prior"`
+	Prior bool `json:"prior"`
+	// L1Pre is carried on the wire only so the search face can REJECT it with
+	// a clear message — see errSearchL1Pre.
 	L1Pre   bool          `json:"l1pre"`
 	History []string      `json:"history"`
 	HopTS   time.Duration `json:"hopts,omitempty"`
@@ -135,17 +137,20 @@ func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sour
 	return newSearchStackWith(ctx, c, st, sourcesColl, opt, newProdStack())
 }
 
+// errSearchL1Pre is what the search face answers when asked for the L1
+// prefilter. There was never one here: narrowL1Pre had a definition and no call
+// site, so l1pre:true was accepted, could trip the embedder gate, and then
+// changed nothing — a request that read as a successful un-narrowed search.
+// The KNN-narrowed arm is a measurement device and lives on the eval faces
+// (eval-run -l1pre, eval-v2 Config.L1Pre), which do their own narrowing; the
+// NOTE in evalrun.go has long said the two are not interchangeable.
+var errSearchL1Pre = errors.New(`search: l1pre is not a search-face knob — run the KNN-narrowed arm with "eval-run -l1pre" or an eval-v2 run carrying "l1pre":true`)
+
 // Explicit collaborator injection lets isolated evaluations force offline
 // execution without mutating process-wide environment or other requests.
 func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions, stack prodStack) (*searchStack, error) {
-	// The corpus-vector seat must be the one the operator asked for. Since
-	// Resolve fails loud, the production stack already carries this as
-	// stack.embErr below; the explicit check stays for injected stacks
-	// (isolated evaluations) that build without an embErr of their own.
 	if opt.L1Pre {
-		if _, _, _, eerr := embedderFor(); eerr != nil {
-			return nil, eerr
-		}
+		return nil, errSearchL1Pre
 	}
 	if stack.embErr != nil {
 		return nil, stack.embErr
@@ -307,10 +312,18 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 	if ss.dE.Verbose != nil {
 		ss.dE.Verbose("query %q: active sources=%d", query, len(list))
 	}
-	// P0 corrected + conditional expansion (Sirchmunk's Expander restored):
-	// BM25 narrows 9,600 → top-50. If recall < MinRecall (vocabulary gap),
-	// ONE NoThink LLM call adds domain terms and BM25 retries — the 87%
-	// with good recall pay zero extra latency. Then minilm reranks.
+	// BM25 narrows the active list to top-50, then two conditional arms. This is
+	// NOT the v3 expander (index.NarrowWithExpansion, "adds domain terms when
+	// recall < MinRecall") — that was built and never wired; see the NOT WIRED
+	// block in internal/index/expand.go.
+	//   · RewriteWhenEmpty: on a vocabulary gap (top score < MinRewriteScore OR
+	//     VocabGapFraction ≥ RewriteGapFraction) ONE LLM call rewrites the whole
+	//     question into the corpus's own formal language ("帮信罪" →
+	//     "帮助信息网络犯罪活动罪") and BM25 retries. A healthy top hit pays zero.
+	//   · Rerank: reorders survivors by minilm sentence similarity, and only on
+	//     a semantic seat (below).
+	// ss.idxOnce is per-stack, and a stack is built per request — so this index
+	// is rebuilt for every query, not memoized process-wide.
 	ss.idxOnce.Do(func() { ss.idx = index.Build(list) })
 	if ss.idx != nil {
 		var rewriter index.Rewriter
@@ -437,41 +450,12 @@ type searchIn struct {
 }
 
 // l1PreK is how many body_embed neighbours the L1 prefilter keeps as
-// candidates. It was a bare 30 in two places; the value is now declared once so
-// the search and eval faces cannot drift apart. There is no measured basis for
-// 30 — it predates the D0 finding that long documents get little from body
-// embeddings at all — so treat it as a tuning knob, not a tuned constant.
+// candidates. It was a bare 30 in two places; the search face's copy went away
+// with the deletion described at errSearchL1Pre, so this now serves the eval
+// face alone. There is no measured basis for 30 — it predates the D0 finding
+// that long documents get little from body embeddings at all — so treat it as a
+// tuning knob, not a tuned constant.
 const l1PreK = 30
-
-// narrowL1Pre narrows candidates via body_embed KNN (D7: a missing index
-// materializes once, bounded, then retries; failure → full list, 只慢不错).
-func (ss *searchStack) narrowL1Pre(ctx context.Context, list []source.Source, query string) []source.Source {
-	embedFn, dims, embedModel, _ := embedderFor() // strict gate already ran at stack build
-	knnOnce := func() (*contract.KNNResult, error) {
-		qv, err := embedFn(ctx, []string{query})
-		if err != nil || len(qv) != 1 {
-			return nil, fmt.Errorf("embed: %w", err)
-		}
-		return ss.c.KNN(ctx, ss.sourcesColl, contract.KNNRequest{
-			Field: "body_embed", Vector: qv[0], K: l1PreK, Metric: "cosine",
-			Index:  "clus_body_embed",
-			Filter: map[string]any{"status": source.StatusActive},
-		})
-	}
-	knn, err := knnOnce()
-	if err != nil {
-		if _, berr := ss.st.EnsureEmbed(ctx, embedFn, dims, embedModel, 64); berr == nil {
-			knn, err = knnOnce()
-		}
-	}
-	if err != nil || knn == nil || len(knn.Documents) == 0 {
-		return list
-	}
-	if narrowed := orderByKNN(list, knn.Documents); len(narrowed) > 0 {
-		return narrowed
-	}
-	return list
-}
 
 // registerSessionFace mounts the session REST endpoints the web UI reads:
 // POST /v1/sessions (new), GET /v1/sessions (list), GET/DELETE /v1/sessions/{id}.
@@ -581,6 +565,14 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		stForReq, sourcesForReq, serr := storeForNS(c, st, serveNS, in.NS, sourcesColl)
 		if serr != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": serr.Error()})
+			return
+		}
+		// Rejected at the boundary rather than left to newSearchStackWith so a
+		// mistyped knob reads as the client error it is: a 500 here would tell
+		// a retrying caller to keep retrying. The choke point below still
+		// catches the CLI and MCP faces, and any future one.
+		if in.L1Pre {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": errSearchL1Pre.Error()})
 			return
 		}
 		opt := SearchOptions{Prior: in.Prior, L1Pre: in.L1Pre, History: in.History, Namespace: firstNonEmpty(in.NS, serveNS)}
