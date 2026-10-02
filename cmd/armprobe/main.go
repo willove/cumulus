@@ -337,9 +337,6 @@ func rerankEmbedder(mode string) (func(context.Context, []string) ([][]float64, 
 	if err != nil {
 		return nil, "", err
 	}
-	if emb == nil {
-		return nil, "", fmt.Errorf("MiniLM weights absent at %s — run `cumulus-cluster model install`", minilm.DefaultDir())
-	}
 	return emb.Embed, "minilm-l12-384", nil
 }
 

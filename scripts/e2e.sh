@@ -991,19 +991,26 @@ samples=(r.get("answer") or {}).get("samples") or []
 assert not samples, ("a skipped file must not be in the corpus", samples)
 print("ok")' ; check "scan→ingest: skipped files never enter the corpus" $?
 
-# --- Gate Y: strict embedder gate (A3) ---------------------------------------
-# CLUS_MINILM_REQUIRE=1 turns "weights absent" into a hard failure: the L1
-# precision paths must never read green on a silently degraded embedder.
+# --- Gate Y: embedder seat fails loud (A3) -----------------------------------
+# Asking for minilm without having the weights is an error, not a silent
+# hash-64 backfill. The backfill produces meaning-free vectors and Rerank then
+# uses them to scramble BM25 order at random — measured 2026-10-01, serve ran
+# days in that state because CLUS_EMBED was simply unset. The opt-out is
+# explicit, so an accident can never pass for a choice.
 # Point the CANONICAL CLUS_MODEL_DIR at a path that has no weights — the
 # legacy CLUS_MINILM_DIR would be shadowed by the isolation that
 # offline-gate.sh exports, so naming it here keeps the intent honest instead
 # of relying on which var DefaultDir happens to check first.
+LOUD=0
+CLUS_EMBED=minilm CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed >/dev/null 2>&1 || LOUD=1
+[ "$LOUD" = "1" ] ; check "embedder: CLUS_EMBED=minilm with the weights absent fails instead of degrading" $?
+# CLUS_MINILM_REQUIRE used to be the only way to get that. It is an alias now:
+# gate harnesses still set it, so it must keep working.
 STRICT=0
 CLUS_EMBED=minilm CLUS_MINILM_REQUIRE=1 CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed >/dev/null 2>&1 || STRICT=1
-[ "$STRICT" = "1" ] ; check "strict: CLUS_MINILM_REQUIRE=1 fails when the weights are absent" $?
-# Without the flag the same absence still degrades (documented, echoed).
-SOFT="$(CLUS_EMBED=minilm CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed)"
-echo "$SOFT" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r' ; check "strict: without the flag the absence still degrades to hash-64" $?
+[ "$STRICT" = "1" ] ; check "embedder: the legacy CLUS_MINILM_REQUIRE=1 still fails" $?
+SOFT="$(CLUS_EMBED=hash CLUS_MODEL_DIR="$WORK/no-such-model" $A ensure -embed)"
+echo "$SOFT" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r.get("model")=="local-hash-64", r' ; check "embedder: CLUS_EMBED=hash is the explicit opt-out and still gives hash-64" $?
 
 # --- Gate Z: model weight face (first-run install surface) --------------------
 # The weights are the suite's OWN asset (ModelScope → ~/.cumulus/models/...).

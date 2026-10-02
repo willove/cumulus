@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// The strict gate: CLUS_MINILM_REQUIRE=1 turns "weights absent" from a
-// silent hash fallback into an error, so CI precision paths cannot read
-// green on a degraded embedder.
+// Required parses the legacy opt-in flag. It no longer changes behavior —
+// Resolve fails on absent weights unconditionally — but gate harnesses still
+// set it and /v1/config still reports it, so the parsing stays pinned.
 func TestRequiredParses(t *testing.T) {
 	for v, want := range map[string]bool{"1": true, "true": true, "TRUE": true, "": false, "0": false, "yes": false, " 1 ": true} {
 		t.Setenv("CLUS_MINILM_REQUIRE", v)
@@ -19,7 +19,11 @@ func TestRequiredParses(t *testing.T) {
 	}
 }
 
-func TestResolveThreeCases(t *testing.T) {
+// Absent weights are an error whether or not the legacy flag is set: an
+// operator who asked for minilm asked for semantic vectors, and the silent
+// hash-64 backfill is what let serve run for days reranking with meaning-free
+// vectors. The opt-out is CLUS_EMBED=hash, which never reaches Resolve.
+func TestResolveFailsWhenWeightsAbsent(t *testing.T) {
 	present := t.TempDir()
 	for _, f := range []string{"model.safetensors", "unigram.json"} {
 		if err := os.WriteFile(filepath.Join(present, f), []byte("x"), 0o644); err != nil {
@@ -34,17 +38,17 @@ func TestResolveThreeCases(t *testing.T) {
 	}
 
 	t.Setenv("CLUS_MINILM_DIR", absent)
-	t.Setenv("CLUS_MINILM_REQUIRE", "")
-	if emb, err := Resolve(); err != nil || emb != nil {
-		t.Fatalf("absent + not required must degrade silently: emb=%v err=%v", emb, err)
-	}
-
-	t.Setenv("CLUS_MINILM_REQUIRE", "1")
-	emb, err := Resolve()
-	if err == nil || emb != nil {
-		t.Fatalf("absent + required must fail hard: emb=%v err=%v", emb, err)
-	}
-	if !strings.Contains(err.Error(), "CLUS_MINILM_REQUIRE") || !strings.Contains(err.Error(), absent) {
-		t.Fatalf("error must name the flag and the dir: %v", err)
+	for _, required := range []string{"", "1"} {
+		t.Setenv("CLUS_MINILM_REQUIRE", required)
+		emb, err := Resolve()
+		if err == nil || emb != nil {
+			t.Fatalf("CLUS_MINILM_REQUIRE=%q: absent weights must fail hard, got emb=%v err=%v", required, emb, err)
+		}
+		if !strings.Contains(err.Error(), absent) {
+			t.Fatalf("error must name the directory it looked in: %v", err)
+		}
+		if !strings.Contains(err.Error(), "CLUS_EMBED=hash") {
+			t.Fatalf("error must name the opt-out: %v", err)
+		}
 	}
 }

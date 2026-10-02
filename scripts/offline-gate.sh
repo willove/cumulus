@@ -20,8 +20,13 @@
 # theta-probe.sh, r2-cluster-probe.sh, realdata-probe.sh) deliberately talk to a
 # live endpoint and must NOT source this file.
 #
-# CLUS_MINILM_REQUIRE is unset as well: a strict-gate harness sets it per
-# command, and an inherited value would hard-fail unrelated offline runs.
+# CLUS_EMBED is the one that matters here: unset, nothing asks for minilm, so
+# the hash-64 seat is the honest default instead of a degradation. An inherited
+# CLUS_EMBED=minilm would now HARD-FAIL every offline run whose weights are
+# absent — Resolve fails loud by default as of 2026-10-02, where it used to
+# fall through silently. CLUS_MINILM_REQUIRE rides along because it is the
+# legacy alias for that strictness and a harness may still export it; on its
+# own it is inert.
 #
 # The MiniLM weights get the same treatment, for the same reason. They live
 # at $HOME/.cumulus/models (or wherever the developer points CLUS_MODEL_DIR),

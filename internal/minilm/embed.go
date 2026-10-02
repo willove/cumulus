@@ -13,26 +13,27 @@ import (
 	"sync"
 )
 
-// Required reports whether the operator demanded a hard failure instead of
-// the silent hash fallback (CLUS_MINILM_REQUIRE=1). CI precision gates set
-// it: a reference test that silently skips — or a search that silently
-// degrades to hash-64 — must not read as "semantic path green".
+// Required reports whether the operator set CLUS_MINILM_REQUIRE. It no longer
+// changes any behavior — Resolve fails on absent weights unconditionally — and
+// survives only because gate harnesses still set it and /v1/config reports it.
 func Required() bool {
 	v := strings.TrimSpace(os.Getenv("CLUS_MINILM_REQUIRE"))
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// Resolve returns the real embedder when the weights are present, an error
-// when Required demands them and they are absent, and (nil, nil) otherwise
-// — the caller then keeps its offline fallback, exactly as before.
+// Resolve returns the real embedder when the weights are present, and an error
+// when they are absent. Failing is the default, not an opt-in: the caller got
+// here because someone asked for CLUS_EMBED=minilm, and the silent hash-64
+// backfill it used to fall through to produces meaning-free vectors — Rerank
+// then uses them to scramble BM25 order at random (measured 2026-10-01: serve
+// ran days in that state because CLUS_EMBED was simply unset, and 道交法 fell
+// out of DEEP's early windows on 闯红灯). The opt-out is CLUS_EMBED=hash, which
+// never reaches this function, so an accident can't pass for a choice.
 func Resolve() (*Embedder, error) {
 	if Available() {
 		return New(DefaultDir()), nil
 	}
-	if Required() {
-		return nil, fmt.Errorf("minilm: CLUS_MINILM_REQUIRE=1 but weights absent at %s", DefaultDir())
-	}
-	return nil, nil
+	return nil, fmt.Errorf("minilm: weights absent at %s — run `cumulus-cluster model install`, or set CLUS_EMBED=hash to accept non-semantic vectors", DefaultDir())
 }
 
 // DefaultDir resolves the suite's OWN model directory: $CLUS_MODEL_DIR (or

@@ -138,9 +138,10 @@ func newSearchStack(ctx context.Context, c cumulite.Port, st *ingest.Store, sour
 // Explicit collaborator injection lets isolated evaluations force offline
 // execution without mutating process-wide environment or other requests.
 func newSearchStackWith(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl string, opt SearchOptions, stack prodStack) (*searchStack, error) {
-	// Strict embedder gate: with -l1pre the corpus-vector seat must be the
-	// one the operator asked for — a silent hash fallback (CLUS_MINILM_REQUIRE=1)
-	// fails the request instead of quietly degrading the L1 path.
+	// The corpus-vector seat must be the one the operator asked for. Since
+	// Resolve fails loud, the production stack already carries this as
+	// stack.embErr below; the explicit check stays for injected stacks
+	// (isolated evaluations) that build without an embErr of their own.
 	if opt.L1Pre {
 		if _, _, _, eerr := embedderFor(); eerr != nil {
 			return nil, eerr

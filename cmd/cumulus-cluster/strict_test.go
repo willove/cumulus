@@ -13,33 +13,42 @@ import (
 	"github.com/willove/cumulus/internal/monitor"
 )
 
-// The corpus-vector seat must be the embedder the operator asked for: with
-// CLUS_MINILM_REQUIRE=1 a weights-absent minilm is a hard error, not a
-// silent hash backfill.
-func TestEmbedderForStrictMinilm(t *testing.T) {
+// The corpus-vector seat must be the embedder the operator asked for. Asking
+// for minilm without having the weights is an error, not a silent hash
+// backfill: the backfill produces meaning-free vectors, and Rerank then uses
+// them to scramble BM25 order at random — which is how serve ran for days on a
+// degraded seat before anyone noticed (measured 2026-10-01). The opt-out is
+// explicit (CLUS_EMBED=hash), so an accident can never look like a choice.
+func TestEmbedderForFailsWhenMinilmWeightsAbsent(t *testing.T) {
 	t.Setenv("CLUS_EMBED", "minilm")
 	t.Setenv("CLUS_MINILM_DIR", t.TempDir()) // present dir, no weights
 	t.Setenv("CLUS_MINILM_REQUIRE", "")
+	// Keep the seat under test: an ambient CLUS_MODEL_DIR would shadow
+	// CLUS_MINILM_DIR, and a configured remote embedder would win outright.
+	t.Setenv("CLUS_MODEL_DIR", "")
+	t.Setenv("LLM_EMBED_MODEL", "")
 
-	// Not required: silent hash fallback (unchanged behavior).
-	fn, dims, model, err := embedderFor()
-	if err != nil || fn == nil {
-		t.Fatalf("non-strict must degrade silently: err=%v", err)
-	}
-	if model != "local-hash-64" || dims != 64 {
-		t.Fatalf("fallback model: %s/%d", model, dims)
+	if _, _, _, err := embedderFor(); err == nil || !strings.Contains(err.Error(), "weights absent") {
+		t.Fatalf("an unhonored minilm request must fail: %v", err)
 	}
 
-	// Required: hard failure naming the cause.
+	// The legacy flag is an alias now, not the switch: same failure either way.
 	t.Setenv("CLUS_MINILM_REQUIRE", "1")
-	if _, _, _, err := embedderFor(); err == nil || !strings.Contains(err.Error(), "CLUS_MINILM_REQUIRE") {
-		t.Fatalf("strict minilm must fail: %v", err)
+	if _, _, _, err := embedderFor(); err == nil || !strings.Contains(err.Error(), "weights absent") {
+		t.Fatalf("CLUS_MINILM_REQUIRE=1 must still fail: %v", err)
 	}
 
-	// No minilm requested: the flag alone changes nothing.
+	// Nothing requested: hash-64 is the honest default, not a degradation.
 	t.Setenv("CLUS_EMBED", "")
 	if _, _, model, err := embedderFor(); err != nil || model != "local-hash-64" {
-		t.Fatalf("flag without CLUS_EMBED must be inert: %s %v", model, err)
+		t.Fatalf("no embed seat requested must stay inert: %s %v", model, err)
+	}
+
+	// The explicit opt-out keeps working.
+	t.Setenv("CLUS_EMBED", "hash")
+	fn, dims, model, err := embedderFor()
+	if err != nil || fn == nil || model != "local-hash-64" || dims != 64 {
+		t.Fatalf("CLUS_EMBED=hash must opt out cleanly: %s/%d %v", model, dims, err)
 	}
 }
 
@@ -47,7 +56,9 @@ func TestSearchStackFailureIsTracked(t *testing.T) {
 	t.Setenv("CLUS_OFFLINE", "1")
 	t.Setenv("CLUS_EMBED", "minilm")
 	t.Setenv("CLUS_MODEL_DIR", t.TempDir())
-	t.Setenv("CLUS_MINILM_REQUIRE", "1")
+	// No CLUS_MINILM_REQUIRE: failing is the default posture now, so this
+	// exercises what an operator gets without knowing the legacy flag exists.
+	t.Setenv("CLUS_MINILM_REQUIRE", "")
 	engine, err := cumulite.Open("", cumulite.WithInMemory())
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +78,7 @@ func TestSearchStackFailureIsTracked(t *testing.T) {
 			w, out := serveJSON(t, mux, http.MethodPost, path, map[string]any{
 				"query": "test", "ns": "tenant", "l1pre": l1pre,
 			})
-			if w.Code != http.StatusInternalServerError || !strings.Contains(fmt.Sprint(out["error"]), "CLUS_MINILM_REQUIRE") {
+			if w.Code != http.StatusInternalServerError || !strings.Contains(fmt.Sprint(out["error"]), "weights absent") {
 				t.Fatalf("stack failure: %d %v", w.Code, out)
 			}
 		}

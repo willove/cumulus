@@ -79,7 +79,7 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 		{name: "explicit enable", base: "http://model.invalid", split: "1", remoteEmbed: "configured-model", wantSplit: true, wantEmbed: "remote-64"},
 		{name: "explicit true", base: "http://model.invalid", split: "TRUE", wantSplit: true, wantEmbed: "local-hash-64"},
 		{name: "forced offline", base: "http://minimaxi.com.invalid", forcedOffline: "1", split: "1", remoteEmbed: "ignored", wantOffline: true, wantEmbed: "local-hash-64"},
-		{name: "missing minilm fallback", embed: "minilm", wantOffline: true, wantEmbed: "local-hash-64"},
+		{name: "missing minilm fails", embed: "minilm", wantOffline: true},
 		{name: "missing minilm required", embed: "minilm", required: "1", wantOffline: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,8 +100,11 @@ func TestConfigReportsEffectiveStack(t *testing.T) {
 			if w.Code != http.StatusOK || out["offline"] != tc.wantOffline || out["reasoning_split"] != tc.wantSplit || out["effective_embedder"] != tc.wantEmbed {
 				t.Fatalf("effective config: %d %v", w.Code, out)
 			}
-			if tc.required == "1" && !strings.Contains(out["embedder_error"].(string), "CLUS_MINILM_REQUIRE") {
-				t.Fatalf("strict failure hidden: %v", out)
+			// An unhonored minilm request must name its cause on the config
+			// face. Reporting the seat the operator did NOT get is the whole
+			// point: a silent hash-64 backfill reads as "semantic path green".
+			if tc.embed == "minilm" && !strings.Contains(out["embedder_error"].(string), "weights absent") {
+				t.Fatalf("degraded embedder hidden: %v", out)
 			}
 			if out["base_url"] != tc.base || out["embed_model"] != tc.remoteEmbed || out["api_key_set"] != true || strings.Contains(w.Body.String(), "test-key-never-returned") {
 				t.Fatalf("configured fields or key masking changed: %v", out)

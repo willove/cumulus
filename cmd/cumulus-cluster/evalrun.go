@@ -156,7 +156,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 		var eerr error
 		embedFn, dims, model, eerr = embedderFor()
 		if eerr != nil {
-			return eerr // strict: CLUS_MINILM_REQUIRE=1 fails the run
+			return eerr // an unhonored embedder request fails the run
 		}
 		embedLabel = model
 		if _, err := st.EnsureEmbed(ctx, embedFn, dims, model, 64); err != nil {

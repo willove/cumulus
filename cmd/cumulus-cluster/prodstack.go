@@ -25,9 +25,10 @@ type prodStack struct {
 	expander fast.KeywordExpander
 	rewriter deep.HistoryRewriter
 	chat     *llm.ChatClient
-	// embErr carries a strict-mode failure (CLUS_MINILM_REQUIRE=1 with the
-	// weights absent): the stack still builds with the offline fallback, but
-	// newSearchStack refuses to serve on it.
+	// embErr carries an unhonored embedder request (CLUS_EMBED=minilm with the
+	// weights absent): the stack still builds so /v1/config can report the
+	// cause and the workbench can offer the download, but newSearchStack
+	// refuses to serve on it.
 	embErr error
 	// stageEffort is the per-stage thinking depth (MiniMax M3.1+/OpenAI
 	// o1+): keys are stage names (ANALYZE, SCORE, SYNTH, JUDGE, EXPAND),
@@ -44,23 +45,23 @@ func newProdStack() prodStack {
 	// 簇语义缓存（Sirchmunk 对齐位）：MiniLM 只嵌查询与簇摘要——查询驱动的
 	// 复用匹配，从不预嵌语料。语料侧向量仍是 opt-in 加速器（embedderFor）。
 	//
-	// AS_EMBED 忘设或权重缺席时会**静默**退回本地 hash——
-	// 部署态因此误以为在跑语义模型。verbose 下必须说清用的是哪一把；
-	// CLUS_MINILM_REQUIRE=1 则把「权重缺席」升级为硬失败（embErr），
-	// 由 newSearchStack 向外传播——CI 精度门不许静默降级读绿。
+	// 要了 minilm 却没有权重就是硬失败（embErr），由 newSearchStack 向外传播。
+	// 这里曾经静默退回本地 hash，部署态因此误以为在跑语义模型；现在退回是显式
+	// 的（CLUS_EMBED=hash），事故不可能再伪装成选择。
 	cacheEmbedder := "local-hash-64"
 	if os.Getenv("CLUS_EMBED") == "minilm" {
 		emb, err := minilm.Resolve()
 		if err != nil {
 			ps.embErr = err
 			cacheEmbedder = "ERROR: " + err.Error()
-		} else if emb != nil {
+		} else {
 			ps.emb = emb
 			cacheEmbedder = "minilm-l12-384"
-		} else {
-			cacheEmbedder = "local-hash-64 (CLUS_EMBED=minilm 权重缺席，静默降级)"
 		}
 	}
+	// Still VERBOSE-gated: newProdStack runs per request, so an unconditional
+	// line here is stderr spam. The failure path is loud by construction — it
+	// rides embErr into a 500 and into /v1/config's embedder_error.
 	if os.Getenv("CLUS_VERBOSE") == "1" {
 		fmt.Fprintf(os.Stderr, "[stack] 簇语义缓存 embedder=%s\n", cacheEmbedder)
 	}

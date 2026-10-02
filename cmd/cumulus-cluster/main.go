@@ -1135,22 +1135,17 @@ func main() {
 // search: explicit LLM_EMBED_MODEL over LLM_BASE_URL, else the offline
 // Local hash embedder.
 func embedderFor() (ingest.EmbedderFn, int, string, error) {
-	// 纯 Go MiniLM：CLUS_EMBED=minilm 显式开启；权重直接
-	// 复用 Sirchmunk 的模型缓存，向量空间与其语义缓存索引一致（384 维）。
-	// CLUS_OFFLINE does NOT suppress this seat: the weights are a local file,
-	// so an offline gate can still exercise (and strictly fail on) them — only
-	// the remote aigate embedder below is pinned off.
+	// 纯 Go MiniLM：CLUS_EMBED=minilm 显式开启（384 维）。权重是本套件自有
+	// 资产（~/.cumulus/models/<model>，CLUS_MODEL_DIR 可覆盖），不读其他项目
+	// 的缓存。CLUS_OFFLINE does NOT suppress this seat: the weights are a local
+	// file, so an offline gate can still exercise (and fail on) them — only the
+	// remote embedder below is pinned off.
 	if os.Getenv("CLUS_EMBED") == "minilm" {
 		emb, err := minilm.Resolve()
 		if err != nil {
-			return nil, 0, "", err // strict: CLUS_MINILM_REQUIRE=1 fails hard
+			return nil, 0, "", err
 		}
-		if emb != nil {
-			return emb.Embed, emb.Dims(), "minilm-l12-384", nil
-		}
-		if os.Getenv("CLUS_VERBOSE") == "1" {
-			fmt.Fprintln(os.Stderr, "[embedderFor] CLUS_EMBED=minilm 但权重缺席——退回 local-hash-64（语料向量降级）")
-		}
+		return emb.Embed, emb.Dims(), "minilm-l12-384", nil
 	}
 	if base := os.Getenv("LLM_BASE_URL"); base != "" && os.Getenv("LLM_EMBED_MODEL") != "" && !offlineForced() {
 		fe := &llm.Embedder{
@@ -1167,7 +1162,7 @@ func embedderFor() (ingest.EmbedderFn, int, string, error) {
 	// serve ran days in that state because CLUS_EMBED was simply unset.
 	// Explicit operator seats above still win; CLUS_EMBED=hash opts out.
 	if os.Getenv("CLUS_EMBED") == "" && minilm.Available() {
-		if emb, err := minilm.Resolve(); err == nil && emb != nil {
+		if emb, err := minilm.Resolve(); err == nil {
 			return emb.Embed, emb.Dims(), "minilm-l12-384", nil
 		}
 	}
