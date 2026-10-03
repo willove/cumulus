@@ -48,8 +48,11 @@ web-test:
 	cd web && npm test
 
 ## browser-live: 真实模型付费面检查——只读一次已完成的 live 运行，不提交、不产生费用
+## 两个前提（缺任一退 2，不是退 1）：serve 要带 LLM_BASE_URL（live_available 只看配置，
+## 门不提交所以随便指一个假端点也不花钱），且那个 serve 的二进制要在 `make web` 之后重新
+## build 过——包是编译期嵌进去的，旧二进制会让所有断言对着已经不存在的 UI 判绿。
 browser-live:
-	EVAL_BASE="$(EVAL_BASE)" EVAL_NS="$(EVAL_NS)" node scripts/browser/eval-live-surfaces.mjs
+	EVAL_BASE="$(EVAL_BASE)" EVAL_NS="$(EVAL_NS)" EVAL_SHOTS="$(EVAL_SHOTS)" node scripts/browser/eval-live-surfaces.mjs
 
 ## score-probe: 打分器可靠性探针（真实模型，只记录不设门）——同一窗口重复打分 N 次，
 ## 报告决策稳定性 / 阈值模糊带 / 金标分离度。P1-2 与 P1-3 的验收都靠它。
