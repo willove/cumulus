@@ -114,8 +114,13 @@ func (s *Store) PutBlock(ctx context.Context, src source.Source, cfg BlockConfig
 		r, err := s.put(ctx, src, 0)
 		return BlockResult{
 			Parent: src.BusinessKey, Blocks: 1, Status: r.Status,
-			IDs:       []string{r.ID},
-			Written:   boolToInt(r.Status == "created"),
+			IDs: []string{r.ID},
+			// "written" means "this write changed what is stored", the same
+			// meaning the split path gives it below (Written = stored). Deriving
+			// it from `Status == "created"` made an edited file — the common case
+			// on a second ingest — report 0 written and 0 unchanged, i.e. look
+			// like nothing happened.
+			Written:   boolToInt(r.Status != "unchanged"),
 			Unchanged: boolToInt(r.Status == "unchanged"),
 		}, err
 	}

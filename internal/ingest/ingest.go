@@ -1745,17 +1745,10 @@ func (s *Store) ingestFileList(ctx context.Context, dir string, files []string, 
 			if err != nil {
 				return counts, fmt.Errorf("file %s: %w", fileLabel(p), err)
 			}
-			// Status mirrors the single-document result only on the UNSPLIT
-			// path and is empty once the body became blocks, where the per-block
-			// counts are the only signal. Reading br.Written alone would be
-			// wrong on the whole path: BlockResult derives it from
-			// `Status == "created"`, so an edited file ("updated") looks
-			// unwritten. TestIngestFilesCountsAnEditedFileAsWritten pins this.
-			if br.Status != "" {
-				newDoc = br.Status != "unchanged"
-			} else {
-				newDoc = br.Written > 0
-			}
+			// Both paths now agree: Written counts writes that changed what is
+			// stored (created or updated), Unchanged counts byte-identical ones.
+			// TestIngestFilesCountsAnEditedFileAsWritten pins the edited-file case.
+			newDoc = br.Written > 0
 		} else if res, err := s.put(ctx, src, 0); err != nil {
 			return counts, fmt.Errorf("file %s: %w", fileLabel(p), err)
 		} else {
