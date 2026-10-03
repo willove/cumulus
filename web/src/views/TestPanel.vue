@@ -1,7 +1,7 @@
 <template>
   <div class="test-panel">
     <!-- 测试一问（Dify 式命中测试）：验证检索质量的最短路径——输入问题，
-         直接看被召回的证据窗口、得分与来源，不合成答案、不另起会话。 -->
+         直接看被召回的证据窗口与来源，不合成答案、不另起会话。 -->
     <div class="test-bar">
       <eb-input v-model="question" :clearable="false" class="test-input" placeholder="输入一个测试问题，看它能召回什么证据"
                 @keydown.enter="run" />
@@ -13,7 +13,7 @@
     <template v-if="result">
       <div class="test-summary">
         <eb-tag size="small">{{ result.mode || '检索' }}</eb-tag>
-        <span class="tiny">置信度 {{ Math.round((result.answer?.conf ?? 0) * 100) }}% · 证据窗口 {{ refs.length }} 个 · {{ result.latency_ms }}ms<template v-if="result.model"> · {{ result.model }}</template><template v-if="result.reused"> · 命中已有簇</template></span>
+        <span class="tiny">置信度 {{ Math.round((result.answer?.confidence ?? 0) * 100) }}% · 证据窗口 {{ refs.length }} 个 · {{ result.latency_ms }}ms<template v-if="result.model"> · {{ result.model }}</template><template v-if="result.reused"> · 命中已有簇</template></span>
       </div>
 
       <div v-if="!refs.length" class="empty-guide">
@@ -24,10 +24,10 @@
         <p class="tiny section-label">被召回的证据窗口（按引用顺序）</p>
         <article v-for="(r, i) in refs" :key="i" class="evidence-card">
           <div class="evidence-head">
-            <b class="num">{{ i + 1 }}</b>
+            <b class="num">{{ r.index }}</b>
             <span class="evidence-src" :title="r.source_id">{{ r.title || r.source_id }}</span>
+            <span v-if="r.span" class="tiny num span">{{ r.span }}</span>
             <span class="tiny num">{{ r.start }}–{{ r.end }}</span>
-            <span v-if="r.score != null" class="tiny num score">得分 {{ Number(r.score).toFixed(1) }}</span>
             <eb-tag v-if="r.resolved === false" type="warning" size="small">未定位</eb-tag>
           </div>
           <p class="evidence-quote">{{ r.quote }}</p>
@@ -42,7 +42,7 @@
     </template>
     <div v-else-if="!busy && !error" class="empty-guide">
       <h3>测一问，看召回</h3>
-      <p class="sub">同一条检索管线：问题 → 证据窗口与得分。答案质量先看证据对不对。</p>
+      <p class="sub">同一条检索管线：问题 → 证据窗口与出处。答案质量先看证据对不对。</p>
     </div>
   </div>
 </template>
@@ -59,9 +59,15 @@ const result = ref(null);
 
 const refs = computed(() => {
   const raw = result.value?.citations?.refs || [];
+  // Only fields deep.Ref actually marshals (internal/deep/deep.go): index,
+  // source_id, title, start, end, quote, span, resolved. There is no score on a
+  // citation — the per-window scores live on answer.samples[] (mcs.Sample, which
+  // also carries the arm: lex|local|global). Reading r.score here rendered a
+  // 「得分」 line that could never appear, and answer.conf rendered 置信度 0%
+  // forever because the field is answer.confidence.
   return raw.map((r, i) => ({
     index: r.index ?? i + 1, title: r.title, source_id: r.source_id,
-    quote: r.quote, start: r.start, end: r.end, score: r.score, resolved: r.resolved,
+    quote: r.quote, start: r.start, end: r.end, span: r.span, resolved: r.resolved,
   }));
 });
 
@@ -93,7 +99,7 @@ async function run() {
 .evidence-card { border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; padding: 10px 12px; }
 .evidence-head { display: flex; align-items: center; gap: var(--eb-space-3); }
 .evidence-src { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
-.score { color: var(--eb-color-primary); font-weight: 600; }
+.span { color: var(--eb-color-primary); font-weight: 600; }
 .evidence-quote { margin: 8px 0 0; font-size: 13px; line-height: 1.8; color: var(--eb-text-color-regular); }
 .answer-fold { border: 1px dashed var(--eb-border-color-lighter); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
 .answer-fold summary { cursor: pointer; color: var(--eb-text-color-secondary); user-select: none; }

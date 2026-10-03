@@ -2,10 +2,17 @@ import { ref, watch, computed } from "vue";
 import { requestJSON, jsonPost } from "./api.js";
 
 export const pane = ref("chat");
-export const PANES = ["chat", "library", "evals", "engine"];
-// 旧六导航 hash 归并到新四页：文档/知识簇是知识库的页签，监控/配置是引擎的页签。
-// 旧链不断——外部脚本与收藏里可能还带着 #/documents、#/monitor。
-const HASH_FOLD = { documents: "library", ingest: "library", clusters: "library", monitor: "engine", settings: "engine" };
+export const PANES = ["chat", "corpus", "knowledge", "evals", "engine"];
+// 旧 hash 一律折叠到新五页，外链与收藏不断。
+// v3 是四页：library 一页扛着 概览/文档/测试一问/学得知识 四个页签，也就是四个主操作，
+// 而 ui-v3-design.md 自己写的是「每屏主操作 ≤1」。v4 按心智模型拆开——
+// 语料（入库流水线）、知识（簇与复核）、原始检索归到引擎（它和「测试端点」同类：
+// 拿真实接口打一枪看回什么）。
+const HASH_FOLD = {
+  documents: "corpus", ingest: "corpus", library: "corpus",
+  clusters: "knowledge",
+  monitor: "engine", settings: "engine", test: "engine",
+};
 export function paneFromHash(id) {
   const mapped = HASH_FOLD[id] || id;
   return PANES.includes(mapped) ? mapped : "chat";
@@ -47,7 +54,7 @@ export async function createBucket(name, label) {
   await loadBuckets();
   if (bucketsError.value) throw new Error("知识库已创建，但刷新失败：" + bucketsError.value);
   nsSel.value = created.name;
-  pane.value = "library";
+  pane.value = "corpus";
 }
 
 export async function loadDocuments() {

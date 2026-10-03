@@ -78,7 +78,7 @@ export function useIngestPane() {
     pollHandle = null;
   }
   // 轮询可见性：文档页签挂在知识库页（library）下；documents/ingest 是旧 hash 的兜底。
-  function visible() { return alive && mounted && (pane.value === "library" || pane.value === "documents" || pane.value === "ingest"); }
+  function visible() { return alive && mounted && pane.value === "corpus"; }
   function schedulePoll() {
     if (!visible()) { clearPoll(); return; }
     if (pollHandle !== null || pollPromise) return;

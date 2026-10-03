@@ -98,7 +98,7 @@ const lifecycleStatuses = [
   { value: "deprecated", label: lifecycleLabel.deprecated, type: "info" },
 ];
 
-// 生命周期口径给概览段（LibraryView）复用；本段自身不再渲染统计卡。
+// 生命周期口径给「知识」页的概览段（KnowledgeView）复用；本段自身不再渲染统计卡。
 const stats = computed(() => clusterStats(clusters.value));
 const filterOptions = [
   { label: "全部", value: "" },

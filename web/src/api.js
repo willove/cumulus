@@ -25,7 +25,6 @@ export const api = {
     for (const file of files) body.append("files", file.raw, file.name);
     return requestJSON("/v1/ingest/upload?ns=" + encodeURIComponent(namespace), { method: "POST", body });
   },
-  searchStream: (body, signal) => fetch("/v1/search/stream", { ...jsonPost(body), signal }),
   chatCompletions: (body, signal) => fetch("/v1/chat/completions", { ...jsonPost(body), signal }),
 };
 

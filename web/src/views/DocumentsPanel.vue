@@ -116,8 +116,8 @@
           </div>
           <div v-if="selectedJob" class="job-detail" aria-live="polite">
             <div class="tiny">{{ selectedJob.id }}<span v-if="selectedJob.phase"> · {{ selectedJob.phase }}</span></div>
-            <div class="job-counts"><span>已处理 <b>{{ selectedJob.done || 0 }}</b> 文件</span><span>跳过 <b>{{ selectedJob.skipped || 0 }}</b></span><span>失败 <b>{{ selectedJob.failed || 0 }}</b></span><span v-if="selectedJob.records != null">写入 <b>{{ selectedJob.records }}</b> 条记录</span></div>
-            <p class="tiny">文件处理进度不等于入库文档数；实际可检索文档以列表为准。</p>
+            <div class="job-counts"><span>已处理 <b>{{ selectedJob.done || 0 }}</b> 文件</span><span>跳过 <b>{{ selectedJob.skipped || 0 }}</b></span><span>失败 <b>{{ selectedJob.failed || 0 }}</b></span><span v-if="selectedJob.records != null" :title="recordsHint">经手 <b>{{ selectedJob.records }}</b> 条记录</span></div>
+            <p class="tiny">文件处理进度不等于入库文档数；「经手」含内容未变、没有产生新修订的，实际可检索文档以列表为准。</p>
             <eb-alert v-if="selectedJob.error" type="error" :title="selectedJob.error" :closable="false" show-icon />
             <eb-alert v-if="selectedJob.pollError" type="error" :title="'状态读取失败：' + selectedJob.pollError" :closable="false" show-icon><eb-button link type="primary" size="small" @click="pollJobs">重试</eb-button></eb-alert>
             <eb-alert v-if="selectedJob.skipped" type="warning" title="部分文件已跳过" :closable="false" show-icon>{{ Object.entries(selectedJob.skip_reasons || {}).map(([key, count]) => key + ' × ' + count).join('，') || '请查看任务详情' }}</eb-alert>
@@ -159,6 +159,10 @@ const { ingDir, ingRec, ingName, ingBusy, ingMeta, jobs, jobCur, curJob,
   scanDir, scanLimit, scanNewer, scanBusy, scanReport, scanPicked, scanMeta,
   adPaths, adBusy, adProbes, adMeta, adMap, selectJob, startIngest, runScan,
   pickedCount, toggleAllScan, ingestPicked, runAdaptProbe, submitAdapt, pollJobs } = useIngestPane();
+// JobDoc.records is written+unchanged since the file faces were split into
+// FileCounts, so it counts the documents this run accounted for, not the ones it
+// newly stored. The HTTP face does not break the two apart; the CLI faces do.
+const recordsHint = "本次经手的文档数，含内容未变、没有产生新修订的。HTTP 面不分开报「新写」与「未变」；命令行的 ingest-files / ingest-adapt 分开（written / unchanged）。";
 const directoryInput = ref(null);
 function onDirectoryChange(event) {
   selectDirectory(event.target.files);

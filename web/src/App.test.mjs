@@ -242,18 +242,12 @@ function chatBackend(override = () => {}) {
     if (/^\/v1\/sessions(?:\?|$)/.test(url)) return json([...sessions.values()]);
     if (url.startsWith("/v1/sessions/")) return json(sessions.get(decodeURIComponent(url.split("/").pop().split("?")[0])));
     if (url === "/v1/chat/completions") {
-      // 与 /v1/search/stream 同一套会话物化；query 取最后一条 user 消息。
+      // 后端在第一次成功落库时 ensure 建会话；前端不预建，所以这里物化即可。
+      // query 取最后一条 user 消息。
       const session = body.session || body.user;
       const users = (body.messages || []).filter((m) => m.role === "user").map((m) => m.content);
       if (!sessions.has(session)) sessions.set(session, { id: session, messages: [], ns: body.ns });
       sessions.get(session).messages.push({ role: "user", content: users[users.length - 1] }, { role: "assistant", content: "answer" });
-      return answer();
-    }
-    if (url === "/v1/search/stream") {
-      // 后端在第一次成功落库时 ensure 建会话；前端不再预建，所以这里物化即可，
-      // 且 id 由前端生成后应保持稳定（同一轮追问必须复用同一 id）。
-      if (!sessions.has(body.session)) sessions.set(body.session, { id: body.session, messages: [], ns: body.ns });
-      sessions.get(body.session).messages.push({ role: "user", content: body.query }, { role: "assistant", content: "answer" });
       return answer();
     }
     return json({});
@@ -524,7 +518,7 @@ test("pollJobs folds the job state machine and preserves skipped-file and record
     return json({ state: "done", phase: "upserting", total: 3, done: 3, failed: 0, skipped: 1,
       skip_reasons: { extraction: 1 }, skip_errors: { "/d/a.md": "permission denied" }, records: 42, updated: "now" });
   });
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   await state.mount("ingest");
   state.ingDir.value = "/data/docs";
   await state.startIngest();
@@ -857,7 +851,7 @@ for (const route of ["directory", "scan", "adapt"]) {
       if (url === "/v1/ingest/jobs" || url === "/v1/adapt/ingest") { posts.push(JSON.parse(options.body)); return gate.promise; }
       return json([]);
     });
-    state.pane.value = "documents";
+    state.pane.value = "corpus";
     await state.mount("ingest");
     let pending;
     if (route === "directory") { state.ingDir.value = "/d"; pending = state.startIngest(); }
@@ -893,7 +887,7 @@ test("polling errors preserve job state, expose pollError and allow manual retry
     if (attempt === 3) throw new Error("offline");
     return json({ state: "done", done: 1, records: 20 });
   });
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   await state.mount("ingest");
   state.ingDir.value = "/d";
   await state.startIngest();
@@ -923,11 +917,11 @@ test("poll timers run on documents, not chat, and an unmounted in-flight read ca
   state.ingDir.value = "/d";
   await state.startIngest();
   assert.equal(state.timers.size, 0, "chat no longer embeds ingestion");
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   assert.equal(state.timers.size, 1);
-  state.pane.value = "settings";
+  state.pane.value = "engine";
   assert.equal(state.timers.size, 0);
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   const pending = state.pollJobs();
   const duplicate = state.pollJobs();
   assert.equal(pending, duplicate, "manual retry coalesces an active poll");
@@ -1049,7 +1043,7 @@ test("deleting the active session blocks sends until its result is known", async
 test("late submit on an unmounted instance records the job without resurrecting a timer", async () => {
   const gate = deferred();
   const state = app(async () => gate.promise);
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   await state.mount("ingest");
   state.ingDir.value = "/d";
   const submitted = state.startIngest();
@@ -1071,7 +1065,7 @@ test("automatic polls skip jobs with read errors while healthy jobs continue", a
     reads.push(url);
     return url.includes("/bad?") ? json({ error: "not found" }, 404) : json({ state: "running" });
   });
-  state.pane.value = "documents";
+  state.pane.value = "corpus";
   await state.mount("ingest");
   state.ingDir.value = "/d";
   await state.startIngest();
@@ -1302,17 +1296,24 @@ test("history restore carries citations, stats and stage timeline", async () => 
   assert.equal(restored.createdAt, 1700000000000);
 });
 
-// —— 四导航整顿：旧 hash 归并与知识库概览面板 ————————————————
+// —— 五导航整顿：旧 hash 归并与语料/知识概览面板 ————————————————
 
-test("paneFromHash folds the legacy six-nav hashes into the four new panes", () => {
+test("paneFromHash folds every retired hash into the five current panes", () => {
   const state = app(() => json({}));
-  assert.equal(state.paneFromHash("documents"), "library");
-  assert.equal(state.paneFromHash("ingest"), "library");
-  assert.equal(state.paneFromHash("clusters"), "library");
+  // v2 的 documents/ingest 与 v3 的 library 都归到「语料」；clusters 单独成「知识」；
+  // monitor/settings/test 都归「引擎」——原始检索和「测试端点」是同一类诊断工具。
+  assert.equal(state.paneFromHash("documents"), "corpus");
+  assert.equal(state.paneFromHash("ingest"), "corpus");
+  assert.equal(state.paneFromHash("library"), "corpus");
+  assert.equal(state.paneFromHash("clusters"), "knowledge");
   assert.equal(state.paneFromHash("monitor"), "engine");
   assert.equal(state.paneFromHash("settings"), "engine");
+  assert.equal(state.paneFromHash("test"), "engine");
   assert.equal(state.paneFromHash("chat"), "chat");
+  assert.equal(state.paneFromHash("corpus"), "corpus");
+  assert.equal(state.paneFromHash("knowledge"), "knowledge");
   assert.equal(state.paneFromHash("evals"), "evals");
+  assert.equal(state.paneFromHash("engine"), "engine");
   // 未知与空 hash 回落主路径，不会把路由打死。
   assert.equal(state.paneFromHash("nope"), "chat");
   assert.equal(state.paneFromHash(""), "chat");

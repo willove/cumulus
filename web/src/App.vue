@@ -56,14 +56,18 @@ import ThemePicker from "./views/ThemePicker.vue";
 import { pane, paneFromHash, nsSel, buckets, bucketsBusy, bucketsError, loadBuckets, createBucket } from "./state.js";
 import "./views/common.css";
 import ChatView from "./views/ChatView.vue";
-import LibraryView from "./views/LibraryView.vue";
+import CorpusView from "./views/CorpusView.vue";
+import KnowledgeView from "./views/KnowledgeView.vue";
 import EvalsView from "./views/EvalsView.vue";
 import EngineView from "./views/EngineView.vue";
 
-const views = { chat: ChatView, library: LibraryView, evals: EvalsView, engine: EngineView };
+// 五页，每页一个主操作（ui-v3-design.md「每屏主操作 ≤1」，v3 的 library 一页
+// 扛四个页签时是违反的）：问 / 喂 / 管知识 / 验 / 看引擎。
+const views = { chat: ChatView, corpus: CorpusView, knowledge: KnowledgeView, evals: EvalsView, engine: EngineView };
 const navigation = [
   { id: "chat", title: "检索问答", icon: "question-answer" },
-  { id: "library", title: "知识库", icon: "database" },
+  { id: "corpus", title: "语料", icon: "database" },
+  { id: "knowledge", title: "知识", icon: "book-open" },
   { id: "evals", title: "评测", icon: "bar-chart-h" },
   { id: "engine", title: "引擎", icon: "dashboard" },
 ];
@@ -95,7 +99,12 @@ provide("router", { push(id) { if (Object.hasOwn(views, id)) pane.value = id; } 
 
 function fromHash() {
   const id = location.hash.replace(/^#\//, "").split("/")[0];
-  pane.value = paneFromHash(id);
+  const next = paneFromHash(id);
+  pane.value = next;
+  // 折叠之后把地址栏也改成规范 id。否则停在语料页时打开 #/documents：面板对了，
+  // 地址栏却留着一个已退役的名字，而收藏它就是收藏一个下一版可能不再折叠的 id。
+  // 写回会再触发一次 hashchange，那时 id === next，不会成环。
+  if (id !== next && location.hash !== "#/" + next) location.hash = "/" + next;
 }
 watch(pane, id => { if (location.hash !== "#/" + id) location.hash = "/" + id; });
 onMounted(() => {

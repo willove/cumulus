@@ -15,7 +15,7 @@
       <header class="conversation-head">
         <div class="conversation-heading"><span class="status-dot" :class="{ ready: hasBucket && documents.length }"></span><strong>{{ libraryLabel }}</strong><span class="tiny">{{ documents.length }} 篇文档</span></div>
         <div class="form-actions">
-          <eb-button size="small" @click="pane = 'library'">知识库</eb-button>
+          <eb-button size="small" @click="pane = 'corpus'">语料</eb-button>
           <eb-button v-if="hasBucket && resetting !== 'done'" size="small" :loading="resetting === 'busy'" @click="clearCache">清除缓存</eb-button>
           <eb-button v-else-if="resetting === 'done'" size="small" type="success" text @click="resetting = ''">✓ 已清除</eb-button>
           <eb-button class="history-toggle" type="primary" link size="small" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">历史会话</eb-button>
@@ -36,7 +36,7 @@
         <span class="welcome-eyebrow">知识库已就绪</span>
         <h2>添加文档，开始提问</h2>
         <p>当前知识库还没有文档。支持本地目录、候选扫描，以及 JSON、CSV、Parquet 等结构化文件。</p>
-        <eb-button type="primary" @click="pane = 'library'">添加文档</eb-button>
+        <eb-button type="primary" @click="pane = 'corpus'">添加文档</eb-button>
       </div>
       <template v-else>
         <div class="conversation-stream">
