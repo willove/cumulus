@@ -176,6 +176,20 @@ try {
   await page.getByRole('button', { name: '切换为深色模式' }).click();
   await expect(page.locator('html')).toHaveClass(/dark/);
   await page.setViewportSize({ width: 390, height: 844 });
+  // 「不得横向滚动」查不到被裁掉的文字——裁掉的部分根本不产生滚动。所以单独量每个
+  // 表单标签：scrollWidth 超过 clientWidth 就是被裁了（组件库的 label 是 nowrap）。
+  if (await page.getByRole('button', { name: '上传题集', exact: true }).count()) {
+    await page.getByRole('button', { name: '上传题集', exact: true }).click();
+  }
+  // 量的是「label 的实宽 vs 它所在格子的宽」。两个坑都踩过：按 label 自己的
+  // scrollWidth/clientWidth 断言是恒真的（nowrap 把它撑到 404×404，看不出裁切）；
+  // 按格子的 scrollWidth 断言则会连带抓到控件的 4px 溢出（组件库的事，另记一条）。
+  // 第一版恒真断言靠变异对照打回，第二版误抓控件溢出靠这次红发现。
+  const clipped = await page.evaluate(() => [...document.querySelectorAll('.upload-fold .eb-form-item')]
+    .map(item => ({ txt: item.textContent.trim().slice(0, 24), box: item.clientWidth,
+      label: item.querySelector('.eb-form-item__label')?.getBoundingClientRect().width ?? 0 }))
+    .filter(r => r.label > r.box + 1).map(r => r.txt + '(' + Math.round(r.label) + '>' + r.box + ')'));
+  assert.deepEqual(clipped, [], 'form labels clipped at 390px: ' + clipped.join(' | '));
   await page.getByRole('heading', { name: '评测', exact: true, level: 2 }).scrollIntoViewIfNeeded();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'mobile layout scrolls horizontally');
   await shot(page, 'mobile.png');

@@ -68,6 +68,7 @@ const runs = new Map([
   ['r-done', { id: 'r-done', name: '已完成无失败', state: 'completed', config: { mode: 'offline' }, total: 1, done: 1, failed: 0, dataset_name: '模拟题集', summary: { n: 1, rule_match: 1 } }],
   ['r-int', { id: 'r-int', name: '被中断', state: 'interrupted', error: 'server restarted; isolated warm state was lost; start a new run', config: { mode: 'offline' }, total: 3, done: 2, failed: 1, dataset_name: '模拟题集', summary: { n: 2 } }],
 ]);
+let liveAvailable = true; // flipped near the end to exercise the no-live-model path
 let live = null; // the run created by this check
 let cancelPolls = 0; // the POST response shows 'cancelling'; a later poll settles it
 const counters = { starts: 0, cancels: 0, retries: 0 };
@@ -89,7 +90,7 @@ try {
     // 返回 {} 是这里编不出的一种形状，会让面板在 mon.retrieval.reuse_rate 上抛 TypeError。
     // knowledge 反过来确实可以缺席（omitempty），所以故意不给——把可缺席那条路径也走一遍。
     if (url.pathname === '/v1/monitor/overview') data = { queries: 0, uptime_sec: 0, retrieval: { reuse_rate: 0, reuse_hits: 0, queries: 0 }, system: { store_dir: '/tmp/mock' }, llm: {}, namespaces: [], recent: [] };
-    if (url.pathname === '/v1/eval/capabilities') data = { protocol: 'eval-v2', live_available: true, model: 'mock-not-a-real-model', max_items: 500, max_bytes: 2097152, l1_available: true, concurrency: 1, queue_limit: 8 };
+    if (url.pathname === '/v1/eval/capabilities') data = { protocol: 'eval-v2', live_available: liveAvailable, model: 'mock-not-a-real-model', max_items: 500, max_bytes: 2097152, l1_available: true, concurrency: 1, queue_limit: 8 };
     if (url.pathname === '/v1/eval/datasets') data = { datasets: [dataset] };
     if (url.pathname === '/v1/eval/datasets/d1') data = dataset;
     if (url.pathname === '/v1/eval/runs') {
@@ -181,6 +182,10 @@ try {
   await expect(interrupted.getByRole('button', { name: '重试失败题目', exact: true })).toBeEnabled();
   await expect(interrupted.getByRole('button', { name: '新建冷启动评测', exact: true })).toBeVisible();
   await absent(interrupted, '取消运行', 'a terminal run must not offer cancel');
+  // 每次运行本来就是冷的（evalexecutor.go:40 恒定 cold-start=true），所以这个按钮的
+  // 真意是「回到运行条」。它曾经接的是 () => {}：点了什么也不发生，也不报错。
+  await interrupted.getByRole('button', { name: '新建冷启动评测', exact: true }).click();
+  await expect(page.locator('.dataset-pick [role=combobox]')).toBeFocused();
 
   // 选了题集「运行」才可用：没有向导，这一行就是全部输入。
   // 命名只能靠 class 限定：aria-label="题集" 写在 eb-select 上，属性透传落在没有 role 的
@@ -226,9 +231,25 @@ try {
   await expect(liveRegion.getByRole('button', { name: '取消运行', exact: true })).toBeVisible();
   assert.equal(counters.retries, 1);
 
+  // 没有可用真实模型时：说清楚是模型没配，而不是把人支使回已经填好的题集那一栏
+  liveAvailable = false;
+  await page.evaluate(() => { location.hash = '#/evals'; });
+  await page.reload();
+  await page.locator('.library-selector').getByRole('combobox').click();
+  await page.getByRole('option', { name: '模拟评测（无模型调用）', exact: true }).click();
+  await page.locator('.dataset-pick').getByRole('combobox').click();
+  await page.getByRole('option', { name: /模拟题集 · 1 题/ }).click();
+  await page.getByRole('tab', { name: '真实模型', exact: true }).click();
+  const startsBefore = counters.starts;
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  await expect(page.getByText(/服务尚未配置可用的真实模型/)).toBeVisible();
+  assert.equal(await page.getByRole('dialog').filter({ hasText: '使用真实模型运行' }).count(), 0,
+    'a cost dialog must not open when there is no live model to pay for');
+  assert.equal(counters.starts, startsBefore, 'a run was submitted with no live model available');
+
   assert.deepEqual(failures, [], 'the GUI saw failing /v1 responses: ' + failures.join('; '));
   assert.deepEqual(errors, [], 'the GUI raised page/console errors');
-  console.log('PASS run-state contract: five panes mount; the cost dialog gates the paid start (dismissing submits nothing); cancel → cancelling → cancelled; a live retry needs its own acknowledgement; interrupted shows reason + cold start; a clean run offers neither; no real requests');
+  console.log('PASS run-state contract: no-live-model says so plainly; 新建冷启动评测 lands on the run bar; five panes mount; the cost dialog gates the paid start (dismissing submits nothing); cancel → cancelling → cancelled; a live retry needs its own acknowledgement; interrupted shows reason + cold start; a clean run offers neither; no real requests');
 } finally {
   await browser.close();
   serving.close();

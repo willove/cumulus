@@ -62,14 +62,11 @@ export function useEvaluationWorkbench() {
   const error = ref("");
   const formError = ref("");
   const busy = ref({});
-  const createOpen = ref(false);
-  const step = ref(0);
   const datasetName = ref("");
   const datasetContent = ref("");
   const validation = ref(null);
   const datasetID = ref("");
   const datasetPreview = ref(null);
-  const runName = ref("");
   const config = ref({ mode: "offline", judge: false, closed_book: false, prior: true, l1pre: false,
     item_timeout_seconds: 120, timeout_seconds: 1800, token_budget: 100000, limit: 0 });
   const liveConfirmed = ref(false);
@@ -172,12 +169,9 @@ export function useEvaluationWorkbench() {
       if (selectedRunID) await openRun(selectedRunID, false, pollError);
     } finally { polling = false; schedule(); }
   }
-  function newRun() {
-    createOpen.value = true; step.value = 0; formError.value = ""; liveConfirmed.value = false;
-  }
   function invalidateValidation() {
     cancelRequest("validate"); cancelRequest("save"); cancelRequest("file"); cancelRequest("dataset");
-    datasetID.value = ""; datasetPreview.value = null; step.value = 0;
+    datasetID.value = ""; datasetPreview.value = null;
     validation.value = null; formError.value = ""; liveConfirmed.value = false;
   }
   async function readDataset(file) {
@@ -200,47 +194,33 @@ export function useEvaluationWorkbench() {
     if (busy.value.save || !validation.value?.valid) return;
     const body = { name: datasetName.value.trim(), content: datasetContent.value };
     const ok = await request("save", (ns, signal) => evaluationAPI.post("datasets", ns, body, signal), data => {
-      datasetID.value = data.id; datasetPreview.value = data; step.value = 1;
+      datasetID.value = data.id; datasetPreview.value = data;
     }, formError);
     if (ok) await loadDatasets();
   }
   async function chooseDataset(id) {
     cancelRequest("file"); cancelRequest("validate"); cancelRequest("save");
-    datasetID.value = id; datasetPreview.value = null; step.value = 0;
+    datasetID.value = id; datasetPreview.value = null;
     validation.value = null; liveConfirmed.value = false;
     cancelRequest("dataset");
     if (!id) return;
     await request("dataset", (ns, signal) => evaluationAPI.get("datasets/" + encodeURIComponent(id), ns, signal), data => { datasetPreview.value = data; }, formError);
   }
-  function nextStep() {
-    formError.value = "";
-    if (!datasetID.value || !datasetPreview.value) { formError.value = "请选择已保存并校验通过的题集"; return; }
-    if (step.value === 1) {
-      if (config.value.mode === "live" && !capabilities.value?.live_available) { formError.value = "服务尚未配置可用的真实模型"; return; }
-      for (const [key, label, min, max] of [
-        ["item_timeout_seconds", "单题时限", 1, 600], ["timeout_seconds", "运行时限", 1, 7200],
-        ["token_budget", "Token 预算", 1, 10000000], ["limit", "题数上限", 0, capabilities.value?.max_items || 500],
-      ]) {
-        const value = Number(config.value[key]);
-        if (!Number.isInteger(value) || value < min || value > max) { formError.value = label + "必须是 " + min + "–" + max + " 的整数"; return; }
-        config.value[key] = value;
-      }
-    }
-    step.value = Math.min(2, step.value + 1);
-  }
   async function startRun() {
     if (busy.value.submit) return;
     if (!nsSel.value) { formError.value = "请先选择知识库"; return; }
-    // 向导已退役（线性流：题集+模式+运行），step 门槛随之移除——canStart 即全部前置。
-    if (!canStart.value) { formError.value = "请选择题集并完成运行条件"; return; }
-    const body = { dataset_id: datasetID.value, name: runName.value.trim() || datasetPreview.value?.name, config: { ...config.value } };
+    // canStart 即全部前置（线性流：题集 + 模式 + 运行，没有 step 门槛）。
+    // live 模式缺模型那条不在这里报——startRunClick 会在开对话框之前就说清楚，
+    // 走到这一步还失败只剩「题集没选/正在提交」，那句误导性的话就没有机会出现了。
+    if (!canStart.value) { formError.value = "题集未就绪或正在提交中"; return; }
+    const body = { dataset_id: datasetID.value, name: datasetPreview.value?.name, config: { ...config.value } };
     const signature = JSON.stringify([nsSel.value, body]);
     if (signature !== submissionSignature) { submissionKey = crypto.randomUUID(); submissionSignature = signature; }
     body.request_id = submissionKey;
     let id;
     const origin = epoch;
     const ok = await request("submit", (ns, signal) => evaluationAPI.post("runs", ns, body, signal), data => {
-      id = data.id; createOpen.value = false; submissionSignature = ""; liveConfirmed.value = false;
+      id = data.id; submissionSignature = ""; liveConfirmed.value = false;
     }, formError);
     if (ok && alive && origin === epoch) {
       const listed = await loadRuns(pollError);
@@ -285,7 +265,7 @@ export function useEvaluationWorkbench() {
     epoch++; clearPoll();
     for (const key of requests.keys()) cancelRequest(key);
     capabilities.value = null; datasets.value = []; runs.value = []; run.value = null; items.value = [];
-    selectedItem.value = null; selectedRunID = ""; createOpen.value = false;
+    selectedItem.value = null; selectedRunID = "";
     datasetID.value = ""; datasetPreview.value = null; datasetName.value = ""; datasetContent.value = "";
     validation.value = null; comparison.value = null; compareID.value = ""; liveConfirmed.value = false; retryConfirmed.value = false;
     error.value = ""; formError.value = ""; pollError.value = ""; compareError.value = "";
@@ -304,9 +284,9 @@ export function useEvaluationWorkbench() {
   onUnmounted(() => { alive = false; mounted = false; reset(); });
   return {
     capabilities, datasets, runs, run, items, selectedItem, filteredItems, itemFilter, progress, isActive,
-    error, formError, pollError, busy, createOpen, step, datasetName, datasetContent, validation, datasetID,
-    datasetPreview, runName, config, liveConfirmed, retryConfirmed, canStart, compareID, comparison, compareError,
-    refresh, openRun, newRun, readDataset, validateDataset, saveDataset, chooseDataset, nextStep, startRun,
+    error, formError, pollError, busy, datasetName, datasetContent, validation, datasetID,
+    datasetPreview, config, liveConfirmed, retryConfirmed, canStart, compareID, comparison, compareError,
+    refresh, openRun, readDataset, validateDataset, saveDataset, chooseDataset, startRun,
     runAction, compareRuns, exportRun,
   };
 }

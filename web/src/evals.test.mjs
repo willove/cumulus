@@ -54,8 +54,9 @@ function setup(override = () => undefined, namespace = "alpha") {
   return fixture;
 }
 async function prepared(f) {
-  await f.mount(); f.newRun(); await f.chooseDataset("d1"); f.nextStep(); f.nextStep();
-  assert.equal(f.step.value, 2);
+  // 线性流里「可以起跑」的全部前置就是：挂上 + 选了一个已保存的题集。
+  await f.mount(); await f.chooseDataset("d1");
+  assert.ok(f.datasetPreview.value);
 }
 
 test("evaluation API refuses implicit namespaces and encodes scoped requests", async t => {
@@ -78,18 +79,18 @@ test("evaluation starts offline and no library makes no API calls", async () => 
 });
 
 test("dataset upload, validation, immutable save and confirmed start use one explicit namespace", async () => {
-  const f = setup(); await f.mount(); f.newRun();
+  const f = setup(); await f.mount();
   await f.readDataset(new File([JSON.stringify(item)], "handbook.jsonl"));
   assert.equal(f.datasetName.value, "handbook.jsonl");
   assert.equal(f.calls.filter(c => c.method === "post").length, 0);
   await f.validateDataset(); assert.equal(f.validation.value.valid, true);
-  await f.saveDataset(); assert.equal(f.step.value, 1); assert.equal(f.datasetID.value, "d1");
-  f.nextStep(); await f.startRun();
+  await f.saveDataset(); assert.equal(f.datasetID.value, "d1"); assert.ok(f.datasetPreview.value);
+  await f.startRun();
   const start = f.calls.find(c => c.method === "post" && c.path === "runs");
   assert.ok(start.body.request_id);
   assert.equal(start.body.config.mode, "offline"); assert.equal(start.ns, "alpha");
   assert.equal(f.run.value.id, "r1"); assert.equal(f.items.value[0].answer, "128");
-  assert.equal(f.createOpen.value, false); assert.equal(f.progress.value, 100);
+  assert.equal(f.progress.value, 100);
 });
 
 test("file size and blank input are rejected locally, invalid dataset cannot be saved", async () => {
@@ -153,7 +154,6 @@ test("namespace switch invalidates pending dataset reads and run submissions", a
   await prepared(f); const pending = f.startRun(); f.nsSel.value = "beta";
   gate.resolve(completed); await pending; await tick();
   assert.equal(f.run.value, null); assert.equal(f.datasetID.value, "");
-  assert.equal(f.createOpen.value, false);
   assert.equal(f.calls.find(c => c.method === "post" && c.path === "runs").signal.aborted, true);
 });
 
@@ -238,12 +238,6 @@ test("switching to an uploaded file invalidates a pending saved-dataset selectio
   assert.equal(f.datasetName.value, "fresh.jsonl");
 });
 
-test("changing budget inputs to invalid numbers cannot advance confirmation", async () => {
-  const f = setup(); await f.mount(); await f.chooseDataset("d1"); f.nextStep();
-  f.config.value.token_budget = "-1"; f.nextStep();
-  assert.equal(f.step.value, 1); assert.match(f.formError.value, /Token 预算/);
-});
-
 test("unmount aborts readers and prevents polling resurrection", async () => {
   const gate = deferred();
   const f = setup((method, path) => path === "runs" ? gate.promise : undefined);
@@ -255,7 +249,7 @@ test("unmount aborts readers and prevents polling resurrection", async () => {
 test("editing a confirmed dataset invalidates its saved binding and confirmation", async () => {
   const f = setup(); await prepared(f);
   f.datasetContent.value = JSON.stringify({ ...item, query: "edited" });
-  assert.equal(f.datasetID.value, ""); assert.equal(f.datasetPreview.value, null); assert.equal(f.step.value, 0);
+  assert.equal(f.datasetID.value, ""); assert.equal(f.datasetPreview.value, null);
   await f.startRun(); assert.equal(f.calls.some(c => c.method === "post" && c.path === "runs"), false);
 });
 

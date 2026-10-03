@@ -17,7 +17,7 @@
 
       <!-- 运行一行：题集 → 模式 → 跑。没有向导，没有步骤。 -->
       <div class="run-bar">
-        <eb-select :model-value="datasetID" class="dataset-pick" aria-label="题集" placeholder="选择题集" :disabled="busy.dataset" @update:model-value="chooseDataset">
+        <eb-select ref="datasetPick" :model-value="datasetID" class="dataset-pick" aria-label="题集" placeholder="选择题集" :disabled="busy.dataset" @update:model-value="chooseDataset">
           <eb-option v-for="dataset in datasets" :key="dataset.id" :value="dataset.id" :label="`${dataset.name} · ${dataset.count} 题`" />
         </eb-select>
         <eb-segmented v-model="mode" :options="modeOptions" size="small" />
@@ -29,9 +29,10 @@
       <div v-if="uploadOpen" class="upload-fold">
         <eb-form label-position="top" @submit.prevent>
           <div class="upload-grid">
-            <eb-form-item label="上传 JSONL（每行一题：id / query / answer / gold_sources）">
+            <eb-form-item label="上传 JSONL">
               <eb-upload :key="nsSel" v-model:file-list="uploadFiles" :auto-upload="false" :limit="1" accept=".jsonl,.ndjson,application/x-ndjson" :disabled="busy.file" @change="readDataset" @remove="clearUpload">
                 <template #trigger><span>选择 JSONL 文件</span></template>
+                <p class="tiny">每行一题：id / query / answer / gold_sources</p>
               </eb-upload>
             </eb-form-item>
             <eb-form-item label="或直接粘贴 JSONL 内容">
@@ -74,7 +75,7 @@
           </eb-table>
         </div>
         <p v-if="busy.detail && !run" role="status" class="tiny">正在读取运行详情…</p>
-        <EvalRunDetail v-if="run" :key="run.id" :run="run" :items="filteredItems" :runs="runs" :progress="progress" :active="isActive(run)" :busy="busy" :item-filter="itemFilter" :live-confirmed="retryConfirmed" :compare-id="compareID" :comparison="comparison" :compare-error="compareError" @update:item-filter="itemFilter = $event" @update:live-confirmed="retryConfirmed = $event" @update:compare-id="compareID = $event" @action="runAction" @export="exportRun" @compare="compareRuns" @select-item="selectedItem = $event" @new-run="() => {}" />
+        <EvalRunDetail v-if="run" :key="run.id" :run="run" :items="filteredItems" :runs="runs" :progress="progress" :active="isActive(run)" :busy="busy" :item-filter="itemFilter" :live-confirmed="retryConfirmed" :compare-id="compareID" :comparison="comparison" :compare-error="compareError" @update:item-filter="itemFilter = $event" @update:live-confirmed="retryConfirmed = $event" @update:compare-id="compareID = $event" @action="runAction" @export="exportRun" @compare="compareRuns" @select-item="selectedItem = $event" @new-run="backToRunBar" />
         <EvalItemDetail v-if="selectedItem" :item="selectedItem" @close="selectedItem = null" />
       </template>
 
@@ -127,8 +128,24 @@ watch(mode, value => {
 });
 function startRunClick() {
   if (!datasetPreview.value) return;
+  if (mode.value === 'live' && !capabilities.value?.live_available) {
+    // 没有可用模型时不能把人支使回「请选择题集」——题集就在旁边且已经选好了。
+    // 这句原本是向导第二步里的，随向导一起失效过一段时间。
+    formError.value = '服务尚未配置可用的真实模型：切回离线，或到「引擎 → 模型与配置」启用一个';
+    return;
+  }
   if (mode.value === 'live') { liveConfirmOpen.value = true; return; }
   void startRun();
+}
+// 「新建冷启动评测」没有对应的模式：evalexecutor.go:40 的冻结签名恒定含
+// cold-start=true，每次运行本来就是冷的。所以这个按钮做的是「回到运行条」，
+// 而不是打开一个不存在的第二套流程。
+const datasetPick = ref(null);
+function backToRunBar() {
+  const el = datasetPick.value?.$el?.querySelector('[role="combobox"]');
+  if (!el) return;
+  el.scrollIntoView({ block: 'center' });
+  el.focus();
 }
 function confirmLive() {
   liveConfirmOpen.value = false;
