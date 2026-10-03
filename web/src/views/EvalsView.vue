@@ -48,11 +48,15 @@
         <section v-if="validation" aria-label="题集校验结果" class="form-stack">
           <eb-alert :type="validation.valid ? 'success' : 'error'" :title="validation.valid ? `校验通过 · ${validation.items?.length || 0} 题` : '校验未通过，请修正以下问题'" :closable="false" />
           <ul v-if="validation.errors?.length" class="tiny validate-list"><li v-for="(issue, index) in validation.errors" :key="index">第 {{ issue.line || '?' }} 行：{{ issue.message }}</li></ul>
+          <!-- 段落式参考答案：能存，但规则臂必然恒 0。向导退役时这条提醒跟着没了，
+               而 /v1/eval/datasets/validate 一直在返回 warnings（eval/v2.go:141）——接口有、脸上没有。 -->
+          <ul v-if="validation.warnings?.length" class="tiny validate-list"><li v-for="(issue, index) in validation.warnings" :key="index">警告 · 第 {{ issue.line || '?' }} 行：{{ issue.message }}</li></ul>
         </section>
       </div>
 
-      <!-- 空态：没跑过评测时先回答“这是干嘛的”。 -->
-      <div v-if="!runs.length && !busy.runs && !run" class="empty-guide eval-empty">
+      <!-- 空态：没跑过评测时先回答“这是干嘛的”。题集已选或上传面板已展开时不再出现——
+           否则它会和刚校验通过的题集同屏，一边显示「校验通过 · 2 题」一边让你上传第一个题集。 -->
+      <div v-if="!runs.length && !busy.runs && !run && !datasetID && !uploadOpen" class="empty-guide eval-empty">
         <h3>用题集检验回答质量</h3>
         <p class="sub">题集是固定的一组「问题 + 参考答案 + 证据位置」（JSONL）。运行后系统在当前库上作答并对照评分，给出正确率、证据命中率等指标。默认离线模式只验证流程，不调用真实模型。</p>
         <div class="form-actions"><eb-button type="primary" @click="uploadOpen = true">上传第一个题集</eb-button></div>
@@ -60,7 +64,7 @@
       <template v-else>
         <div v-if="busy.runs" role="status" class="tiny">正在读取运行…</div>
         <div v-else-if="runs.length" class="table-scroll">
-          <eb-table :data="runs" row-key="id" :scroll-x="720" aria-label="评测运行列表" @row-click="({ row }) => selectRun(row.id)">
+          <eb-table :data="runs" row-key="id" :scroll-x="720" aria-label="评测运行列表" @row-click="(row) => selectRun(row.id)">
             <eb-table-column prop="name" label="运行" min-width="220"><template #default="{ row }">{{ row.name || row.id }}</template></eb-table-column>
             <eb-table-column prop="state" label="状态" width="110"><template #default="{ row }"><eb-status-tag :value="row.state" :statuses="runStatuses" size="small" /></template></eb-table-column>
             <eb-table-column label="规则匹配" width="110"><template #default="{ row }"><b class="num">{{ pct(row.summary?.rule_match) }}</b></template></eb-table-column>
@@ -128,6 +132,7 @@ function startRunClick() {
 }
 function confirmLive() {
   liveConfirmOpen.value = false;
+  liveConfirmed.value = true; // canStart 在 live 模式查这个标志；对话框确认就是它的唯一写入点
   void startRun();
 }
 function selectRun(id) { liveConfirmed.value = false; openRun(id); }

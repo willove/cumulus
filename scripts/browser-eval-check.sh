@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # 浏览器联调门（可选）：一条命令起一个离线 serve，把生产内嵌工作台在真浏览器里
-# 走完整流程——题集向导→运行→进度→冻结逐题证据→导出→刷新持久化→对比→深色移动端。
+# 走完整流程——上传/校验题集→存为题集→离线运行→进度→冻结逐题证据→导出→
+# 刷新后点表行回到详情→对比→深色移动端。
 #
-# 为什么单列一个门：web/src 的 100 项测试跑的是组合式函数（纯 JS，不起浏览器），
+# 为什么单列一个门：web/src 的 116 项测试跑的是组合式函数（纯 JS，不起浏览器），
 # 渲染与接线（角色名、下载事件、路由、响应式布局）没有回归保护。这个门补上那层，
 # 且刻意打**生产 serve 挂的 /ui/**，而不是 vite dev——内嵌 dist 曾经落后于
 # web/src，只有打生产包才看得见。
 #
-# 退出码：0 通过，1 真实失败，2 环境缺席（无 node / 无 Playwright），
-# 3 断言陈旧（门指向的是已被替换掉的那一代 UI，见下面的 tripwire）。
-# 注意 **make 自身对任何配方失败都退 2**，所以经 `make browser-check` 看不到这个区分——
-# Makefile 里那个目标会把脚本的真实退出码打出来。
+# 退出码：0 通过，1 真实失败，2 环境缺席（无 node / 无 Playwright）。
+# 注意 **make 自身对任何配方失败一律退 2**，与这里的「2 = 环境缺席」撞码，所以
+# Makefile 的 browser-check 目标会把脚本的真实退出码打出来再传播。
 # Playwright 不随本仓安装（见 scripts/browser/playwright.mjs 的说明）。
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -24,29 +24,6 @@ command -v go >/dev/null 2>&1 || {
 	echo "SKIP browser gate: go is not on PATH (needed to build the server under test)" >&2
 	exit 2
 }
-
-# Staleness tripwire, and the reason this script now has a fourth exit code.
-#
-# The two .mjs gates below were written against the eval workbench as it stood at
-# b8a17e8 (2026-09-25). The 4-navigation IA rewrite (7181b66, 2026-09-29) replaced
-# that screen — its wizard is gone entirely — so 27 of the 37 names the gates
-# assert no longer exist anywhere in web/src. Without this check the gate dies on
-# the first missing locator and `make` reports exit 2, which is ALSO make's own
-# code for "a recipe failed" and which this script documents as "environment
-# absent". A red gate that reads as a skip is how this went unnoticed for 4 days.
-#
-# The marker is a string that was in the bundle at b8a17e8 and is not in any
-# build of the current source: the wizard's second step label.
-DIST="cmd/cumulus-cluster/web/dist"
-if [ -d "$DIST" ] && ! grep -rq '下一步：配置' "$DIST" 2>/dev/null; then
-	echo "STALE browser gate (exit 3): the built UI no longer contains the eval wizard" >&2
-	echo "  these .mjs checks assert. Written at b8a17e8 (2026-09-25), superseded by" >&2
-	echo "  7181b66 (2026-09-29, 4-navigation IA). This is neither an absent environment" >&2
-	echo "  nor a fresh regression — the gates predate the UI they are pointed at." >&2
-	echo "  Rewrite is scheduled in docs/ui-v4-design.md §三 W5 (after the IA settles," >&2
-	echo "  so they are not rewritten twice)." >&2
-	exit 3
-fi
 
 WORK="$(mktemp -d)"
 PORT=""

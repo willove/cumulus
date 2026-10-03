@@ -2,9 +2,14 @@
 //
 // Runs against a PRODUCTION-served workbench: `serve` mounts the go:embed'd
 // bundle at /ui/ and the evaluation face at /v1/eval/* on one origin — no vite
-// dev server, no proxy. Drives the real wizard end to end and fails on any
+// dev server, no proxy. Drives the linear run flow end to end and fails on any
 // browser error, so the pure-JS composable tests in web/src are backed by one
-// check that the rendered工作台 actually wires them up.
+// check that the rendered 工作台 actually wires them up.
+//
+// The three-step wizard was retired on 2026-09-29 (7181b66): one line of input
+// (题集 → 模式 → 运行) plus an upload fold. This file was rewritten for that shape
+// on 2026-10-03 because it had been asserting the wizard's labels ever since and
+// therefore could not run at all.
 //
 //   EVAL_BASE         base URL of a running `serve` (required)
 //   EVAL_FIXTURE_DIR  directory holding invalid.jsonl + valid.jsonl (required)
@@ -35,6 +40,8 @@ const { chromium, expect } = playwright;
 
 const ns = 'eval-gui-' + Date.now();
 const label = '联调库-' + Date.now();
+const runA = '联调离线评测 A';
+const runB = '联调离线评测 B';
 const errors = [];
 const evalCalls = [];
 let browser;
@@ -56,44 +63,74 @@ try {
   assert.ok(shell.includes('/ui/assets/index-'), 'serve did not mount the built bundle');
   assert.ok(!shell.includes('/@vite/client'), 'served shell is a dev-server page');
 
+  async function pickLibrary() {
+    await page.locator('.library-selector').getByRole('combobox').click();
+    await page.getByRole('option', { name: label, exact: true }).click();
+    await expect(page.getByRole('heading', { name: '评测', exact: true, level: 2 })).toBeVisible();
+  }
+  // 命名只能靠 class / placeholder：aria-label 写在 eb-select 与 eb-input 上，属性透传
+  // 落在没有 role 的根节点，控件自己的可及名其实来自占位符内容。
+  const datasetPick = page.locator('.dataset-pick').getByRole('combobox');
+  const nameField = page.getByRole('textbox', { name: /回归题集/ });
+  const contentField = page.locator('.upload-fold textarea');
+  async function openFold() {
+    if (await page.getByRole('button', { name: '上传题集', exact: true }).count()) {
+      await page.getByRole('button', { name: '上传题集', exact: true }).click();
+    }
+  }
+  async function pickFile(file) {
+    // setInputFiles 之后 readDataset 还要 await raw.text()；面板刚由 v-if 挂上时，change
+    // 事件有整个丢掉的一遭（实测第二次上传就复现），届时「校验」永远 disabled。
+    // 所以把「校验 可点」当作文件已落地的信号，丢掉就重投一次，而不是设完就走。
+    const input = page.locator('input[type="file"]');
+    const validate = page.getByRole('button', { name: '校验', exact: true });
+    await input.setInputFiles(path.join(fixtures, file));
+    try {
+      await expect(validate).toBeEnabled({ timeout: 5000 });
+    } catch {
+      await input.setInputFiles(path.join(fixtures, file));
+      await expect(validate).toBeEnabled({ timeout: 5000 });
+    }
+  }
+  async function saveDataset({ file, paste, name }) {
+    if (file) await pickFile(file);
+    if (paste) await contentField.fill(paste);
+    await nameField.fill(name);
+    await page.getByRole('button', { name: '校验', exact: true }).click();
+    await page.getByRole('button', { name: '存为题集', exact: true }).click();
+    await expect(datasetPick).toContainText(name);
+    await expect(page.getByRole('button', { name: '运行', exact: true })).toBeEnabled();
+  }
+
   await page.goto(base + '/ui/#/evals');
-  await page.locator('.library-selector').getByRole('combobox').click();
-  await page.getByRole('option', { name: label, exact: true }).click();
-  await expect(page.getByRole('heading', { name: '评测工作台', exact: true, level: 2 })).toBeVisible();
-  await expect(page.getByText('真实模型：未配置 / 不可用')).toBeVisible();
-  // 能力卡的排队上限来自 capabilities.queue_limit：契约字段必须在屏上可见。
-  await expect(page.getByText(/排队上限：\s*8/)).toBeVisible();
+  await pickLibrary();
+  await expect(page.getByText('用题集检验回答质量')).toBeVisible();
 
-  // 向导：坏题集必须挡住保存，好题集必须给出题数
-  await page.getByRole('button', { name: '新建评测', exact: true }).click();
-  await page.locator('input[type="file"]').setInputFiles(path.join(fixtures, 'invalid.jsonl'));
-  await page.getByRole('button', { name: '校验题集', exact: true }).click();
+  // 上传折叠面板：坏题集挡住保存，段落式参考答案必须带出警告
+  await openFold();
+  await contentField.fill(await fs.readFile(path.join(fixtures, 'invalid.jsonl'), 'utf8'));
+  await page.getByRole('button', { name: '校验', exact: true }).click();
   await expect(page.getByText('校验未通过，请修正以下问题')).toBeVisible();
-  await expect(page.getByRole('button', { name: '保存不可变版本并配置' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '存为题集', exact: true })).toBeDisabled();
 
-  // 段落式参考答案：仍然可以保存，但向导必须把「规则臂会恒 0」这条警告显示出来
-  await page.getByRole('button', { name: '移除文件', exact: true }).click();
-  await page.locator('input[type="file"]').setInputFiles(path.join(fixtures, 'passage.jsonl'));
-  await page.getByRole('button', { name: '校验题集', exact: true }).click();
+  await contentField.fill(await fs.readFile(path.join(fixtures, 'passage.jsonl'), 'utf8'));
+  await nameField.fill('段落参考答案题集');
+  await page.getByRole('button', { name: '校验', exact: true }).click();
   await expect(page.getByText('校验通过 · 1 题')).toBeVisible();
+  // 能存，但规则臂对整段参考答案恒 0——接口返回 warnings，脸上就得显示（eval/v2.go:141）
   await expect(page.getByText(/警告 · .*passage/)).toBeVisible();
   await shot(page, 'passage-warning.png');
 
-  await page.getByRole('button', { name: '移除文件', exact: true }).click();
-  await page.locator('input[type="file"]').setInputFiles(path.join(fixtures, 'valid.jsonl'));
-  await page.getByRole('button', { name: '校验题集', exact: true }).click();
-  await expect(page.getByText('校验通过 · 2 题')).toBeVisible();
+  // 真实文件上传那一遍：读文件 → 校验 → 存为题集 → 运行一行了结
+  await saveDataset({ file: 'valid.jsonl', name: runA });
   await expect(page.getByText(/警告 · /)).toHaveCount(0);
+  // 题集已经在手上了，空态不能再同屏让你「上传第一个题集」
+  assert.equal(await page.getByRole('button', { name: '上传第一个题集', exact: true }).count(), 0,
+    'the empty guide kept offering a first dataset after one was already selected');
   await shot(page, 'dataset-validated.png');
 
-  await page.getByRole('button', { name: '保存不可变版本并配置' }).click();
-  await expect(page.getByRole('heading', { name: '配置运行', exact: true })).toBeVisible();
-  await page.getByRole('textbox', { name: '运行名称', exact: true }).fill('联调离线评测 A');
-  await page.getByRole('button', { name: '下一步：确认', exact: true }).click();
-  await page.getByRole('button', { name: '确认并开始评测', exact: true }).click();
-
-  // 运行：进度到达终态，且逐题结果可展开到冻结引用
-  const detail = page.getByRole('region', { name: '运行详情 · 联调离线评测 A', exact: true });
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  const detail = page.getByRole('region', { name: '运行详情 · ' + runA, exact: true });
   await expect(detail).toBeVisible({ timeout: 20000 });
   await expect(detail.getByRole('status')).toContainText('已处理 2', { timeout: 20000 });
   await expect(detail.getByText('completed', { exact: true }).first()).toBeVisible();
@@ -114,26 +151,23 @@ try {
   assert.ok(JSON.stringify(exported).includes('128'));
   assert.ok(JSON.stringify(exported).includes('citations'), 'export lost per-item evidence');
 
-  // 刷新后仍在（持久化经 GUI 可见），再跑一次做对比
+  // 刷新后仍在（持久化经 GUI 可见）。运行只能靠点表行打开——这正是 row-click
+  // 与组件 emit 形状不一致时唯一会红的地方。
   await page.reload();
-  await page.locator('.library-selector').getByRole('combobox').click();
-  await page.getByRole('option', { name: label, exact: true }).click();
-  await page.getByRole('button', { name: '查看评测 联调离线评测 A', exact: true }).click();
+  await pickLibrary();
+  await page.locator('tr', { hasText: runA }).first().click();
   await expect(page.getByRole('button', { name: '查看题目 q2', exact: true })).toBeVisible();
 
-  await page.getByRole('button', { name: '新建评测', exact: true }).click();
-  const create = page.getByRole('region', { name: new RegExp('新建评测') });
-  await create.getByRole('combobox').first().click();
-  await page.getByRole('option', { name: /valid\.jsonl/ }).click();
-  await page.getByRole('button', { name: '下一步：配置', exact: true }).click();
-  await page.getByRole('textbox', { name: '运行名称', exact: true }).fill('联调离线评测 B');
-  await page.getByRole('button', { name: '下一步：确认', exact: true }).click();
-  await page.getByRole('button', { name: '确认并开始评测', exact: true }).click();
-  const second = page.getByRole('region', { name: '运行详情 · 联调离线评测 B', exact: true });
+  // 第二次运行做对比：同一份 JSONL，改走「直接粘贴」那一栏，另存一个题集名
+  await openFold();
+  await saveDataset({ paste: await fs.readFile(path.join(fixtures, 'valid.jsonl'), 'utf8'), name: runB });
+  await page.getByRole('button', { name: '运行', exact: true }).click();
+  const second = page.getByRole('region', { name: '运行详情 · ' + runB, exact: true });
   await expect(second.getByRole('status')).toContainText('已处理 2', { timeout: 20000 });
+  await second.getByText('对比另一运行（回归检验）').click();
   await second.locator('.compare-picker').getByRole('combobox').click();
-  await page.getByRole('option', { name: /联调离线评测 A/ }).click();
-  await second.getByRole('button', { name: '比较运行', exact: true }).click();
+  await page.getByRole('option', { name: new RegExp(runA) }).click();
+  await second.getByRole('button', { name: '比较', exact: true }).click();
   await expect(page.getByText('符合当前协议的可比条件')).toBeVisible();
   await second.scrollIntoViewIfNeeded();
   await shot(page, 'comparison.png');
@@ -142,16 +176,18 @@ try {
   await page.getByRole('button', { name: '切换为深色模式' }).click();
   await expect(page.locator('html')).toHaveClass(/dark/);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole('heading', { name: '评测工作台', exact: true, level: 2 }).scrollIntoViewIfNeeded();
+  await page.getByRole('heading', { name: '评测', exact: true, level: 2 }).scrollIntoViewIfNeeded();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'mobile layout scrolls horizontally');
   await shot(page, 'mobile.png');
 
   // 走的是真接口而不是被前端短路的路由
   assert.ok(evalCalls.some((call) => call.startsWith('POST /v1/eval/datasets/validate')), 'GUI never validated a dataset');
+  assert.ok(evalCalls.some((call) => call.startsWith('POST /v1/eval/datasets')), 'GUI never saved a dataset');
+  assert.ok(evalCalls.some((call) => call.startsWith('POST /v1/eval/runs')), 'GUI never started a run');
   assert.ok(evalCalls.some((call) => call.startsWith('GET /v1/eval/runs')), 'GUI never polled run state');
   assert.ok(evalCalls.some((call) => call.endsWith('/compare')), 'GUI never compared two runs');
   assert.deepEqual(errors, []);
-  console.log('PASS browser: wizard validation, immutable save, offline run, progress, frozen evidence, export, refresh persistence, comparison, dark mobile; no browser errors (' + evalCalls.length + ' eval requests)');
+  console.log('PASS browser: upload fold validation (invalid blocked, passage warned), save, offline run, progress, frozen evidence, export, refresh + row-click persistence, comparison, dark mobile; no browser errors (' + evalCalls.length + ' eval requests)');
 } finally {
   if (browser) await browser.close();
 }
