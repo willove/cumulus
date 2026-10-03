@@ -736,7 +736,14 @@ print("ok")' ; check "evalrun: resume skips already-recorded items" $?
 N2="$(wc -l < "$ORES" | tr -d ' ')"
 [ "$N2" -eq 2 ] ; check "evalrun: resume appends no duplicate lines" $?
 ORES2="$WORK/eval-results-l1.jsonl"
-OOUT3="$($A eval-run -file "$OID" -out "$ORES2" -l1pre 2>&1)"
+# stderr goes to its OWN file, not into the parsed stream. This gate used to
+# merge them (2>&1) and then json.loads the result, which is how a progress line
+# once broke the JSON contract (fixed at the source in d834f2a by making
+# EmbedProgress opt-in). Merging is the brittle half: any legitimate diagnostic
+# on stderr — a degradation warning, a deprecation note — would fail an
+# assertion about stdout. Keep the two streams apart and the gate tests the
+# contract it names.
+OOUT3="$($A eval-run -file "$OID" -out "$ORES2" -l1pre 2>"$WORK/l1pre.err")"
 echo "$OOUT3" | python3 -c '
 import json,sys
 s=sys.stdin.read()

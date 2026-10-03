@@ -10,9 +10,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
@@ -38,7 +40,7 @@ func widenFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl s
 				failed = append(failed, fs...)
 			}
 		}
-		if out, _ := widenSemantic(ctx, c, sourcesColl, all, exclude, query, m); len(out) > 0 {
+		if out := widenSemantic(ctx, c, sourcesColl, all, exclude, query, m); len(out) > 0 {
 			return out, nil
 		}
 		// ReAct 精炼轮: both arms empty → regenerate keywords in statutory
@@ -99,10 +101,7 @@ func rankFunc(fe *fast.Engine, st *ingest.Store, c cumulite.Port, sourcesColl st
 		for _, s := range out {
 			have[s.ID] = true
 		}
-		extra, err := widenSemantic(ctx, c, sourcesColl, sources, map[string]bool{}, query, maxDeepLoops)
-		if err != nil {
-			return out, nil
-		}
+		extra := widenSemantic(ctx, c, sourcesColl, sources, map[string]bool{}, query, maxDeepLoops)
 		for _, s := range extra {
 			if !have[s.ID] {
 				have[s.ID] = true
@@ -229,29 +228,46 @@ func mixedAffinity(cands []source.Source, affinity map[string]bool, m, cap int) 
 	return out
 }
 
-// widenSemantic admits the query's KNN neighbours (索引是缓存：no embedder
-// configured, no index, or a KNN error → empty, the search simply stays
-// keyword-only — never an error path for the caller).
-func widenSemantic(ctx context.Context, c cumulite.Port, sourcesColl string, all []source.Source, exclude map[string]bool, query string, m int) ([]source.Source, error) {
-	// The semantic arm is an accelerator: a strict-mode failure degrades to
-	// keyword-only with a note, never a failed search (索引是缓存).
+// widenSemantic admits the query's KNN neighbours. It returns no error ON
+// PURPOSE: the semantic arm is an accelerator, and D7 (索引是缓存) says a
+// missing cache makes a search slower, never failed. The signature used to
+// carry an `error` that no path ever set — one caller discarded it with `_`,
+// the other checked it and then returned nil itself — so the contract advertised
+// a channel that did not exist, and the dead check hid the fact.
+//
+// What it must NOT do is degrade silently. Three different things can fail here
+// and they used to collapse into the same empty result with no output at all
+// (the single note was gated behind CLUS_VERBOSE=1 and covered only the first):
+//
+//	seat  — embedderFor refused. Post-G2 this is unreachable in production: the
+//	        stack is built through the same call and hard-fails first.
+//	embed — the query embedding call itself failed. THIS IS A LIVE DEPENDENCY
+//	        FAILING (a remote LLM embedder 401/timeout), and it was the case
+//	        with zero diagnostics: every search quietly lost its semantic arm.
+//	knn   — no body_embed index, or the engine refused. The normal state for
+//	        anyone who never ran `ensure -embed`.
+func widenSemantic(ctx context.Context, c cumulite.Port, sourcesColl string, all []source.Source, exclude map[string]bool, query string, m int) []source.Source {
 	embedFn, _, _, aerr := embedderFor()
 	if aerr != nil {
-		if os.Getenv("CLUS_VERBOSE") == "1" {
-			fmt.Fprintf(os.Stderr, "[widenSemantic] %v — 语义臂缺席，仅词面\n", aerr)
-		}
-		return nil, nil
+		noteSemanticArm("seat", aerr)
+		return nil
 	}
 	qv, err := embedFn(ctx, []string{query})
-	if err != nil || len(qv) != 1 {
-		return nil, nil
+	if err != nil {
+		noteSemanticArm("embed", err)
+		return nil
+	}
+	if len(qv) != 1 {
+		noteSemanticArm("embed", fmt.Errorf("wanted 1 query vector, got %d", len(qv)))
+		return nil
 	}
 	knn, err := c.KNN(ctx, sourcesColl, contract.KNNRequest{
 		Field: "body_embed", Vector: qv[0], K: m, Metric: "cosine",
 		Filter: map[string]any{"status": source.StatusActive},
 	})
 	if err != nil {
-		return nil, nil
+		noteSemanticArm("knn", err)
+		return nil
 	}
 	byID := map[string]source.Source{}
 	for _, s := range all {
@@ -270,5 +286,37 @@ func widenSemantic(ctx context.Context, c cumulite.Port, sourcesColl string, all
 			}
 		}
 	}
-	return out, nil
+	return out
+}
+
+// noteSemanticArm prints one line per distinct reason per process, to stderr,
+// unconditionally. Once-per-process because a missing body_embed index is a
+// STATE that would otherwise print on every search; unconditional because a
+// flag nobody sets is the same as no output, and this suite's defect history is
+// dominated by degradation that looked identical to success.
+var (
+	semanticArmMu   sync.Mutex
+	semanticArmSaid           = map[string]bool{}
+	semanticArmOut  io.Writer = os.Stderr // swapped by tests
+)
+
+// semanticArmHints turns "the arm is off" into "here is what to do about it".
+// A degradation note that names no remedy gets read once and then ignored, which
+// is a slower version of the silence it replaced.
+var semanticArmHints = map[string]string{
+	"seat":  "embedder 座位被拒——先跑 `cumulus-cluster model status` 看权重在不在",
+	"embed": "查询嵌入这次调用本身失败了——端点/密钥/模型名都值得查，这不是配置缺席",
+	"knn":   "没有 body_embed 向量索引——跑 `cumulus-cluster ensure -embed` 才会物化（它是 opt-in 加速器）",
+}
+
+func noteSemanticArm(reason string, err error) {
+	semanticArmMu.Lock()
+	defer semanticArmMu.Unlock()
+	if semanticArmSaid[reason] {
+		return
+	}
+	semanticArmSaid[reason] = true
+	fmt.Fprintf(semanticArmOut,
+		"[widenSemantic] 语义臂不可用（%s）：%v\n  → 检索继续，但只走词面。%s\n  → 本进程内同一原因只报这一次。\n",
+		reason, err, semanticArmHints[reason])
 }

@@ -930,10 +930,17 @@ type EmbedderFn func(ctx context.Context, texts []string) ([][]float64, error)
 
 // EnsureEmbed declares the body-embed vector index (the L1 cache, D1/D7) and
 // backfills missing vectors in batches. It is the only path that writes
-// content vectors; put never blocks on a model. No embedder → no-op.
+// content vectors; put never blocks on a model.
+//
+// A nil embedder is a CALLER BUG rather than a configuration state, so it is
+// refused instead of treated as a no-op: quietly skipping the entire vector
+// backfill is indistinguishable from a corpus that needed none. Every caller
+// gets its function from embedderFor(), which returns either a working embedder
+// or an error — never (nil, nil) — so this branch is unreachable in production
+// and exists to fail loudly if that ever stops being true.
 func (s *Store) EnsureEmbed(ctx context.Context, embed EmbedderFn, dims int, model string, batch int) (n int, err error) {
 	if embed == nil {
-		return 0, nil
+		return 0, fmt.Errorf("ingest: EnsureEmbed needs an embedder — pass one from embedderFor(), or do not call it")
 	}
 	if err := s.c.CreateIndexRequest(ctx, s.sources, contract.IndexRequest{
 		Name: "clus_body_embed", Field: "body_embed", Type: "vector",
