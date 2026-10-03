@@ -3,6 +3,10 @@
 # 走完整流程——上传/校验题集→存为题集→离线运行→进度→冻结逐题证据→导出→
 # 刷新后点表行回到详情→对比→深色移动端。
 #
+# 本脚本四段：① 运行生命周期契约 ② 语料/知识/引擎渲染契约 ③ 问答 SSE 折叠契约
+# （①②③都是静态 dist + 拦 /v1/**，不起服务端）④ 真端到端（下面起 serve，打生产挂的 /ui/**）。
+# 另有一道只读的付费面门不在这里：make browser-live，它需要一次真跑过的 live 运行。
+#
 # 为什么单列一个门：web/src 的 116 项测试跑的是组合式函数（纯 JS，不起浏览器），
 # 渲染与接线（角色名、下载事件、路由、响应式布局）没有回归保护。这个门补上那层，
 # 且刻意打**生产 serve 挂的 /ui/**，而不是 vite dev——内嵌 dist 曾经落后于
@@ -42,6 +46,20 @@ node scripts/browser/eval-run-states.mjs
 STATES=$?
 [ "$STATES" -eq 2 ] && exit 2
 [ "$STATES" -eq 0 ] || { echo "browser gate: run-state contract failed" >&2; exit 1; }
+
+# 第二段：语料/知识/引擎三个面板的渲染契约（同样是静态 dist + 拦 /v1/**）。
+# UI v4 动的正是这三面，而它们此前只被断言过「标题挂载 + main 非空」。
+node scripts/browser/pane-surfaces.mjs
+PANES=$?
+[ "$PANES" -eq 2 ] && exit 2
+[ "$PANES" -eq 0 ] || { echo "browser gate: pane contract failed" >&2; exit 1; }
+
+# 第三段：检索问答的 SSE 折叠契约（答案 / 引用行 / 分步耗时 / 运行卡 / 会话恢复）。
+# fixture 是从 CLUS_OFFLINE=1 的真 serve 上抓下来的原始字节，不是手写的。
+node scripts/browser/chat-surfaces.mjs
+CHAT=$?
+[ "$CHAT" -eq 2 ] && exit 2
+[ "$CHAT" -eq 0 ] || { echo "browser gate: chat contract failed" >&2; exit 1; }
 
 go build -o "$WORK/cumulus-cluster" ./cmd/cumulus-cluster || { echo "browser gate: build failed" >&2; exit 1; }
 

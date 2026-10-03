@@ -19,8 +19,12 @@
         <!-- 生命周期筛选：segmented small+block（等分撑满单行）。原文字钮行
              在 264px 窄栏里会折成两行（"已退役"掉行）。 -->
         <eb-segmented v-model="activeFilter" :options="filterOptions" size="small" block />
-        <div v-for="c in visibleClusters" :key="c._id" class="rail-item" :class="{ cur: clusterCur && clusterCur.cluster._id === c._id }"
-             @click="openCluster(c._id)">
+        <!-- 列表项此前是无 role 的 div @click：鼠标能用，键盘到不了，读屏也念不出这是
+             一个可选项。簇列表是这一页的主入口，所以补 role/tabindex/Enter+Space。 -->
+        <div v-for="c in visibleClusters" :key="c._id" class="rail-item" role="button" tabindex="0"
+             :aria-pressed="clusterCur && clusterCur.cluster._id === c._id"
+             :class="{ cur: clusterCur && clusterCur.cluster._id === c._id }"
+             @click="openCluster(c._id)" @keydown.enter.prevent="openCluster(c._id)" @keydown.space.prevent="openCluster(c._id)">
           <span class="t">{{ (c.queries && c.queries[0]) || c.name || c._id }}</span>
           <eb-status-tag :value="c.lifecycle" :statuses="lifecycleStatuses" size="small" />
         </div>
