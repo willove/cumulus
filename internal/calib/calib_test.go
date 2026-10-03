@@ -162,21 +162,26 @@ func TestReadUsagePseudoLabels(t *testing.T) {
 }
 
 // TestCompareGuardrailBoundaries pins the alarm's edge behaviour: exactly at
-// tolerance passes, one past it fails — an alarm tighter than its tolerance
+// tolerance passes, one step past it fails — an alarm tighter than its tolerance
 // would become a teacher (the trap this guardrail exists to prevent).
+//
+// The ev_rec cases are the real measured pair: the standing baseline is
+// N=12/ev_rec=7, and a same-code cold re-run came back at 6. Under the old
+// "one item" slack that pass had zero margin left; the rate floor keeps the
+// same verdict here and stops it from meaning something else at another N.
 func TestCompareGuardrailBoundaries(t *testing.T) {
 	tol := DefaultGuardrailTolerances()
-	base := GuardrailMetrics{N: 12, EvRec: 6, Tokens: 100000, LatP90MS: 20000}
+	base := GuardrailMetrics{N: 12, EvRec: 7, Tokens: 100000, LatP90MS: 20000}
 
-	// Exactly at every tolerance: ev_rec −1, tokens ×1.15, p90 ×1.30.
-	atEdge := GuardrailMetrics{N: 12, EvRec: 5, Tokens: 115000, LatP90MS: 26000}
+	// Exactly at every tolerance: ev_rec rate 0.500 (floor 0.496), tokens ×1.15, p90 ×1.30.
+	atEdge := GuardrailMetrics{N: 12, EvRec: 6, Tokens: 115000, LatP90MS: 26000}
 	if v := CompareGuardrail(base, atEdge, tol); !v.Pass {
 		t.Fatalf("at-tolerance must pass: %+v", v)
 	}
 	pastEv := atEdge
-	pastEv.EvRec = 4
+	pastEv.EvRec = 5
 	if v := CompareGuardrail(base, pastEv, tol); v.Pass {
-		t.Fatal("ev_rec two items down must alarm")
+		t.Fatal("ev_rec rate 0.417 past the 0.496 floor must alarm")
 	}
 	pastTok := atEdge
 	pastTok.Tokens = 115001
@@ -194,6 +199,28 @@ func TestCompareGuardrailBoundaries(t *testing.T) {
 	zeroSide := GuardrailMetrics{N: 12, EvRec: 5, Tokens: 1, LatP90MS: 1}
 	if v := CompareGuardrail(GuardrailMetrics{N: 12}, zeroSide, tol); !v.Pass {
 		t.Fatalf("zero baseline must not false-alarm: %+v", v)
+	}
+}
+
+// TestGuardrailEvRecIsScaleInvariant is the whole reason ev_rec moved from an
+// item slack to a rate: "one item" means different things at different slice
+// sizes. At N=100 an eight-item drop is a 14% relative move — the same relative
+// move the 12-item slice allows — and must not alarm, while one more item past
+// the floor must.
+func TestGuardrailEvRecIsScaleInvariant(t *testing.T) {
+	tol := DefaultGuardrailTolerances()
+	wide := GuardrailMetrics{N: 100, EvRec: 58, Tokens: 1000, LatP90MS: 100}
+	sameRelative := GuardrailMetrics{N: 100, EvRec: 50, Tokens: 1000, LatP90MS: 100}
+	if v := CompareGuardrail(wide, sameRelative, tol); !v.Pass {
+		t.Fatalf("58→50 at N=100 is the same relative move 7→6 allows at N=12: %+v", v)
+	}
+	if v := CompareGuardrail(wide, GuardrailMetrics{N: 100, EvRec: 49, Tokens: 1000, LatP90MS: 100}, tol); v.Pass {
+		t.Fatal("58→49 at N=100 is past the floor and must alarm")
+	}
+	// A differing slice size must not itself move the verdict: rates, not counts.
+	if v := CompareGuardrail(GuardrailMetrics{N: 12, EvRec: 6, Tokens: 1000, LatP90MS: 100},
+		GuardrailMetrics{N: 10, EvRec: 5, Tokens: 1000, LatP90MS: 100}, tol); !v.Pass {
+		t.Fatalf("equal rates across different N must not alarm: %+v", v)
 	}
 }
 

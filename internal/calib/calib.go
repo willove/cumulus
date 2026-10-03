@@ -281,18 +281,26 @@ type GuardrailVerdict struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
-// GuardrailTolerances: the guardrail alarms on REAL regressions, not noise —
-// ev_rec may drop at most one item, tokens may grow at most 15%, p90 latency
-// at most 30%. Anything tighter would make the alarm itself the teacher.
+// GuardrailTolerances: the guardrail alarms on REAL regressions, not noise.
+// Anything tighter would make the alarm itself the teacher.
+//
+// ev_rec is compared as a RATE (ev_rec/n), not an item count. The old slack of
+// "one item" silently meant "~14% on the frozen 12-item slice" and would mean
+// "~1% on a 100-item slice" — the same literal number is simultaneously too
+// loose and too tight depending on how many gold questions got frozen. Measured
+// reason to care: a same-code cold re-run took ev_rec 7→6 on the standing
+// 12-item slice, i.e. pure noise consumed the entire slack with zero margin.
 type GuardrailTolerances struct {
-	EvRecSlack int     // items
+	EvRecRatio float64 // floor: cur rate may not fall below base rate × this
 	TokRatio   float64 // ceiling
 	LatRatio   float64 // ceiling
 }
 
-// DefaultGuardrailTolerances is the standing tolerance set.
+// DefaultGuardrailTolerances is the standing tolerance set. 0.85 is not a new
+// verdict: on the standing baseline (N=12, ev_rec=7) it reproduces exactly what
+// the old "one item" slack decided — 7→6 passes, 7→5 alarms.
 func DefaultGuardrailTolerances() GuardrailTolerances {
-	return GuardrailTolerances{EvRecSlack: 1, TokRatio: 1.15, LatRatio: 1.30}
+	return GuardrailTolerances{EvRecRatio: 0.85, TokRatio: 1.15, LatRatio: 1.30}
 }
 
 // CompareGuardrail reads the current metrics against the baseline.
@@ -303,9 +311,13 @@ func CompareGuardrail(base, cur GuardrailMetrics, tol GuardrailTolerances) Guard
 		v.Reasons = append(v.Reasons, "current run has no scored rows")
 		return v
 	}
-	if cur.EvRec < base.EvRec-tol.EvRecSlack {
-		v.Pass = false
-		v.Reasons = append(v.Reasons, fmt.Sprintf("ev_rec %d→%d (floor %d)", base.EvRec, cur.EvRec, base.EvRec-tol.EvRecSlack))
+	if base.N > 0 && base.EvRec > 0 {
+		baseRate := float64(base.EvRec) / float64(base.N)
+		curRate := float64(cur.EvRec) / float64(cur.N)
+		if floor := baseRate * tol.EvRecRatio; curRate < floor {
+			v.Pass = false
+			v.Reasons = append(v.Reasons, fmt.Sprintf("ev_rec rate %.3f→%.3f (floor %.3f)", baseRate, curRate, floor))
+		}
 	}
 	tokR := 1.0
 	if base.Tokens > 0 {
