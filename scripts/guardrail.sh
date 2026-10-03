@@ -10,6 +10,9 @@
 # 用法：
 #   scripts/guardrail.sh baseline [N]   # 建立基线（新库跑 N 题冻结切片）
 #   scripts/guardrail.sh check   [N]    # 复检对照基线，回归则非零退出
+#                                       # 2026-10-04 起：check 先清学得物再跑，所以它和
+#                                       # baseline 一样是**冷跑**、同样花满一遍端点钱
+#                                       # （12 题实测 6.7–9.1 万 tokens）。别当廉价探针调。
 #   CLUS_SELFPLAY_RATE=0 强制关——护栏测量本身绝不吃采样预算。
 set -eu
 cd "$(dirname "$0")/.."
@@ -35,8 +38,18 @@ baseline)
 	;;
 check)
 	[ -s "$STATE/results.jsonl" ] || { echo "guardrail: no baseline (run: guardrail.sh baseline)" >&2; exit 2; }
-	# 复检同库重跑：缓存命中是系统行为的一部分，两模式同构故可比。
+	# 复检必须跑在和基线**同一个学得状态**上。原来这里写着「缓存命中是系统行为的一部分，
+	# 两模式同构故可比」——2026-10-04 实测为假：baseline 是 `rm -rf data` 之后跑的（冷），
+	# 而它自己那 12 题已经把簇学进了 store，于是 check 是暖的。一次暖复检实测：
+	# tokens 91,305→15,327（0.168×）、p90 42,719→14,446ms、ev_rec 7→10，判据照样 pass。
+	# 所以先清学得物（语料与向量索引是输入，不是学得物，reset 不碰），并且**要求它真的
+	# 清干净**——「调用了 reset」不等于「状态可比」，clean 不为 true 就退，不静默放行。
 	rm -f "$STATE/check.jsonl"
+	"$ask" -data "$STATE/data" reset learned -yes >/dev/null
+	"$ask" -data "$STATE/data" learning | grep -q '"clean": true' || {
+		echo "guardrail: learned state still dirty after reset — a warm re-check is not comparable to a cold baseline" >&2
+		exit 1
+	}
 	"$ask" -data "$STATE/data" eval-run -file "$STATE/items.jsonl" -out "$STATE/check.jsonl" \
 		-tag guardrail-check -limit "$N" > /dev/null
 	"$ask" -data "$STATE/data" calib -guardrail check -rows "$STATE/check.jsonl"
