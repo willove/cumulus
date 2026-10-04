@@ -14,14 +14,16 @@ import { useChatEngine, useChatSession, openai, readSseFrames } from "@wil-works
 import { nsSel, pane, withNS } from "../state.js";
 import { api, requestJSON, jsonPost } from "../api.js";
 
-// 服务端 stage 键 → 中文名。顺序即流水线顺序（时间轴按它排序）。
-export const STAGE_ORDER = ["analyze", "cascade", "sample", "synth", "deep_sample", "deep_synth"];
+// 服务端 stage 键 → 中文名。顺序即流水线顺序（时间轴按它排序）；rewrite
+// 排最前：词汇鸿沟改写发生在候选装载时，先于 fast 的 analyze。
+export const STAGE_ORDER = ["rewrite", "analyze", "cascade", "sample", "synth", "deep_sample", "deep_synth"];
 const STAGE_TEXT = {
   started: "正在分析问题与检索意图",
   working: "",
   sampling: "正在采样证据窗口",
   synthesize: "正在合成答案",
   refused: "语料中没有能回答这个问题的依据，正在整理最接近的条文",
+  rewrite: "词汇鸿沟改写检索词",
   analyze: "分析问题与检索意图",
   cascade: "关键词级联排序候选文档",
   sample: "采样并评分证据窗口",
@@ -30,6 +32,42 @@ const STAGE_TEXT = {
   deep_synth: "深度合成答案",
 };
 export function stageText(name) { return STAGE_TEXT[name] || name; }
+
+// 阶段 detail 载荷 → 时间轴里的「这步干了什么」行。键与后端 stage 事件的
+// detail 字段一一对应（fast.go / deep.go / loadCandidates 的 rewriteNote）。
+const CASCADE_ARM_TEXT = { primary: "主词命中", fallback: "备选词命中", expanded: "扩展词命中" };
+export function stageDetailLines(name, d) {
+  if (!d || typeof d !== "object") return [];
+  const out = [];
+  if (name === "rewrite" && d.from && d.to) out.push(`「${d.from}」→「${d.to}」`);
+  if (name === "analyze") {
+    if (d.intent) out.push("意图 " + d.intent);
+    if (Array.isArray(d.primary) && d.primary.length) out.push("关键词 " + d.primary.join("、"));
+  }
+  if (name === "cascade") {
+    out.push(CASCADE_ARM_TEXT[d.arm] || String(d.arm || ""));
+    if (Array.isArray(d.terms) && d.terms.length) out.push("扩展词 " + d.terms.slice(0, 5).join("、"));
+    if (Array.isArray(d.top) && d.top.length) out.push("候选 " + d.top.join("、"));
+  }
+  if (name === "sample") {
+    const bits = [];
+    if (d.source) bits.push(String(d.source));
+    if (d.kept != null) bits.push(`过线窗口 ${d.kept} 个`);
+    if (d.bridge) bits.push("会话桥接");
+    if (bits.length) out.push(bits.join(" · "));
+  }
+  if (name === "deep_sample") {
+    const bits = [];
+    if (d.facts != null) bits.push(`事实 ${d.facts} 项`);
+    if (d.admitted != null) bits.push(`收容窗口 ${d.admitted} 个`);
+    if (Array.isArray(d.missing) && d.missing.length) {
+      const shown = d.missing.slice(0, 4).join("、");
+      bits.push(`未覆盖：${shown}${d.missing.length > 4 ? "…" : ""}`);
+    }
+    if (bits.length) out.push(bits.join(" · "));
+  }
+  return out.filter(Boolean);
+}
 export function fmtMS(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms"; }
 
 // token 去向的分段名 → 人话（引擎侧键：rewrite/fast/decompose/rank/score/
@@ -65,23 +103,38 @@ export function usageOf(stats) {
   };
 }
 
+// blk 块存储的 source id 是 URL 编码路径（src:blk/%E6%B3%95%E5%BE%8B/…/000001#1），
+// 展示层必须解码成人话；原始 id 仍随 `raw` 字段携带供点开原文时反查。
+export function displaySourceId(id) {
+  if (!id || typeof id !== "string") return id || "";
+  try {
+    return decodeURIComponent(id).replace(/^src:/, "").replace(/^blk\//, "");
+  } catch {
+    return id; // 残缺编码序列：整段原样，连前缀也不剥
+  }
+}
+
 // SSE citations 事件与会话恢复共用一条引用映射：EbChatSources 吃
-// {index, title, snippet, source}；未定位的窗口在标题上明说，不藏在交互里。
+// {index, title, snippet, source}；source 只作展示（解码后），raw 留原始 id。
+// 未定位的窗口在标题上明说，不藏在交互里。
 export function mapRef(r) {
   return {
     index: r.index,
     title: (r.title || r.source_id || "") + (r.span ? " · " + r.span : ""),
-    snippet: r.quote, source: r.source_id, resolved: r.resolved,
+    snippet: r.quote, source: displaySourceId(r.source_id), raw: r.source_id, resolved: r.resolved,
     status: r.resolved === false ? "未定位" : undefined,
   };
 }
 
 // 一条消息的时间轴视图：live 阶段（正在跑）以 status=streaming 的消息为准，
-// 用实时事件累积；完成后用 done 事件里的权威分段（微秒 → 毫秒）重算。
+// 用实时事件累积；完成后用 done 事件里的权威分段（微秒 → 毫秒）重算，并把
+// live 累积的 detail 并回来——权威值管时间，live 行管「这步干了什么」。
 export function timelineFor(message) {
   const live = message.status !== "done" && message.status !== "error";
   if (!live && message.stats?.stages) {
-    const ms = Object.entries(message.stats.stages).map(([name, us]) => ({ name, ms: Math.round(us / 1000) }));
+    const detailByName = new Map((message.stages || []).filter((r) => r.detail).map((r) => [r.name, r.detail]));
+    const ms = Object.entries(message.stats.stages).map(([name, us]) =>
+      ({ name, ms: Math.round(us / 1000), detail: detailByName.get(name) }));
     ms.sort((a, b) => STAGE_ORDER.indexOf(a.name) - STAGE_ORDER.indexOf(b.name));
     return ms;
   }
@@ -185,7 +238,7 @@ export function useChatPane() {
     const m = () => messages.value.find((x) => x.id === messageId);
     switch (ext?.kind) {
       case "stage": {
-        const row = { name: p.name || "", ms: p.ms || p.stage_ms || 0, elapsed_ms: p.elapsed_ms || 0 };
+        const row = { name: p.name || "", ms: p.ms || p.stage_ms || 0, elapsed_ms: p.elapsed_ms || 0, detail: p.detail || null };
         liveStages.value = [...liveStages.value, row];
         const idx = STAGE_ORDER.indexOf(row.name);
         liveStage.value = idx >= 0 && idx + 1 < STAGE_ORDER.length ? STAGE_ORDER[idx + 1] : "";
@@ -198,6 +251,15 @@ export function useChatPane() {
           }
         }
         if (p.elapsed_ms) elapsed.value = Math.round(p.elapsed_ms / 1000);
+        return "";
+      }
+      case "reasoning": {
+        // 合成调用的思考原文：端点反正会生成，这里只是不再丢弃。逐块追加，
+        // 不持久化（会话恢复只有分段耗时）；多遍合成（先 FAST 后 DEEP）时
+        // 原文连续拼接，段界以时间轴为准。
+        ensureWireMessage(messageId);
+        const msg = m();
+        if (msg) msg.reasoning = (msg.reasoning || "") + (p.text || "");
         return "";
       }
       case "citations": {

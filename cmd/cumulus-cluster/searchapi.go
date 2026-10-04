@@ -98,6 +98,10 @@ type searchStack struct {
 	// admission ranker closure reads it at call time (after the ledger and
 	// session stack have been folded in), so one stack build serves any query.
 	usage *usageWeights
+	// rewriteNote, when wired by the SSE face, receives the vocab-gap
+	// rewrite actually applied (original → rewritten) so the stage stream can
+	// show it. nil in non-stream faces.
+	rewriteNote func(from, to string)
 	// idx is the in-memory inverted index (P0): built lazily on the first
 	// query, reused for the process lifetime (a corpus change needs a
 	// serve restart — same v1 contract as the vocab table).
@@ -332,7 +336,13 @@ func (ss *searchStack) loadCandidates(ctx context.Context, query string) ([]sour
 				return ss.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
 			}, string(llm.StageEffort("REWRITE", llm.ThinkingMedium)))
 		}
-		bm25Top := ss.idx.RewriteWhenEmpty(ctx, query, list, 50, rewriter)
+		bm25Top, rewritten := ss.idx.RewriteWhenEmpty(ctx, query, list, 50, rewriter)
+		if rewritten != "" && ss.rewriteNote != nil {
+			// The rewrite is user-visible knowledge: 闯红灯 → 不按交通信号灯
+			// 指示通行 explains why the retrieval terms changed. Surfaced as a
+			// stage event so the timeline carries it.
+			ss.rewriteNote(query, rewritten)
+		}
 		if len(bm25Top) > 0 {
 			// Rerank only on a SEMANTIC embedder. The local-hash-64 fallback
 			// produces meaning-free vectors: "reranking" by them scrambles
@@ -608,12 +618,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		// must take st.mu first, and the lock ORDER against the SSE
 		// writer mutex must be designed then — do not bolt a lock on
 		// here without that design.
-		recStage := func(name string, d time.Duration) {
+		recStage := func(name string, d time.Duration, detail any) {
 			stageMu.Lock()
 			stages[name] = d.Microseconds()
 			stageMu.Unlock()
 			if streamSt.onStage != nil {
-				streamSt.onStage(name, d)
+				streamSt.onStage(name, d, detail)
 			}
 		}
 		emitDelta := func(chunk string) {
@@ -642,6 +652,12 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		}
 		ss.fe.Stages = recStage
 		ss.dE.Stages = recStage
+		// Vocab-gap rewrite visibility: loadCandidates fires this when the
+		// query it ranked with is not the query the user typed. Rides the
+		// stage stream so the timeline explains the term change.
+		ss.rewriteNote = func(from, to string) {
+			recStage("rewrite", 0, map[string]any{"from": from, "to": to})
+		}
 		// 使用先验：本问词元命中的账本权重 ∪ 本会话证据栈，装进 prior
 		// 的 history 臂。失败/关闭都是静默降级，不影响检索本身。
 		applyUsagePrior(r.Context(), c, in.NS, in.Query, in.Session, ss.fe, ss.dE, ss.usage)
@@ -656,6 +672,18 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		// the whole-summary response.
 		ss.fe.SynthDelta = emitDelta
 		ss.dE.SynthDelta = emitDelta
+		// The synthesizer's chain-of-thought, streamed live as its own frame
+		// kind (chat wire: cumulus extension "reasoning"). Stream-only: the
+		// JSON face has nowhere to put an incrementally arriving text.
+		if stream {
+			emitReasoning := func(chunk string) {
+				if streamSt.emit != nil {
+					streamSt.emit("status", map[string]any{"stage": "reasoning", "text": chunk})
+				}
+			}
+			ss.fe.ReasoningDelta = emitReasoning
+			ss.dE.ReasoningDelta = emitReasoning
+		}
 		if !stream {
 			res, err := runSearch(r.Context(), ss, in.Query)
 			if err != nil {
@@ -822,7 +850,7 @@ type streamState struct {
 	mu       *sync.Mutex
 	streamed *int
 	emit     func(event string, data any)
-	onStage  func(name string, d time.Duration)
+	onStage  func(name string, d time.Duration, detail any)
 }
 
 func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool, stages map[string]int64, st *streamState, wire wireFunc) (deep.Result, error) {
@@ -856,12 +884,16 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	if st != nil {
 		st.mu.Lock()
 		st.emit = emit
-		st.onStage = func(name string, d time.Duration) {
-			emit("status", map[string]any{
+		st.onStage = func(name string, d time.Duration, detail any) {
+			frame := map[string]any{
 				"stage": "stage", "name": name,
 				"elapsed_ms": time.Since(started).Milliseconds(),
 				"stage_ms":   d.Milliseconds(),
-			})
+			}
+			if detail != nil {
+				frame["detail"] = detail
+			}
+			emit("status", frame)
 		}
 		st.mu.Unlock()
 		defer func() {

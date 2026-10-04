@@ -1,7 +1,7 @@
 <template>
   <div class="pane">
     <div class="mon-toolbar">
-      <span class="tiny">检索与系统指标为整个服务的累计值；知识层为当前知识库。每 5 秒自动刷新。</span>
+      <span class="tiny">检索与系统指标为全服务累计；知识层为当前知识库。</span>
       <eb-button :loading="monBusy" size="small" @click="loadMonitor">刷新</eb-button>
     </div>
     <eb-alert v-if="monError" type="error" :title="monError" :closable="false" show-icon />
@@ -17,8 +17,7 @@
           <div>
             <div class="chart-cap">最近 {{ recentQueries.length }} 次查询耗时（毫秒，右端最新）</div>
             <eb-chart v-if="recentQueries.length >= 2" :options="latencyOptions" :height="240" aria-label="最近查询耗时" />
-            <eb-empty-state v-else icon="line-chart" size="compact" title="还没有查询样本"
-                            description="在工作台问一句，这里就会开始画趋势。" />
+            <eb-empty-state v-else icon="line-chart" size="compact" title="还没有查询样本" />
           </div>
           <div>
             <div class="chart-cap">档位分布（累计）</div>
@@ -33,7 +32,7 @@
           <div class="ratio">
             <div class="ratio-head"><span>重复问题命中缓存</span><b class="num">{{ fmtPct(mon.retrieval.reuse_rate) }}</b></div>
             <eb-progress :percentage="pct(mon.retrieval.reuse_rate)" />
-            <div class="tiny">{{ mon.retrieval.reuse_hits }} / {{ mon.queries }} 次查询走了「越问越快」的复用路径</div>
+            <div class="tiny">{{ mon.retrieval.reuse_hits }} / {{ mon.queries }} 次查询命中复用</div>
           </div>
           <div class="ratio">
             <div class="ratio-head"><span>平均置信度</span><b class="num">{{ (mon.retrieval.avg_confidence || 0).toFixed(3) }}</b></div>
@@ -73,8 +72,7 @@
           <div>
             <div class="chart-cap">簇生命周期</div>
             <eb-chart v-if="lifecycleData.length" :options="lifecycleOptions" :height="220" aria-label="簇生命周期分布" />
-            <eb-empty-state v-else icon="database" size="compact" title="当前库还没有知识簇"
-                            description="检索命中同主题问题后会自动成簇，同类问题越问越快。" />
+            <eb-empty-state v-else icon="database" size="compact" title="当前库还没有知识簇" />
           </div>
           <div>
             <div class="chart-cap">平均置信 / 热度</div>
@@ -149,7 +147,7 @@
             <template #default="{ row }"><span class="num">{{ row.latency_ms }} ms</span></template>
           </eb-table-column>
         </eb-table>
-        <eb-empty-state v-else icon="search" size="compact" title="还没有查询" description="每次检索都会在这里留一行。" />
+        <eb-empty-state v-else icon="search" size="compact" title="还没有查询" />
       </eb-section-card>
     </template>
   </div>

@@ -302,9 +302,15 @@ func (idx *Index) VocabGapFraction(query string) float64 {
 // This is the "just try once" the user asked for: 帮信罪 → 帮助信息网络
 // 犯罪活动罪 → retry. If the rewrite still yields nothing, the honest empty
 // result stands.
-func (idx *Index) RewriteWhenEmpty(ctx context.Context, query string, sources []source.Source, k int, rewrite Rewriter) []source.Source {
+// RewriteWhenEmpty reranks via BM25 and, when the first pass looks like a
+// vocabulary gap (top score under the near-zero line, or the discriminative
+// terms missing from the corpus), makes ONE rewritten attempt. The second
+// return is the rewritten query actually used — "" means the original ranked
+// (or the rewrite never fired); it exists so callers can show the user WHY
+// the retrieval terms changed, not just that they did.
+func (idx *Index) RewriteWhenEmpty(ctx context.Context, query string, sources []source.Source, k int, rewrite Rewriter) ([]source.Source, string) {
 	if idx == nil {
-		return sources
+		return sources, ""
 	}
 	// Confidence check, two independent miss signatures:
 	//   1. top score below the near-zero line — nothing matched at all;
@@ -317,20 +323,20 @@ func (idx *Index) RewriteWhenEmpty(ctx context.Context, query string, sources []
 	if (topScore >= MinRewriteScore && gap < RewriteGapFraction) || rewrite == nil {
 		ids := idx.Rank(query, k)
 		if len(ids) == 0 {
-			return sources // no rewriter or no signal — full list
+			return sources, "" // no rewriter or no signal — full list
 		}
-		return buildFromIDs(ids, sources)
+		return buildFromIDs(ids, sources), ""
 	}
 	// Low confidence: one rewrite attempt.
 	rewritten, err := rewrite(ctx, query)
 	if err != nil || rewritten == "" {
-		return sources // rewrite failed — full list fallback
+		return sources, "" // rewrite failed — full list fallback
 	}
 	ids := idx.Rank(rewritten, k)
 	if len(ids) == 0 {
-		return nil // rewrite still finds nothing — honest empty
+		return nil, rewritten // rewrite still finds nothing — honest empty
 	}
-	return buildFromIDs(ids, sources)
+	return buildFromIDs(ids, sources), rewritten
 }
 
 // buildFromIDs returns active sources matching the ranked IDs, in rank order.

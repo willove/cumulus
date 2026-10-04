@@ -267,7 +267,8 @@ test("send uses one lazily-materialized session, preserves two rounds and avoids
   assert.deepEqual(plain(state.messages.value.map((m) => [m.role, m.content])), [["user", "question"], ["assistant", "answer"]]);
   assert.equal(state.messages.value[1].status, "done");
   assert.ok(state.messages.value[1].thinkContent);
-  assert.equal(state.sources.value[0].source, "src:a");
+  assert.equal(state.sources.value[0].source, "a", "display source is the decoded id");
+  assert.equal(state.sources.value[0].raw, "src:a", "the raw id survives for the drawer lookup");
   // token 去向：done 事件的分段计量透传到运行卡（视图的 tokenTrailOf 读它）。
   assert.deepEqual(plain(state.stats.value.stages_tokens), { fast: 7701, score: 7225, synth: 7818 });
   // eb-chatbot inserts the second user message before emitting send.
@@ -1266,7 +1267,8 @@ test("streaming synthesis, stage timeline and replace semantics", async () => {
   assert.equal(msg.stats.cluster_id, "c9");
   assert.deepEqual(Object.keys(msg.stats.stages).sort(), ["analyze", "cascade", "deep_sample", "deep_synth"]);
   // 引用挂到本条消息（历史恢复靠它）。
-  assert.equal(msg.sources[0].source, "src:法");
+  assert.equal(msg.sources[0].source, "法");
+  assert.equal(msg.sources[0].raw, "src:法");
 });
 
 // 刷新持久化：会话文档里带回 sources/stats 时，重新打开会话引用卡和运行卡都在。
@@ -1285,7 +1287,8 @@ test("history restore carries citations, stats and stage timeline", async () => 
   await state.openSession({ id: firstID });
   const restored = state.messages.value[1];
   assert.equal(restored.sources.length, 2);
-  assert.equal(restored.sources[0].source, "src:a");
+  assert.equal(restored.sources[0].source, "a");
+  assert.equal(restored.sources[0].raw, "src:a");
   // 未定位窗口：status 字段（库 0.4.0 起与域名同行的元信息），标题保持干净。
   assert.equal(restored.sources[1].title, "失佚.txt");
   assert.equal(restored.sources[1].status, "未定位");

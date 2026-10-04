@@ -269,7 +269,7 @@ func evalRun(ctx context.Context, c cumulite.Port, st *ingest.Store, sourcesColl
 				return stack.chat.CompleteWithEffort(ctx, prompt, llm.ThinkingLevel(effort))
 			}, string(llm.StageEffort("REWRITE", llm.ThinkingMedium)))
 		}
-		runList := evalIdx.RewriteWhenEmpty(ctx, it.Query, list, 50, rewriter)
+		runList, _ := evalIdx.RewriteWhenEmpty(ctx, it.Query, list, 50, rewriter)
 		// Same semantic-only gate as serve's loadCandidates: hash vectors
 		// "rerank" by meaningless cosine and scramble BM25 order.
 		if len(runList) > 0 && embedFn != nil && embedLabel != "local-hash-64" {

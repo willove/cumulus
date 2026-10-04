@@ -8,7 +8,7 @@
       <eb-button type="primary" :loading="busy" :disabled="!question.trim()" @click="run">测一下</eb-button>
     </div>
     <eb-alert v-if="error" type="error" :title="error" :closable="false" show-icon />
-    <div v-if="busy" class="tiny" role="status">检索中…（走完整检索管线，但不落会话）</div>
+    <div v-if="busy" class="tiny" role="status">检索中…</div>
 
     <template v-if="result">
       <div class="test-summary">
@@ -25,7 +25,7 @@
         <article v-for="(r, i) in refs" :key="i" class="evidence-card">
           <div class="evidence-head">
             <b class="num">{{ r.index }}</b>
-            <span class="evidence-src" :title="r.source_id">{{ r.title || r.source_id }}</span>
+            <span class="evidence-src" :title="displaySourceId(r.source_id)">{{ r.title || displaySourceId(r.source_id) }}</span>
             <span v-if="r.span" class="tiny num span">{{ r.span }}</span>
             <span class="tiny num">{{ r.start }}–{{ r.end }}</span>
             <eb-tag v-if="r.resolved === false" type="warning" size="small">未定位</eb-tag>
@@ -36,13 +36,12 @@
 
       <!-- 答案收成一行可展开——测试的主语是证据，不是答案。 -->
       <details v-if="result.answer?.summary" class="answer-fold">
-        <summary>这次检索给出的答案（折叠查看）</summary>
+        <summary>给出的答案</summary>
         <p class="answer-body">{{ result.answer.summary }}</p>
       </details>
     </template>
     <div v-else-if="!busy && !error" class="empty-guide">
       <h3>测一问，看召回</h3>
-      <p class="sub">同一条检索管线：问题 → 证据窗口与出处。答案质量先看证据对不对。</p>
     </div>
   </div>
 </template>
@@ -51,6 +50,7 @@
 import { ref, computed } from "vue";
 import { nsSel } from "../state.js";
 import { requestJSON, jsonPost } from "../api.js";
+import { displaySourceId } from "../panes/chat.js";
 
 const question = ref("");
 const busy = ref(false);

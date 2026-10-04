@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/source"
 )
@@ -112,9 +113,55 @@ func TestNoDeferLineSynthesizesAsBefore(t *testing.T) {
 	}
 }
 
+// The ruler drift (live 2026-10-04, 「闯红灯有什么处罚」 142s run): the cover
+// arm measured whole-query lexical coverage of the (possibly rewritten)
+// sampleQuery, while the escalation measures per-fact coverage of the SAME
+// samples (facts.ReportFor). A query the expander rewrote to corpus vocabulary
+// covers the sentence lexically (cov→1, conf high) yet leaves an uncoverable
+// fact open — the render ran (64.8s) and was discarded by the very escalation
+// that could see the missing fact. With DeferFacts both sides are the same
+// ruler on the same samples, so the drift is structurally impossible.
+func TestDeferCoverUsesTheEscalationRuler(t *testing.T) {
+	e, calls, _ := deferFixture(t, 9) // confident scorer
+	e.DeferThinCover = true
+	// The body carries the whole query VERBATIM → lexical cov is exactly 1;
+	// the old ruler saw full coverage and let the render run.
+	full := []source.Source{source.New("cfg", "md", "file://cfg", "cfg", "zh",
+		strings.Repeat("正文内容。", 40)+" 连接池最大连接数是多少？答：128。", nil)}
+	// …but the decomposition asks a second fact whose keywords the body never
+	// carries — the escalation's ruler sees an open requirement.
+	e.DeferFacts = []facts.Fact{
+		{ID: "f1", Query: "连接池最大连接数是多少"},
+		{ID: "f2", Query: "许可证过期未续怎么办"},
+	}
+	ans, err := e.Search(context.Background(), "连接池最大连接数是多少", full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ans.SynthDeferred {
+		t.Fatal("a fact-uncovered answer must defer even when whole-query coverage is full")
+	}
+	if *calls != 0 {
+		t.Fatalf("render ran anyway: %d calls — this is the discarded-render waste", *calls)
+	}
+	// The same body fully satisfies a decomposition without the open fact →
+	// the answer stands and synthesizes exactly once.
+	e2, calls2, _ := deferFixture(t, 9)
+	e2.DeferThinCover = true
+	e2.DeferFacts = []facts.Fact{{ID: "f1", Query: "连接池最大连接数是多少"}}
+	ans2, err := e2.Search(context.Background(), "连接池最大连接数是多少", full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ans2.SynthDeferred || *calls2 != 1 {
+		t.Fatalf("a fully fact-covered answer must synthesize: deferred=%v calls=%d", ans2.SynthDeferred, *calls2)
+	}
+}
+
 // The cover arm: armed by the DEEP tier for K>1 decompositions, it defers a
 // HIGH-confidence answer whose whole-query coverage is thin — the measured
 // two-question case escalates on cover-incompleteness, not on confidence.
+// (No DeferFacts set: this pins the legacy lexical fallback ruler.)
 func TestDeferThinCoverArmsIndependentlyOfConfidence(t *testing.T) {
 	e, calls, srcs := deferFixture(t, 9) // confident scorer
 	e.DeferThinCover = true

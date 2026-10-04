@@ -1,12 +1,10 @@
 <template>
   <section class="pane knowledge-page" aria-labelledby="knowledge-heading">
     <header class="page-heading">
-      <div><span class="eyebrow">知识 / {{ libraryLabel }}</span><h2 id="knowledge-heading">知识</h2>
-        <p class="sub">问过的问题被归并成答案簇，下次同类问题毫秒级复用。这一页的主操作是<b>复核</b>：用当前语料逐窗校验证据还对不对。</p></div>
+      <div><span class="eyebrow">知识 / {{ libraryLabel }}</span><h2 id="knowledge-heading">知识</h2></div>
     </header>
     <div v-if="!hasBucket" class="empty-guide">
       <h3>先创建一个知识库</h3>
-      <p class="sub">每个知识库独立保存文档、学得的答案簇和会话，互不干扰。</p>
       <eb-button type="primary" @click="$emit('create-library')">新建知识库</eb-button>
     </div>
     <template v-else>
@@ -21,7 +19,7 @@
         </div>
         <div class="ov-line">
           <span class="ov-line-label">证据窗口</span>
-          <span class="tiny">{{ evidenceCount == null ? "—" : evidenceCount }} 个原文窗口被簇引用；复核就是用当前语料重新校验它们。</span>
+          <span class="tiny">{{ evidenceCount == null ? "—" : evidenceCount }} 个原文窗口被簇引用</span>
           <eb-button link size="small" @click="pane = 'corpus'">看语料</eb-button>
         </div>
       </div>
@@ -35,7 +33,6 @@
       <section class="affinity" aria-labelledby="affinity-heading">
         <div class="affinity-head">
           <h3 id="affinity-heading">词档关联</h3>
-          <p class="tiny">查一个词被关联到哪些文档、权重多少（按权重取前 50）。这份账本参与排序，所以它也是「为什么这篇排在前头」的答案。</p>
         </div>
         <div class="affinity-bar">
           <eb-input v-model="token" :clearable="false" aria-label="要查询的词" placeholder="输入一个词，例如 连接池" @keydown.enter="lookup()" />
@@ -45,11 +42,11 @@
         <template v-else-if="searched">
           <div v-if="!docs.length" class="empty-guide">
             <h3>「{{ searched }}」没有关联记录</h3>
-            <p class="tiny">账本是提问时攒下来的——这个词还没在任何一次检索里被记过。去问答页问一句带它的问题，再回来看。</p>
+            <p class="tiny">提问里用到这个词后才会入账。</p>
           </div>
           <ul v-else class="aff-list">
             <li v-for="d in docs" :key="d.source_id" class="aff-row">
-              <span class="aff-title" :title="d.source_id">{{ titleOf(d.source_id) }}</span>
+              <span class="aff-title" :title="displaySourceId(d.source_id)">{{ titleOf(d.source_id) }}</span>
               <span class="aff-bar"><i :style="{ width: barWidth(d.weight) }" /></span>
               <b class="num aff-weight">{{ fmtWeight(d.weight) }}</b>
             </li>
@@ -87,6 +84,7 @@ import { ref, computed, onMounted, watch } from "vue";
 import { useLibraryPane } from "../panes/library.js";
 import { useClustersPane, clusterStats } from "../panes/clusters.js";
 import { useAffinityPane } from "../panes/affinity.js";
+import { displaySourceId } from "../panes/chat.js";
 import { documents, loadDocuments, hasBucket, libraryLabel, nsSel, pane } from "../state.js";
 import ClustersView from "./ClustersView.vue";
 

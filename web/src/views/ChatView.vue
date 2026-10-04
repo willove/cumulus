@@ -8,7 +8,7 @@
                      :time-format="fmtSessionTime"
                      @select="pickSession" @create="startSession" @remove="delSession"
                      @pin="(id, pinned) => setFlag(id, { pinned })" @archive="(id, archived) => setFlag(id, { archived })">
-        <template #empty><p class="tiny rail-note">提问后会自动保存会话，方便继续追问。</p></template>
+        <template #empty><p class="tiny rail-note">提问后自动保存会话。</p></template>
       </EbChatThreads>
     </aside>
     <section class="conversation">
@@ -25,7 +25,6 @@
       <div v-if="!hasBucket" class="welcome">
         <span class="welcome-eyebrow">开始使用 Cumulus</span>
         <h2>让文档成为可追溯的答案</h2>
-        <p>先创建一个知识库，再导入文档。每次提问都只检索当前库，并保留可核对的原文证据。</p>
         <eb-button type="primary" @click="$emit('create-library')">创建第一个知识库</eb-button>
       </div>
       <div v-else-if="documentsError && !messages.length" class="welcome">
@@ -35,7 +34,6 @@
       <div v-else-if="!documents.length && !messages.length" class="welcome">
         <span class="welcome-eyebrow">知识库已就绪</span>
         <h2>添加文档，开始提问</h2>
-        <p>当前知识库还没有文档。支持本地目录、候选扫描，以及 JSON、CSV、Parquet 等结构化文件。</p>
         <eb-button type="primary" @click="pane = 'corpus'">添加文档</eb-button>
       </div>
       <template v-else>
@@ -46,7 +44,6 @@
           <div v-if="!messages.length" class="welcome">
             <span class="welcome-eyebrow">基于 {{ documents.length }} 篇文档</span>
             <h2>你想从文档中了解什么？</h2>
-            <p>回答会附上证据窗口、分步耗时和可核对的原文引用。</p>
             <EbChatSuggestion class="sample-questions" layout="column" :items="samples" @pick="(s) => onSend(s.prompt)" />
           </div>
           <EbChatList v-show="messages.length" class="conv-list" :messages="messages"
@@ -67,12 +64,21 @@
                     <span class="tl-dot" :class="{ live: st.ms === 0 && message.status !== 'done' }" />
                     <span class="tl-name">{{ stageText(st.name) }}</span>
                     <span class="tl-ms">{{ st.ms ? fmtMS(st.ms) : (message.status === 'done' ? '' : '进行中…') }}</span>
+                    <div v-if="stageDetailLines(st.name, st.detail).length" class="tl-detail">
+                      <span v-for="(line, j) in stageDetailLines(st.name, st.detail)" :key="j">{{ line }}</span>
+                    </div>
                   </div>
+                </details>
+                <!-- 合成思考原文：端点生成的推理流原样折叠在此（B 线）。
+                     只在 live 会话出现——会话恢复不带它。 -->
+                <details v-if="message.reasoning" class="run-timeline reasoning-fold">
+                  <summary class="tl-summary">合成思考原文</summary>
+                  <pre class="tl-reasoning">{{ message.reasoning }}</pre>
                 </details>
                 <!-- 引用：编号出处列表（EbChatSources），点条目开原文抽屉。
                      未定位窗口在标题上标注，不藏进交互。 -->
                 <EbChatSources v-if="message.sources?.length" :items="message.sources"
-                               @item-click="(item) => item.source && preview(item.source, item.snippet)" />
+                               @item-click="(item) => (item.raw || item.source) && preview(item.raw || item.source, item.snippet)" />
                 <!-- 运行卡：icon + 指标 + 数据的统计行，不用 tag。簇 id 是内部
                      机制标识，不上可见文案——挂在整行 title 上供排查悬停查看。 -->
                 <div v-if="message.stats" class="run-card" :title="message.stats.cluster_id ? '知识簇 ' + message.stats.cluster_id : undefined">
@@ -121,7 +127,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { EbChatThreads, EbChatList, EbChatMarkdown, EbChatSources, EbChatSuggestion, EbChatUsage, EbAiPromptBox } from "@wil-works/evoke-chat";
-import { useChatPane, timelineFor, stageText, fmtMS, usageOf, STAGE_ORDER } from "../panes/chat.js";
+import { useChatPane, timelineFor, stageText, stageDetailLines, fmtMS, usageOf, STAGE_ORDER } from "../panes/chat.js";
 import { documents, documentsBusy, documentsError, hasBucket, libraryLabel, loadDocuments, nsSel, pane } from "../state.js";
 import { requestJSON } from "../api.js";
 import SourcePreview from "./SourcePreview.vue";
@@ -229,6 +235,16 @@ onMounted(loadDocuments);
 .welcome h2 { margin: 16px 0 12px; font-size: clamp(22px, 2.5vw, 30px); line-height: 1.4; letter-spacing: -.7px; }
 .welcome p { margin: 0 0 24px; max-width: 440px; color: var(--eb-text-color-secondary); font-size: 14px; line-height: 1.9; }
 .sample-questions { display: flex; justify-content: center; }
+/* 引用卡的来源行：解码后的路径最多两行，超出截断（组件自身的单行省略
+   对长路径太狠，整段路径值得两行）。 */
+.conv-list :deep(.eb-chat-sources__meta) {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  word-break: break-all;
+}
 .user-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 悬浮进度条：贴在输入区上方的一行胶囊——当前段 + 第几段/共几段 + 本段/
      总耗时，加载图标常转。 */
@@ -249,7 +265,9 @@ onMounted(loadDocuments);
 .tl-summary::-webkit-details-marker { display: none; }
 .tl-summary::before { content: ""; width: 0; height: 0; border-left: 4px solid var(--eb-text-color-placeholder); border-top: 3px solid transparent; border-bottom: 3px solid transparent; transition: transform .15s ease; }
 .run-timeline[open] .tl-summary::before { transform: rotate(90deg); }
-.tl-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--eb-text-color-secondary); padding-top: 4px; }
+.tl-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--eb-text-color-secondary); padding-top: 4px; flex-wrap: wrap; }
+.tl-detail { flex-basis: 100%; padding-left: 15px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--eb-text-color-placeholder); line-height: 1.6; }
+.reasoning-fold .tl-reasoning { margin: 8px 0 0; max-height: 220px; overflow: auto; font-size: 12px; line-height: 1.7; color: var(--eb-text-color-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 .tl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--eb-color-primary); flex: none; }
 .tl-dot.live { background: var(--eb-text-color-placeholder); animation: tl-pulse 1.2s ease-in-out infinite; }
 @keyframes tl-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }

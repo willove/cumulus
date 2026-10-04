@@ -140,7 +140,7 @@
             <eb-table-column prop="bytes" label="大小" width="100" :formatter="row => fmtSize(row.bytes)" />
             <eb-table-column prop="ingested_at" label="导入时间" width="170" :formatter="row => fmtWhen(row.ingested_at)" />
           </eb-table>
-          <div v-else-if="!documentsBusy && !documentsError" class="docs-empty"><h3>{{ documents.length ? '没有匹配的文档' : '知识库里还没有文档' }}</h3><p class="sub">{{ documents.length ? '试试其他关键词。' : '使用导入面板添加文件，完成后文档会自动出现在这里。' }}</p><eb-button v-if="!documents.length && !addOpen" @click="addOpen = true">添加文档</eb-button></div>
+          <div v-else-if="!documentsBusy && !documentsError" class="docs-empty"><h3>{{ documents.length ? '没有匹配的文档' : '知识库里还没有文档' }}</h3><eb-button v-if="!documents.length && !addOpen" @click="addOpen = true">添加文档</eb-button></div>
           <div v-if="documents.length" class="document-footer"><span class="tiny">{{ filteredDocuments.length === documents.length ? documents.length + ' 篇文档' : filteredDocuments.length + ' / ' + documents.length + ' 篇' }}</span><eb-button size="small" @click="pane = 'chat'">去提问</eb-button></div>
         </div>
       </div>

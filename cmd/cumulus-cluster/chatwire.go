@@ -68,11 +68,15 @@ func newChatWire() wireFunc {
 			if m == nil {
 				return ""
 			}
-			// Stage completions carry the timeline; started/file/working stay
-			// off the chat wire (the UI's live bar reads them from extensions
-			// or the heartbeat comments).
+			// Stage completions carry the timeline; the synthesizer's
+			// chain-of-thought streams as its own kind; started/file/working
+			// stay off the chat wire (the UI's live bar reads them from
+			// extensions or the heartbeat comments).
 			if m["stage"] == "stage" {
 				return withRole(chatExt("stage", m))
+			}
+			if m["stage"] == "reasoning" {
+				return withRole(chatExt("reasoning", m))
 			}
 			return ""
 		case "content":

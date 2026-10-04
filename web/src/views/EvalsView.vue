@@ -1,13 +1,13 @@
 <template>
   <section class="pane eval-workbench" aria-labelledby="eval-heading">
     <header class="page-heading">
-      <div><span class="eyebrow">知识库 / {{ libraryLabel }}<span v-if="nsSel"> · {{ nsSel }}</span></span><h2 id="eval-heading">评测</h2><p class="sub">用固定题集检验当前库的检索与回答质量：跑一次、看逐题、比上次。</p></div>
+      <div><span class="eyebrow">知识库 / {{ libraryLabel }}<span v-if="nsSel"> · {{ nsSel }}</span></span><h2 id="eval-heading">评测</h2></div>
       <div class="form-actions">
         <eb-button :disabled="!hasBucket || busy.runs" @click="refresh">刷新</eb-button>
       </div>
     </header>
     <div v-if="!hasBucket" class="empty-guide">
-      <h3>先选择一个知识库</h3><p class="sub">在顶部选择或创建知识库并导入文档后，再回来跑评测。</p>
+      <h3>先选择一个知识库</h3><p class="sub">在顶部选择或创建知识库。</p>
     </div>
     <LegacyEvalsView v-else-if="section === 'legacy'" :key="nsSel" />
     <template v-else>
@@ -58,8 +58,8 @@
       <!-- 空态：没跑过评测时先回答“这是干嘛的”。题集已选或上传面板已展开时不再出现——
            否则它会和刚校验通过的题集同屏，一边显示「校验通过 · 2 题」一边让你上传第一个题集。 -->
       <div v-if="!runs.length && !busy.runs && !run && !datasetID && !uploadOpen" class="empty-guide eval-empty">
-        <h3>用题集检验回答质量</h3>
-        <p class="sub">题集是固定的一组「问题 + 参考答案 + 证据位置」（JSONL）。运行后系统在当前库上作答并对照评分，给出正确率、证据命中率等指标。默认离线模式只验证流程，不调用真实模型。</p>
+        <h3>还没有题集</h3>
+        <p class="sub">每行一题：问题、参考答案、证据位置（JSONL）。</p>
         <div class="form-actions"><eb-button type="primary" @click="uploadOpen = true">上传第一个题集</eb-button></div>
       </div>
       <template v-else>

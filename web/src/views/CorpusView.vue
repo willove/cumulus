@@ -1,12 +1,10 @@
 <template>
   <section class="pane corpus-page" aria-labelledby="corpus-heading">
     <header class="page-heading">
-      <div><span class="eyebrow">语料 / {{ libraryLabel }}</span><h2 id="corpus-heading">语料</h2>
-        <p class="sub">这一页只做一件事：把文档变成可检索的语料。学过什么在「知识」，跑得怎么样在「评测」。</p></div>
+      <div><span class="eyebrow">语料 / {{ libraryLabel }}</span><h2 id="corpus-heading">语料</h2></div>
     </header>
     <div v-if="!hasBucket" class="empty-guide">
       <h3>先创建一个知识库</h3>
-      <p class="sub">每个知识库独立保存文档、学得的答案簇和会话，互不干扰。</p>
       <eb-button type="primary" @click="$emit('create-library')">新建知识库</eb-button>
     </div>
     <template v-else>
@@ -30,7 +28,7 @@
             <eb-button link type="primary" size="small" @click="pane = 'evals'">查看</eb-button>
           </template>
           <template v-else>
-            <span class="tiny dim">还没跑过——用一组固定问题验证这个库的检索质量。</span>
+            <span class="tiny dim">还没跑过评测</span>
             <eb-button link type="primary" size="small" @click="pane = 'evals'">去评测</eb-button>
           </template>
         </div>

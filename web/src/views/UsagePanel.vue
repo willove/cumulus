@@ -12,7 +12,6 @@
     <div v-if="usageBusy && !usageRecords.length" class="tiny" role="status">正在读取消费记录…</div>
     <div v-else-if="!usageRecords.length" class="empty-guide">
       <h3>还没有消费记录</h3>
-      <p class="sub">每次检索都会在这里留一条：哪个库、哪个模型、花了多少 tokens。</p>
     </div>
     <div v-else class="table-scroll">
       <eb-table :data="usageRecords" row-key="at" aria-label="消费记录">

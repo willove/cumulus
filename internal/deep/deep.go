@@ -321,10 +321,12 @@ type Engine struct {
 	TokensUsed  func() int64
 	// Stages, when set, receives DEEP-loop stage wall times
 	// ("deep_sample" accumulated across admission/widen/self-correct
-	// SampleBody calls, "deep_synth" per synthesis). Pure observability —
-	// nil (the default, and every gate) changes nothing. See
-	// fast.Engine.Stages for why the split exists.
-	Stages func(stage string, d time.Duration)
+	// SampleBody calls, "deep_synth" per synthesis) plus a stage detail
+	// payload (nil when none): deep_sample carries the admitted window count
+	// and the still-uncovered facts — the signal that drove the loop.
+	// Pure observability — nil (the default, and every gate) changes
+	// nothing. See fast.Engine.Stages for why the split exists.
+	Stages func(stage string, d time.Duration, detail any)
 	// Meter, when set, snapshots the process's cumulative SEARCH-token
 	// counter (chat.TotalTokens in production; judge spend excluded by the
 	// stack's own base snapshot). StageTokens on Result attributes each
@@ -336,6 +338,9 @@ type Engine struct {
 	// SynthDelta streams the synthesis answer delta by delta (see
 	// fast.Engine.SynthDelta); nil = non-streaming synthesis.
 	SynthDelta func(chunk string)
+	// ReasoningDelta streams the synthesizer's chain-of-thought (see
+	// fast.Engine.ReasoningDelta); nil = the reasoning stays dropped.
+	ReasoningDelta func(chunk string)
 	// Loop budgets (defaults MaxLoops/WidenBudget/CorrectBudget; serve
 	// overrides from CLUS_DEEP_LOOPS/CLUS_DEEP_WIDEN/CLUS_DEEP_CORRECT).
 	// Measured DEEP queries ran ~14 rounds (6 admission + 4 widen + 3
@@ -593,10 +598,18 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 	// apart; the non-escalating path owes BackfillSynth (see afterBase).
 	if e.KB != nil && e.KB.Fast != nil && os.Getenv("CLUS_FAST_DEFER_SYNTH") != "0" {
 		e.KB.Fast.DeferBelow = thr
-		// K>1: the measured escalation trigger for multi-question queries is
-		// cover-incompleteness, not thin confidence — arm the cover arm too,
-		// or the defer never fires on exactly the queries that escalate.
+		// The cover arm must read the SAME ruler the escalation below reads:
+		// fx is handed down so fast.Search evaluates facts.ReportFor(fx, kept)
+		// against the very samples afterBase re-evaluates — a rewritten
+		// sampleQuery can lexically cover the sentence while a fact stays
+		// open (live: 闯红灯 142s run paid a 64.8s render the escalation then
+		// discarded). Arming stays K>1 as measured: at K=1 an armed cover arm
+		// defers the fresh answers the L2 learning path persists on, and the
+		// offline query_seq gates starve (e2e B/P4/sixmod, 2026-10-04) — the
+		// K=1 rewrite-and-uncovered corner keeps its render; that trade is
+		// the standing measured decision, unchanged here.
 		e.KB.Fast.DeferThinCover = len(fx) > 1
+		e.KB.Fast.DeferFacts = fx
 	}
 
 	// FILENAME_ONLY tier (D5 附档): name/extension lookups answer before any
@@ -1392,11 +1405,6 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	// repeated whole-body window scoring is where this corpus's token burn
 	// lives, so it needs its own line in the per-stage split.
 	var sampleNS int64
-	defer func() {
-		if sampleNS > 0 && e.Stages != nil {
-			e.Stages("deep_sample", time.Duration(sampleNS))
-		}
-	}()
 	// Admission pre-filter (CLUS_DEEP_SKIP_ZERO_HIT): a file sharing no
 	// token with the query gets no LLM scorer call — every measured widen
 	// pass burned whole-window calls on files that then scored 0. OFF by
@@ -1468,6 +1476,16 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 	var bestSrc source.Source
 	bestScore := -1.0
 	rep := report(kept)
+	// Registered after kept/rep exist so the closure reads their FINAL
+	// values — the detail says what the loop admitted and what stayed
+	// uncovered, i.e. the signal that drove every extra round.
+	defer func() {
+		if sampleNS > 0 && e.Stages != nil {
+			e.Stages("deep_sample", time.Duration(sampleNS), map[string]any{
+				"admitted": len(kept), "missing": rep.Missing, "facts": rep.K,
+			})
+		}
+	}()
 	// Stop-reason accounting: whichever break fires first names the exit,
 	// "" means the candidates ran out (or the ctx died) with budget to spare.
 	// prevP/noImprove drive the per-round pessimistic exit below.
@@ -2033,14 +2051,24 @@ func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, te
 		// streaming path used to leave deep_synth out of the stage split.
 		t0 := time.Now()
 		endSyn := e.begin()
-		if e.SynthDelta != nil {
-			if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
-				if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+		if e.SynthDelta != nil || e.ReasoningDelta != nil {
+			if rs, ok := e.Synth.(fast.ReasoningSynthesizer); ok {
+				if s, err := rs.SynthesizeStreamFull(ctx, query, kept, e.SynthDelta, e.ReasoningDelta); err == nil && strings.TrimSpace(s) != "" {
 					if e.stageTok != nil {
 						endSyn(&e.stageTok.Synth)
 					}
-					e.stage("deep_synth", t0)
+					e.stage("deep_synth", t0, nil)
 					return s
+				}
+			} else if e.SynthDelta != nil {
+				if ss, ok := e.Synth.(fast.StreamSynthesizer); ok {
+					if s, err := ss.SynthesizeStream(ctx, query, kept, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+						if e.stageTok != nil {
+							endSyn(&e.stageTok.Synth)
+						}
+						e.stage("deep_synth", t0, nil)
+						return s
+					}
 				}
 			}
 		}
@@ -2048,7 +2076,7 @@ func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, te
 		if e.stageTok != nil {
 			endSyn(&e.stageTok.Synth)
 		}
-		e.stage("deep_synth", t0)
+		e.stage("deep_synth", t0, nil)
 		if err == nil && strings.TrimSpace(s) != "" {
 			return s
 		}
@@ -2060,9 +2088,9 @@ func (e *Engine) render(ctx context.Context, query string, kept []mcs.Sample, te
 // Pure telemetry: nil (the default, and every gate) costs nothing. DEEP's
 // sampling time is accumulated across the admission/widen/self-correct
 // SampleBody calls by the caller before being reported once.
-func (e *Engine) stage(name string, t0 time.Time) {
+func (e *Engine) stage(name string, t0 time.Time, detail any) {
 	if e.Stages != nil {
-		e.Stages(name, time.Since(t0))
+		e.Stages(name, time.Since(t0), detail)
 	}
 }
 

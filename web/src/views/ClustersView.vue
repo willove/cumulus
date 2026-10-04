@@ -35,7 +35,6 @@
       <div>
         <div v-if="!clusterCur" class="empty-guide">
           <h3>{{ clusters.length ? "从左侧选一个知识簇" : "当前库还没有知识簇" }}</h3>
-          <p v-if="!clusters.length" class="tiny">在会话里提过的问题会被归并成簇；下次同类问题命中簇时毫秒级返回。</p>
           <eb-button v-if="!clusters.length" type="primary" @click="gotoChat">去检索会话</eb-button>
         </div>
         <template v-else>
@@ -72,7 +71,7 @@
             <div v-else class="cite-cards">
               <article v-for="(e, i) in clusterCur.cites" :key="i" class="evi-card">
                 <div class="evi-head">
-                  <span class="evi-src num">{{ e._to }}</span>
+                  <span class="evi-src num" :title="displaySourceId(e._to)">{{ displaySourceId(e._to) }}</span>
                   <span class="tiny num">{{ e.start }}–{{ e.end }}</span>
                   <span class="evi-score" :style="{ width: scorePct(e.score) }" :title="'证据得分 ' + (e.score ?? 0).toFixed(1)"></span>
                   <span class="tiny num">{{ (e.score ?? 0).toFixed(1) }}</span>
@@ -89,6 +88,7 @@
 <script setup>
 import { computed, ref } from "vue";
 import { useClustersPane, lifecycleLabel, clusterStats } from "../panes/clusters.js";
+import { displaySourceId } from "../panes/chat.js";
 import { pane } from "../state.js";
 
 const { clusters, clusterCur, clusterLoading, clusterError, reviewBusy, reviewResult, loadClusters, openCluster, reviewCluster } = useClustersPane();
@@ -133,6 +133,6 @@ function scorePct(score) { return Math.max(4, Math.min(100, ((score ?? 0) / 10) 
 .cite-cards { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow: auto; }
 .evi-card { padding: 8px 10px; border: 1px solid var(--eb-border-color-lighter); border-radius: 8px; }
 .evi-head { display: flex; align-items: center; gap: 10px; }
-.evi-src { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evi-src { flex: 1; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; word-break: break-all; }
 .evi-score { height: 6px; border-radius: 3px; background: var(--eb-color-primary); opacity: .75; flex: none; max-width: 120px; }
 </style>

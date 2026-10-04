@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/mcs"
 	"github.com/willove/cumulus/internal/prior"
 	"github.com/willove/cumulus/internal/source"
@@ -129,13 +130,17 @@ type Engine struct {
 	// clean miss.
 	Verbose func(format string, a ...any)
 	// Stages, when set, receives the wall time of each Search stage
-	// ("analyze", "cascade", "sample", "synth") as it completes. Pure
-	// observability — nil (the default, and every gate) behaves exactly as
-	// before. It exists so the "where did the seconds go" question is
-	// answered by data instead of anecdotes: the whole compression debate
-	// (does a smaller synthesis input even pay?) is unanswerable without a
-	// per-stage split. Wired to the monitor tracker by serve.
-	Stages func(stage string, d time.Duration)
+	// ("analyze", "cascade", "sample", "synth") as it completes, plus a
+	// stage-specific detail payload (nil when the stage has none): what the
+	// analyze decided, which cascade arm hit, what sampling kept. Pure
+	// observability — the timeline used to carry only names and durations,
+	// which answers "where did the seconds go" but never "what was done".
+	// Wired to the monitor tracker by serve.
+	Stages func(stage string, d time.Duration, detail any)
+	// ReasoningDelta, when set alongside SynthDelta, receives the
+	// synthesizer's chain-of-thought stream — reasoning the endpoint emits
+	// anyway and the client otherwise drops. Live-only; no persistence.
+	ReasoningDelta func(chunk string)
 	// DeferBelow, when > 0, skips this engine's synthesis for answers whose
 	// confidence sits below the line — the caller (the DEEP tier, which knows
 	// the escalation threshold) wires it, and owes BackfillSynth on any
@@ -149,6 +154,14 @@ type Engine struct {
 	// nothing until this arm existed). A fact-complete answer that stands is
 	// backfilled by the caller.
 	DeferThinCover bool
+	// DeferFacts, when set alongside DeferThinCover, replaces the whole-query
+	// lexical ruler with the SAME per-fact ruler the DEEP escalation applies
+	// to the same samples (facts.ReportFor). Live 2026-10-04 (「闯红灯有什么
+	// 处罚」, 142s run): a rewritten sampleQuery can lexically cover the whole
+	// sentence while an uncoverable fact stays open — the render ran (64.8s)
+	// and the escalation that could see the open fact discarded it. With this
+	// set, "deferred" and "escalated" read the same object and cannot drift.
+	DeferFacts []facts.Fact
 	// SynthDelta, when set, receives the synthesis answer delta by delta so
 	// the HTTP face can stream it to the browser (the user watches the
 	// answer being written instead of waiting for the whole generation).
@@ -160,6 +173,52 @@ type Engine struct {
 // prompt and parse contract, delivered incrementally.
 type StreamSynthesizer interface {
 	SynthesizeStream(ctx context.Context, query string, samples []mcs.Sample, onDelta func(string)) (string, error)
+}
+
+// ReasoningSynthesizer is the streaming half that can ALSO surface the
+// endpoint's chain-of-thought stream — reasoning the model emits anyway and
+// the client otherwise drops on the floor. render prefers it when
+// ReasoningDelta is wired.
+type ReasoningSynthesizer interface {
+	SynthesizeStreamFull(ctx context.Context, query string, samples []mcs.Sample, onDelta, onReasoning func(string)) (string, error)
+}
+
+// topTerms picks the first n keys of a term→weight map in map order — a
+// stable-enough slice for an observability payload (the weights themselves
+// stay in the analyze call's full output).
+func topTerms(m map[string]float64, n int) []string {
+	out := make([]string, 0, n)
+	for k := range m {
+		out = append(out, k)
+		if len(out) == n {
+			break
+		}
+	}
+	return out
+}
+
+// topTitles labels the first n ranked sources for the cascade detail.
+func topTitles(ranked []scored, n int) []string {
+	out := make([]string, 0, n)
+	for _, r := range ranked {
+		label := r.src.Title
+		if label == "" {
+			label = r.src.ID
+		}
+		out = append(out, label)
+		if len(out) == n {
+			break
+		}
+	}
+	return out
+}
+
+// srcLabel is the sample detail's source label: title, falling back to id.
+func srcLabel(s source.Source) string {
+	if s.Title != "" {
+		return s.Title
+	}
+	return s.ID
 }
 
 func New(scorer mcs.Scorer) *Engine {
@@ -179,14 +238,17 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	if an == nil {
 		an = RuleAnalyzer{}
 	}
-	stage := func(name string, t0 time.Time) {
+	stage := func(name string, t0 time.Time, detail any) {
 		if e.Stages != nil {
-			e.Stages(name, time.Since(t0))
+			e.Stages(name, time.Since(t0), detail)
 		}
 	}
 	t0 := time.Now()
 	a, err := an.Analyze(ctx, query)
-	stage("analyze", t0)
+	stage("analyze", t0, map[string]any{
+		"intent":  a.Intent,
+		"primary": topTerms(a.Primary, 6),
+	})
 	if err != nil {
 		return Answer{}, err
 	}
@@ -205,10 +267,13 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	// expander is a third call and used to be invisible in the accounting.
 	calls := 1 // the analyze call above
 	t1 := time.Now()
+	cascadeArm := "primary"
 	ranked := e.rankFields(orderedKeys(a.Primary), sources)
 	if len(ranked) == 0 {
+		cascadeArm = "fallback"
 		ranked = e.rankFields(orderedKeys(a.Fallback), sources)
 	}
+	var expandedTerms []string
 	if len(ranked) == 0 && e.Expander != nil {
 		if ctx.Err() != nil {
 			return Answer{}, ctx.Err()
@@ -216,9 +281,13 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 		levels, xerr := e.Expander.Expand(ctx, query, 3)
 		if xerr == nil {
 			calls++ // the expander really did call the model
+			cascadeArm = "expanded"
 			for _, lv := range levels {
 				if len(lv) == 0 {
 					continue
+				}
+				if expandedTerms == nil {
+					expandedTerms = append([]string{}, lv...)
 				}
 				if ranked = rankSources(lv, sources); len(ranked) > 0 {
 					break
@@ -230,7 +299,11 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			e.Verbose("expander failed, cascade stays at primary/fallback: %v", xerr)
 		}
 	}
-	stage("cascade", t1)
+	cascadeDetail := map[string]any{"arm": cascadeArm, "top": topTitles(ranked, 3)}
+	if len(expandedTerms) > 0 {
+		cascadeDetail["terms"] = expandedTerms
+	}
+	stage("cascade", t1, cascadeDetail)
 	if len(ranked) == 0 {
 		return Answer{Query: query, Mode: ModeFAST, LLMCalls: calls, Skipped: true}, nil
 	}
@@ -240,7 +313,6 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	best := ranked[0].src
 	t2 := time.Now()
 	samples, err := e.Sampler.SampleBody(ctx, query, best.Body)
-	stage("sample", t2)
 	if err != nil {
 		return Answer{}, err
 	}
@@ -305,6 +377,15 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			bridged = true
 		}
 	}
+	// The stage closes AFTER the bridge rescue: the bridge's rescoring calls
+	// are sampling work too, and the detail says what survived them.
+	sampleDetail := map[string]any{
+		"source": srcLabel(best), "kept": len(kept), "best": primaryBest,
+	}
+	if bridged {
+		sampleDetail["bridge"] = true
+	}
+	stage("sample", t2, sampleDetail)
 	if len(kept) == 0 {
 		// No synthesis happened on this path, so calls must not be incremented:
 		// billing a call that never ran is exactly what the ≤2 gate exists to
@@ -323,14 +404,24 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	conf := mcs.Confidence(mean, cov)
 	// Deferred synthesis (CLUS_FAST_DEFER_SYNTH, default ON — opt out with
 	// =0; flipped from opt-in in 9247333 because the discarded FAST render was
-	// a measured 35.9s of a query): when the
-	// caller wired an escalation line and this answer sits under it — or the
-	// caller armed the cover arm and the whole query is not lexically covered
-	// — the render is skipped. Escalation is decided by confidence or fact
-	// cover, both already in hand, and the DEEP tier synthesizes its own
-	// answer over better evidence. Bridged answers never defer: the bridge
-	// path stands on its own and must be served complete.
-	coverThin := e.DeferThinCover && cov < 0.999
+	// a measured 35.9s of a query): when the caller wired an escalation line
+	// and this answer sits under it — or the cover arm's ruler reports an
+	// open requirement — the render is skipped. The cover ruler IS the
+	// escalation's ruler when DeferFacts is wired (facts.ReportFor on these
+	// same samples); the lexical whole-query fallback stays only for callers
+	// that arm DeferThinCover without facts (the historical gate). Escalation
+	// is decided by confidence or fact cover, both already in hand, and the
+	// DEEP tier synthesizes its own answer over better evidence. Bridged
+	// answers never defer: the bridge path stands on its own and must be
+	// served complete.
+	coverThin := false
+	if e.DeferThinCover {
+		if len(e.DeferFacts) > 0 {
+			coverThin = !facts.ReportFor(e.DeferFacts, kept).Complete
+		} else {
+			coverThin = cov < 0.999
+		}
+	}
 	if !bridged && (coverThin || (e.DeferBelow > 0 && conf < e.DeferBelow)) {
 		return Answer{
 			Query: query, Mode: ModeFAST, LLMCalls: calls,
@@ -341,7 +432,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	}
 	t3 := time.Now()
 	summary := e.render(ctx, query, best, kept)
-	stage("synth", t3)
+	stage("synth", t3, nil)
 	return Answer{
 		Query:      query,
 		Mode:       ModeFAST,
@@ -557,14 +648,20 @@ func (e *Engine) BackfillSynth(ctx context.Context, ans *Answer, src source.Sour
 
 func (e *Engine) render(ctx context.Context, query string, src source.Source, samples []mcs.Sample) string {
 	if e.Synth != nil {
-		if e.SynthDelta != nil {
-			if ss, ok := e.Synth.(StreamSynthesizer); ok {
-				if s, err := ss.SynthesizeStream(ctx, query, samples, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+		if e.SynthDelta != nil || e.ReasoningDelta != nil {
+			if rs, ok := e.Synth.(ReasoningSynthesizer); ok {
+				if s, err := rs.SynthesizeStreamFull(ctx, query, samples, e.SynthDelta, e.ReasoningDelta); err == nil && strings.TrimSpace(s) != "" {
 					return s
 				}
 				// The stream failed mid-way (deltas may already be on the
 				// caller's screen): fall through to the non-streaming path
 				// and let the caller reconcile the partial text.
+			} else if e.SynthDelta != nil {
+				if ss, ok := e.Synth.(StreamSynthesizer); ok {
+					if s, err := ss.SynthesizeStream(ctx, query, samples, e.SynthDelta); err == nil && strings.TrimSpace(s) != "" {
+						return s
+					}
+				}
 			}
 		}
 		if s, err := e.Synth.Synthesize(ctx, query, samples); err == nil && strings.TrimSpace(s) != "" {

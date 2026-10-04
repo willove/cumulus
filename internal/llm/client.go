@@ -179,17 +179,25 @@ func (c *ChatClient) doChat(ctx context.Context, body map[string]any) (string, e
 // HTTP errors abort the stream and return the error; callers fall back to
 // the non-streaming path.
 func (c *ChatClient) CompleteStream(ctx context.Context, user string, onDelta func(string)) (string, error) {
-	return c.completeStream(ctx, user, onDelta, "")
+	return c.completeStream(ctx, user, onDelta, "", nil)
 }
 
 // CompleteStreamField is CompleteStream with a JSON field scrubber: only the
 // named string field's body (unescaped) reaches onDelta, so a JSON-emitting
 // model streams its summary text rather than its envelope.
 func (c *ChatClient) CompleteStreamField(ctx context.Context, user, field string, onDelta func(string)) (string, error) {
-	return c.completeStream(ctx, user, onDelta, field)
+	return c.completeStream(ctx, user, onDelta, field, nil)
 }
 
-func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta func(string), field string) (string, error) {
+// CompleteStreamFieldReasoning additionally forwards the endpoint's
+// chain-of-thought deltas (delta.reasoning_content). The reasoning is
+// generated and billed either way — without this callback the parse struct
+// drops it on the floor.
+func (c *ChatClient) CompleteStreamFieldReasoning(ctx context.Context, user, field string, onDelta, onReasoning func(string)) (string, error) {
+	return c.completeStream(ctx, user, onDelta, field, onReasoning)
+}
+
+func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta func(string), field string, onReasoning func(string)) (string, error) {
 	if c.BaseURL == "" {
 		return "", fmt.Errorf("llm: BaseURL required")
 	}
@@ -252,7 +260,8 @@ func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta fu
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
@@ -260,6 +269,9 @@ func (c *ChatClient) completeStream(ctx context.Context, user string, onDelta fu
 			continue // keep-alive comments / partial frames are not fatal
 		}
 		for _, ch := range chunk.Choices {
+			if ch.Delta.ReasoningContent != "" && onReasoning != nil {
+				onReasoning(ch.Delta.ReasoningContent)
+			}
 			if ch.Delta.Content == "" {
 				continue
 			}
@@ -311,6 +323,13 @@ func SplitThink(content string) (clean, reasoning string) {
 // for reconciling partial deltas already on screen with the replacement
 // summary (see searchapi's `replace` content event).
 func (s *Synthesizer) SynthesizeStream(ctx context.Context, query string, samples []mcs.Sample, onDelta func(string)) (string, error) {
+	return s.SynthesizeStreamFull(ctx, query, samples, onDelta, nil)
+}
+
+// SynthesizeStreamFull is SynthesizeStream with the reasoning stream
+// forwarded: the endpoint emits and bills the chain-of-thought regardless;
+// onReasoning nil keeps the historical drop-it behavior.
+func (s *Synthesizer) SynthesizeStreamFull(ctx context.Context, query string, samples []mcs.Sample, onDelta, onReasoning func(string)) (string, error) {
 	var ev strings.Builder
 	for i, sm := range samples {
 		fmt.Fprintf(&ev, "[%d] (%s [%d,%d)) %s\n", i+1, sm.Source, sm.Start, sm.End, truncateRunes(sm.Content, maxSampleRunes))
@@ -319,7 +338,7 @@ func (s *Synthesizer) SynthesizeStream(ctx context.Context, query string, sample
 		"query":     query,
 		"evidences": ev.String(),
 	})
-	raw, err := s.Client.CompleteStreamField(ctx, tmpl, "summary", onDelta)
+	raw, err := s.Client.CompleteStreamFieldReasoning(ctx, tmpl, "summary", onDelta, onReasoning)
 	if err != nil {
 		return "", err
 	}

@@ -28,7 +28,10 @@ func TestRewriteWhenEmpty(t *testing.T) {
 
 	// BM25 first pass: "帮信罪" finds nothing (bigram 帮信 doesn't exist).
 	// Rewriter fires: finds the formal term → BM25 retry → gold doc found.
-	top := idx.RewriteWhenEmpty(context.Background(), "帮信罪是什么", srcs, 10, stub)
+	top, rw := idx.RewriteWhenEmpty(context.Background(), "帮信罪是什么", srcs, 10, stub)
+	if rw == "" {
+		t.Fatal("the vocab-gap rewrite must report the rewritten query it used")
+	}
 	found := false
 	for _, s := range top {
 		if s.ID == "c" {
@@ -60,7 +63,7 @@ func TestRewriteWhenEmptyNoTrigger(t *testing.T) {
 		rewrote = true
 		return "", nil
 	}
-	top := idx.RewriteWhenEmpty(context.Background(), "专利法", srcs, 10, stub)
+	top, _ := idx.RewriteWhenEmpty(context.Background(), "专利法", srcs, 10, stub)
 	if rewrote {
 		t.Fatal("good results (≥MinRecall) must not trigger rewrite")
 	}
@@ -104,7 +107,7 @@ func TestRewriteFiresOnVocabGapDespiteNoiseScore(t *testing.T) {
 		}
 		return "", nil
 	}
-	top := idx.RewriteWhenEmpty(context.Background(), "帮信罪是什么", srcs, 10, stub)
+	top, _ := idx.RewriteWhenEmpty(context.Background(), "帮信罪是什么", srcs, 10, stub)
 	if len(top) == 0 || top[0].ID != "gold" {
 		var ids []string
 		for _, s := range top {
@@ -124,7 +127,7 @@ func TestRewriteWhenEmptyStillEmpty(t *testing.T) {
 	stub := func(_ context.Context, _ string) (string, error) {
 		return "完全不相关的改写", nil
 	}
-	top := idx.RewriteWhenEmpty(context.Background(), "某个词", srcs, 10, stub)
+	top, _ := idx.RewriteWhenEmpty(context.Background(), "某个词", srcs, 10, stub)
 	if len(top) > 0 {
 		t.Fatal("irrelevant rewrite must still yield empty — no fabrication")
 	}

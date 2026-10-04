@@ -104,7 +104,7 @@ try {
 
   await page.goto(base + '/ui/#/evals');
   await pickLibrary();
-  await expect(page.getByText('用题集检验回答质量')).toBeVisible();
+  await expect(page.getByText('还没有题集')).toBeVisible();
 
   // 上传折叠面板：坏题集挡住保存，段落式参考答案必须带出警告
   await openFold();

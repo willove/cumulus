@@ -103,7 +103,7 @@ func TestSearchReportsStages(t *testing.T) {
 	e := New(mcs.KeywordScorer{Keywords: []string{"连接池", "128"}})
 	got := map[string]time.Duration{}
 	var mu sync.Mutex
-	e.Stages = func(name string, d time.Duration) {
+	e.Stages = func(name string, d time.Duration, detail any) {
 		mu.Lock()
 		got[name] = d
 		mu.Unlock()

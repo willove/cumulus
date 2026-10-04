@@ -5,7 +5,7 @@
     <div v-if="busy" class="sub" role="status">正在加载原文…</div>
     <eb-alert v-else-if="error" type="error" :title="error" :closable="false" show-icon><eb-button type="primary" link @click="load">重试</eb-button></eb-alert>
     <template v-else-if="source">
-      <p class="tiny source-location">{{ source.type }} · {{ source.uri || source.id }}</p>
+      <p class="tiny source-location">{{ source.type }} · {{ source.uri || displaySourceId(source.id) }}</p>
       <p v-if="highlight && bodyHasQuote" class="tiny highlight-note">已定位到引用窗口，引文以底色标注。</p>
       <p v-else-if="highlight" class="tiny dim">该引用窗口与当前原文已对不上（源可能已更新）。</p>
       <pre class="source-body" ref="bodyEl"><template v-for="(part, i) in bodyParts" :key="i"><mark v-if="part.hit" class="quote-hit">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></pre>
@@ -18,6 +18,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { withNS } from "../state.js";
 import { requestJSON } from "../api.js";
+import { displaySourceId } from "../panes/chat.js";
 const props = defineProps({
   sourceId: { type: String, required: true },
   highlight: { type: String, default: "" }, // 引用摘录：在原文中标注并滚动到位
@@ -70,7 +71,7 @@ onUnmounted(() => controller.abort());
 </script>
 
 <style scoped>
-.source-location { overflow-wrap: anywhere; margin: 0 0 var(--eb-space-4); }
+.source-location { overflow-wrap: anywhere; margin: 0 0 var(--eb-space-4); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .highlight-note { margin: 0 0 var(--eb-space-2); color: var(--eb-color-primary); }
 .source-body { margin: 0; padding: var(--eb-space-4); border: 1px solid var(--eb-border-color); border-radius: var(--eb-radius-md); background: var(--eb-fill-color-light); color: var(--eb-text-color-regular); white-space: pre-wrap; overflow-wrap: anywhere; font: var(--eb-font-size-sm)/1.9 var(--cul-sans); max-height: calc(100vh - 220px); overflow: auto; }
 .dim { color: var(--eb-text-color-placeholder); }

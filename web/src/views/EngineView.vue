@@ -3,7 +3,7 @@
     <header class="page-heading">
       <div>
         <h2 id="engine-heading">引擎</h2>
-        <p class="sub">服务的运行读数、模型配置、消费记录，以及直接打一次真实接口的诊断台。启用模型即热生效，无需重启。</p>
+        <p class="sub">模型配置改动即时生效，无需重启。</p>
       </div>
     </header>
     <!-- 引擎四分段（segmented 胶囊滑块）：先看健康，再管配置，再对账，最后直接打接口。 -->

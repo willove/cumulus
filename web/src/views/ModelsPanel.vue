@@ -67,7 +67,7 @@
       <div class="cfg-actions">
         <eb-button type="primary" :loading="saveBusy" :disabled="!editing.id.trim() || !editing.base_url.trim()" @click="save">保存</eb-button>
         <eb-button @click="editing = null">取消</eb-button>
-        <span class="tiny">保存后先「测试」再「启用」；启用即写入 .env 并热生效，下次检索就用它。</span>
+        <span class="tiny">启用即写入 .env 并热生效。</span>
       </div>
     </eb-form>
     <div v-else class="cfg-actions">
@@ -96,7 +96,7 @@
                          :statuses="[{ value: 'pass', label: '验证通过', type: 'success' }, { value: 'fail', label: '验证失败', type: 'danger' }]" />
           <span class="tiny" v-if="settingsVerify.ok">{{ settingsVerify.dims }} 维 · 用时 {{ settingsVerify.ms }} ms · 范数 {{ Number(settingsVerify.norm).toFixed(4) }}</span>
         </div>
-        <p class="tiny" style="margin: 6px 0 0" v-if="settingsVerify.ok">证明权重能加载、能编码、维度一致；不证明它正在被检索使用。</p>
+          <p class="tiny" style="margin: 6px 0 0" v-if="settingsVerify.ok">权重可加载、可编码；是否用于检索取决于上面的嵌入配置。</p>
         <p class="tiny" style="margin: 6px 0 0" v-else>{{ settingsVerify.error }}</p>
       </div>
       <div class="tiny num" v-if="settingsModel && settingsModel.installing && settingsModel.progress" style="margin-top: 8px">
