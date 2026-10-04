@@ -246,20 +246,28 @@ export function useChatPane() {
         const msg = m();
         if (msg) {
           msg.stages = [...(msg.stages || []), row];
-          if (msg.thinking || msg.status === "pending") {
+          // 思考框在推理流开始前显示阶段进度；一旦 reasoning 接管，阶段行
+          // 不再覆写（思考框 = 思考过程，进度归悬浮条与时间轴）。第二遍
+          // 合成（FAST 弃→DEEP 重合）续在同一条流里，补一道分隔。
+          if ((msg.thinking || msg.status === "pending") && !msg.reasoning) {
             updateMessage(msg.id, { thinkContent: stageText(row.name) + " 完成" + (row.ms ? " · " + fmtMS(row.ms) : "") });
+          } else if (msg.reasoning && row.name === "deep_synth") {
+            appendThinkContent(msg.id, "\n\n—— 重新合成 ——\n");
           }
         }
         if (p.elapsed_ms) elapsed.value = Math.round(p.elapsed_ms / 1000);
         return "";
       }
       case "reasoning": {
-        // 合成调用的思考原文：端点反正会生成，这里只是不再丢弃。逐块追加，
-        // 不持久化（会话恢复只有分段耗时）；多遍合成（先 FAST 后 DEEP）时
-        // 原文连续拼接，段界以时间轴为准。
+        // 合成思考原文：端点反正会生成，这里直接流进消息的思考框
+        // （ChatThinking：流式中自动展开滚动，完成后收成「已深度思考」
+        // 可再展开）。逐块追加，不持久化（会话恢复只有分段耗时）。
         ensureWireMessage(messageId);
         const msg = m();
-        if (msg) msg.reasoning = (msg.reasoning || "") + (p.text || "");
+        if (!msg) return "";
+        const first = !msg.reasoning;
+        msg.reasoning = (msg.reasoning || "") + (p.text || "");
+        appendThinkContent(messageId, (first ? "\n\n" : "") + (p.text || ""));
         return "";
       }
       case "citations": {

@@ -171,7 +171,10 @@ function app(fetch, thinkError, namespace = "t1") {
         },
         appendThinkContent(id, text) {
           if (thinkError) throw thinkError;
-          Object.assign(find(id), { thinkContent: text, thinking: true });
+          // 与真引擎同语义（ai-console.mjs:79 是 +=）：这里曾是替换，思考流
+          // 会被自己的下一个块吃掉。
+          const target = find(id);
+          Object.assign(target, { thinkContent: (target?.thinkContent || "") + text, thinking: true });
         },
         stopThinking(id) { if (find(id)) find(id).thinking = false; },
         // 迟到轮次的事件可能落在已被替换的消息列表上：缺 id 容忍（与真实
@@ -256,6 +259,28 @@ function chatBackend(override = () => {}) {
 }
 
 // 原有 13 个用例的业务覆盖保留，并显式检查首问、namespace 及非成功状态。
+// 思考框 = 思考过程（用户两次点名的要求）：reasoning 流实时进 thinkContent，
+// 后续 stage 行不得覆写它（进度归悬浮条/时间轴），阶段行只在流开始前显示。
+test("reasoning streams into the thinking box and stages stop overwriting it", async () => {
+  const sse = new Response(
+    'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"analyze","ms":120,"elapsed_ms":200}}}\n\n' +
+    'data: {"cumulus":{"kind":"reasoning","payload":{"text":"先在语料里找处罚依据……"}}}\n\n' +
+    'data: {"cumulus":{"kind":"reasoning","payload":{"text":"再核对幅度与记分。"}}}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"synth","ms":9000,"elapsed_ms":9500}}}\n\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"FAST","conf":0.8}}}\n\n' +
+    'data: [DONE]\n\n',
+  );
+  const server = chatBackend(() => sse);
+  const state = app(server.fetch);
+  await state.onSend("闯红灯怎么罚");
+  const msg = state.messages.value.find((m) => m.role === "assistant");
+  assert.ok(msg.thinkContent.includes("分析问题与检索意图 完成"), "stage line shows before the stream starts");
+  assert.ok(msg.thinkContent.includes("先在语料里找处罚依据"), "reasoning streams into the thinking box");
+  assert.ok(msg.thinkContent.includes("再核对幅度与记分。"), "chunks append in arrival order");
+  assert.ok(!msg.thinkContent.includes("合成答案 完成"), "a later stage must not clobber the streamed reasoning");
+});
+
 test("send uses one lazily-materialized session, preserves two rounds and avoids chatbot user duplication", async () => {
   const server = chatBackend();
   const state = app(server.fetch);

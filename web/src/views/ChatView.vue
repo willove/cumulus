@@ -69,12 +69,6 @@
                     </div>
                   </div>
                 </details>
-                <!-- 合成思考原文：端点生成的推理流原样折叠在此（B 线）。
-                     只在 live 会话出现——会话恢复不带它。 -->
-                <details v-if="message.reasoning" class="run-timeline reasoning-fold">
-                  <summary class="tl-summary">合成思考原文</summary>
-                  <pre class="tl-reasoning">{{ message.reasoning }}</pre>
-                </details>
                 <!-- 引用：编号出处列表（EbChatSources），点条目开原文抽屉。
                      未定位窗口在标题上标注，不藏进交互。 -->
                 <EbChatSources v-if="message.sources?.length" :items="message.sources"
@@ -267,7 +261,6 @@ onMounted(loadDocuments);
 .run-timeline[open] .tl-summary::before { transform: rotate(90deg); }
 .tl-step { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--eb-text-color-secondary); padding-top: 4px; flex-wrap: wrap; }
 .tl-detail { flex-basis: 100%; padding-left: 15px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--eb-text-color-placeholder); line-height: 1.6; }
-.reasoning-fold .tl-reasoning { margin: 8px 0 0; max-height: 220px; overflow: auto; font-size: 12px; line-height: 1.7; color: var(--eb-text-color-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 .tl-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--eb-color-primary); flex: none; }
 .tl-dot.live { background: var(--eb-text-color-placeholder); animation: tl-pulse 1.2s ease-in-out infinite; }
 @keyframes tl-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
