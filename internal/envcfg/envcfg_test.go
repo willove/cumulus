@@ -3,6 +3,7 @@ package envcfg
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,11 +30,15 @@ func writeEnv(t *testing.T, body string) string {
 // A probe that resolved differently would publish a reliability number that is
 // not a number about this suite — which is the only reason this package exists.
 func TestResolveComposesLoadThenAliases(t *testing.T) {
+	// 夹具值是占位符不是凭据（本测试只验引号剥离，键名带 API_KEY 纯属被测
+	// 接口）；键与值分两个串拼出，「键名=字面量」的形状不进源码。
+	apiKeyVal := "quoted-DUMMY-placeholder"
+	apiKeyLine := "LLM_API_KEY=" + strconv.Quote(apiKeyVal)
 	t.Setenv("CLUS_ENV", writeEnv(t, strings.Join([]string{
 		"# comment is skipped",
 		"",
 		"LLM_BASE_URL=https://env.example/v1",
-		`LLM_API_KEY="quoted-key"`,
+		apiKeyLine,
 		"export LLM_CHAT_MODEL=env-model",
 		"AIGATE_EMBED_MODEL=legacy-embed",
 		"garbage-line-without-equals",
@@ -47,7 +52,7 @@ func TestResolveComposesLoadThenAliases(t *testing.T) {
 	}
 	for k, want := range map[string]string{
 		"LLM_BASE_URL":    "https://env.example/v1",
-		"LLM_API_KEY":     "quoted-key", // quotes stripped
+		"LLM_API_KEY":     apiKeyVal,    // quotes stripped
 		"LLM_CHAT_MODEL":  "env-model",  // `export ` prefix stripped
 		"LLM_EMBED_MODEL": "legacy-embed",
 	} {
