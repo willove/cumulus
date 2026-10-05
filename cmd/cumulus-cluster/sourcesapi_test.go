@@ -181,7 +181,7 @@ func TestSourceDetailActiveAndScoped(t *testing.T) {
 			t.Fatalf("%s: %d %v, want %d", tc.path, w.Code, out, tc.code)
 		}
 	}
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch} {
 		w, out := serveJSON(t, mux, method, "/v1/sources/"+url.PathEscape(alpha.ID)+"?ns=alpha", nil)
 		if w.Code != http.StatusMethodNotAllowed || out["error"] == nil {
 			t.Fatalf("%s detail: %d %v", method, w.Code, out)
@@ -195,6 +195,57 @@ func TestSourceDetailActiveAndScoped(t *testing.T) {
 		if _, ok := d.(map[string]any)["body"]; ok {
 			t.Fatal("list must still omit bodies")
 		}
+	}
+}
+
+// DELETE /v1/sources/{id} is the UI's per-document delete. It must reuse the
+// store's sanctioned soft delete, answer 404 for foreign-namespace / already
+// deleted / missing ids, and drop the document from the active list.
+func TestSourceDeleteSoftDeletesAndScopes(t *testing.T) {
+	ctx := context.Background()
+	engine, err := cumulite.Open("", cumulite.WithInMemory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	base := ingest.New(engine, "serve:clus_sources", "serve:clus_evidence", "serve:clus_clusters", "serve")
+	ens := newNSEnsurer(engine, base, "serve", "serve:clus_sources")
+	mux := http.NewServeMux()
+	registerSourcesFace(mux, ens.store, engine, "serve")
+	st, err := ens.store(ctx, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := st.Put(ctx, source.New("靶文档", "md", "fixture://del", "delete-me", "zh", "要删的正文", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.ID
+
+	del := func(path string) (*httptest.ResponseRecorder, map[string]any) {
+		return serveJSON(t, mux, http.MethodDelete, path, nil)
+	}
+	// Foreign namespace must not see — or delete — the document.
+	if w, out := del("/v1/sources/"+url.PathEscape(id)+"?ns=beta"); w.Code != http.StatusNotFound {
+		t.Fatalf("delete via ns=beta: %d %v", w.Code, out)
+	}
+	if w, out := del("/v1/sources/missing?ns=alpha"); w.Code != http.StatusNotFound {
+		t.Fatalf("delete missing: %d %v", w.Code, out)
+	}
+	w, out := del("/v1/sources/"+url.PathEscape(id)+"?ns=alpha")
+	if w.Code != http.StatusOK || out["deleted"] != id {
+		t.Fatalf("delete: %d %v", w.Code, out)
+	}
+	// Gone from detail and the active list; second delete is 404 (already gone).
+	if w, _ := serveJSON(t, mux, http.MethodGet, "/v1/sources/"+url.PathEscape(id)+"?ns=alpha", nil); w.Code != http.StatusNotFound {
+		t.Fatalf("detail after delete: %d", w.Code)
+	}
+	if w, out := del("/v1/sources/"+url.PathEscape(id)+"?ns=alpha"); w.Code != http.StatusNotFound {
+		t.Fatalf("second delete: %d %v", w.Code, out)
+	}
+	w, list := serveJSON(t, mux, http.MethodGet, "/v1/sources?ns=alpha", nil)
+	if w.Code != http.StatusOK || len(list["sources"].([]any)) != 0 {
+		t.Fatalf("list after delete: %d %v", w.Code, list)
 	}
 }
 

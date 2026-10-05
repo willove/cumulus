@@ -1,8 +1,10 @@
 package main
 
-// Sources REST face: read-only listing and active document detail in the
-// selected library. Only detail includes body text; neither route mutates
-// sources. storeFor resolves the namespace exactly like the ingest faces do.
+// Sources REST face: listing, active document detail, and soft delete in the
+// selected library. Only detail includes body text. DELETE reuses the store's
+// sanctioned path (the CLI `delete` command and cluster tidy both call it):
+// status flips to deleted and the document's evidence windows are invalidated.
+// storeFor resolves the namespace exactly like the ingest faces do.
 
 import (
 	"context"
@@ -59,8 +61,8 @@ func registerSourcesFace(mux *http.ServeMux, storeFor func(context.Context, stri
 		writeJSON(w, http.StatusOK, map[string]any{"sources": docs})
 	})
 	mux.HandleFunc("/v1/sources/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET only"})
+		if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "GET/DELETE only"})
 			return
 		}
 		// IDs are opaque revision identities and may contain #, Unicode or
@@ -75,6 +77,25 @@ func registerSourcesFace(mux *http.ServeMux, storeFor func(context.Context, stri
 		st, err := storeFor(r.Context(), r.URL.Query().Get("ns"))
 		if err != nil {
 			writeStoreErr(w, err)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			// Existence check first so a foreign-namespace or already-deleted
+			// id answers 404 instead of silently patching nothing.
+			s, err := st.Get(r.Context(), id)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			if s == nil || s.Status != source.StatusActive {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "source not found"})
+				return
+			}
+			if err := st.Delete(r.Context(), id); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 			return
 		}
 		s, err := st.Get(r.Context(), id)
