@@ -21,7 +21,7 @@
         <p class="sub">换个问法，或先在「文档」里确认语料覆盖这个主题。</p>
       </div>
       <div v-else class="evidence-list">
-        <p class="tiny section-label">被召回的证据窗口（按引用顺序）</p>
+        <p class="tiny section-label">证据窗口</p>
         <article v-for="(r, i) in refs" :key="i" class="evidence-card">
           <div class="evidence-head">
             <b class="num">{{ r.index }}</b>
@@ -34,11 +34,11 @@
         </article>
       </div>
 
-      <!-- 答案收成一行可展开——测试的主语是证据，不是答案。 -->
-      <details v-if="result.answer?.summary" class="answer-fold">
-        <summary>给出的答案</summary>
+      <!-- 答案是正常块：证据列表是主语，答案跟在后面，不再折进手风琴。 -->
+      <div v-if="result.answer?.summary" class="answer-block">
+        <p class="tiny section-label">答案</p>
         <p class="answer-body">{{ result.answer.summary }}</p>
-      </details>
+      </div>
     </template>
     <div v-else-if="!busy && !error" class="empty-guide">
       <h3>测一问，看召回</h3>
@@ -101,7 +101,6 @@ async function run() {
 .evidence-src { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 13px; }
 .span { color: var(--eb-color-primary); font-weight: 600; }
 .evidence-quote { margin: 8px 0 0; font-size: 13px; line-height: 1.8; color: var(--eb-text-color-regular); }
-.answer-fold { border: 1px dashed var(--eb-border-color-lighter); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
-.answer-fold summary { cursor: pointer; color: var(--eb-text-color-secondary); user-select: none; }
-.answer-body { margin: 8px 0 0; line-height: 1.8; white-space: pre-wrap; }
+.answer-block { border-top: 1px solid var(--eb-border-color-lighter); padding-top: var(--eb-space-2); }
+.answer-body { margin: 6px 0 0; line-height: 1.8; white-space: pre-wrap; }
 </style>

@@ -2,8 +2,12 @@
   <section class="pane documents-page">
     <!-- 页签内同层排版：工具条行（左标题计数、右搜索+动作），无外层卡片壳。 -->
     <div class="docs-head">
-      <b class="docs-title">文档 <span class="tiny">{{ documents.length }} 篇</span></b>
+      <!-- 篇数在页面注脚行已有，这里不重复计数，只留段名。 -->
+      <b class="docs-title">文档</b>
       <eb-input v-model="filter" class="document-filter" :clearable="false" aria-label="搜索已导入文档" placeholder="搜索文档名称" />
+      <eb-select v-model="sortBy" class="doc-sort" aria-label="排序方式">
+        <eb-option v-for="opt in sortOptions" :key="opt.value" :value="opt.value" :label="opt.label" />
+      </eb-select>
       <eb-button :disabled="documentsBusy" @click="loadDocuments">刷新</eb-button>
       <eb-button type="primary" @click="addOpen = !addOpen">{{ addOpen ? '收起导入' : '添加文档' }}</eb-button>
     </div>
@@ -126,8 +130,9 @@
         </div>
         <div class="document-section" role="region" aria-labelledby="documents-list-heading">
           <eb-alert v-if="documentsError" type="error" :title="documentsError" :closable="false" show-icon><eb-button link type="primary" size="small" @click="loadDocuments">重试</eb-button></eb-alert>
+          <eb-alert v-if="delError" type="error" :title="'删除失败：' + delError" :closable="false" show-icon />
           <div v-if="documentsBusy" class="tiny" role="status">正在加载文档…</div>
-          <eb-table v-if="filteredDocuments.length" :data="filteredDocuments" row-key="id" class="document-table" aria-label="已导入文档" :scroll-x="600">
+          <eb-table v-if="filteredDocuments.length" :data="pagedDocuments" row-key="id" class="document-table" aria-label="已导入文档" :scroll-x="600">
             <eb-table-column prop="title" label="文档名称" min-width="220">
               <template #default="{ row }"><eb-button link type="primary" class="source-link" @click="previewSource = row.id">{{ row.title || row.id }}</eb-button></template>
             </eb-table-column>
@@ -139,9 +144,25 @@
             </eb-table-column>
             <eb-table-column prop="bytes" label="大小" width="100" :formatter="row => fmtSize(row.bytes)" />
             <eb-table-column prop="ingested_at" label="导入时间" width="170" :formatter="row => fmtWhen(row.ingested_at)" />
+            <eb-table-column label="操作" width="80" align="right">
+              <template #default="{ row }">
+                <!-- 软删除：证据窗口即时作废，簇靠复核自愈；同名重传即恢复。 -->
+                <eb-popconfirm title="删除这篇文档？引用它的证据窗口会一并作废。" confirm-button-text="删除" cancel-button-text="取消"
+                               confirm-button-type="danger" @confirm="delDoc(row)">
+                  <eb-button text type="danger" size="small" :loading="delBusy === row.id" :aria-label="'删除 ' + (row.title || row.id)">删除</eb-button>
+                </eb-popconfirm>
+              </template>
+            </eb-table-column>
           </eb-table>
           <div v-else-if="!documentsBusy && !documentsError" class="docs-empty"><h3>{{ documents.length ? '没有匹配的文档' : '知识库里还没有文档' }}</h3><eb-button v-if="!documents.length && !addOpen" @click="addOpen = true">添加文档</eb-button></div>
-          <div v-if="documents.length" class="document-footer"><span class="tiny">{{ filteredDocuments.length === documents.length ? documents.length + ' 篇文档' : filteredDocuments.length + ' / ' + documents.length + ' 篇' }}</span><eb-button size="small" @click="pane = 'chat'">去提问</eb-button></div>
+          <div v-if="documents.length" class="document-footer">
+            <span class="tiny">{{ filteredDocuments.length === documents.length ? documents.length + ' 篇文档' : filteredDocuments.length + ' / ' + documents.length + ' 篇' }}</span>
+            <!-- 库可能上千篇（chinalaw 1781），一次全渲染表格既卡又没法看：客户端分页，
+                 过滤后计数走 total，改筛选回第一页。 -->
+            <eb-pagination v-model:current-page="page" v-model:page-size="pageSize" :total="filteredDocuments.length"
+                           :page-sizes="[20, 50, 100]" layout="prev, pager, next, sizes" size="small" hide-on-single-page />
+            <eb-button size="small" @click="pane = 'chat'">去提问</eb-button>
+          </div>
         </div>
       </div>
     </div>
@@ -152,7 +173,8 @@
 <script setup>
 import { ref, computed, watch, onMounted } from "vue";
 import { useIngestPane } from "../panes/ingest.js";
-import { documents, documentsBusy, documentsError, libraryLabel, loadDocuments, pane } from "../state.js";
+import { documents, documentsBusy, documentsError, libraryLabel, loadDocuments, pane, withNS } from "../state.js";
+import { requestJSON } from "../api.js";
 import SourcePreview from "./SourcePreview.vue";
 const { ingDir, ingRec, ingName, ingBusy, ingMeta, jobs, jobCur, curJob,
   uploadFiles, uploadMeta, uploadBusy, uploadBytes, uploadAccept, selectDirectory, updateUploadFiles, startUpload,
@@ -178,6 +200,47 @@ const jobTypes = { queued: "info", running: "primary", done: "success", failed: 
 const selectedJob = computed(curJob);
 const activeMeta = computed(() => addWay.value === "upload" ? uploadMeta.value : addWay.value === "dir" ? ingMeta.value : addWay.value === "scan" ? scanMeta.value : adMeta.value);
 const filteredDocuments = computed(() => documents.value.filter(doc => (doc.title || doc.id).toLowerCase().includes(filter.value.trim().toLowerCase())));
+// 排序：服务端默认最新在前，这里补最早/最大/被引用最多三个视角；纯客户端。
+const sortBy = ref("newest");
+const sortOptions = [
+  { value: "newest", label: "最新导入" },
+  { value: "oldest", label: "最早导入" },
+  { value: "largest", label: "体积最大" },
+  { value: "cited", label: "被引用最多" },
+];
+const ingestedTs = doc => Date.parse(doc.ingested_at) || 0;
+const sorters = {
+  newest: (a, b) => ingestedTs(b) - ingestedTs(a),
+  oldest: (a, b) => ingestedTs(a) - ingestedTs(b),
+  largest: (a, b) => (b.bytes || 0) - (a.bytes || 0),
+  cited: (a, b) => (b.cited || 0) - (a.cited || 0),
+};
+const visibleDocuments = computed(() => [...filteredDocuments.value].sort(sorters[sortBy.value] || (() => 0)));
+const page = ref(1);
+const pageSize = ref(20);
+const pagedDocuments = computed(() => {
+  const start = (page.value - 1) * pageSize.value;
+  return visibleDocuments.value.slice(start, start + pageSize.value);
+});
+// 单篇删除：HTTP DELETE 走存储层既有的软删除路径（CLI delete 同款）。
+const delBusy = ref("");
+const delError = ref("");
+async function delDoc(row) {
+  if (delBusy.value) return;
+  delBusy.value = row.id;
+  delError.value = "";
+  try {
+    await requestJSON(withNS("/v1/sources/" + encodeURIComponent(row.id)), { method: "DELETE" });
+    await loadDocuments();
+  } catch (e) { delError.value = e.message; }
+  finally { delBusy.value = ""; }
+}
+watch(filter, () => { page.value = 1; });
+// 刷新/删除后列表可能变短：页码越界时表格会整页空白，收到最后一页。
+watch(() => filteredDocuments.value.length, total => {
+  const last = Math.max(1, Math.ceil(total / pageSize.value));
+  if (page.value > last) page.value = last;
+});
 watch(() => jobs.value.filter(job => job.state === "done" || job.state === "failed").map(job => job.id + job.state).join("|"), loadDocuments);
 onMounted(loadDocuments);
 function fmtSize(bytes) { return bytes < 1024 ? bytes + " B" : bytes < 1048576 ? (bytes / 1024).toFixed(1) + " KB" : (bytes / 1048576).toFixed(1) + " MB"; }
@@ -225,10 +288,11 @@ function fmtWhen(value) { return value ? new Date(value).toLocaleString("zh-CN",
 .job-counts b { color: var(--eb-text-color-primary); }
 .skip-errors { font-size: var(--eb-font-size-xs); line-height: 1.8; padding-left: var(--eb-space-5); }
 .document-filter { width: 200px; max-width: 100%; min-width: 0; }
+.doc-sort { width: 132px; max-width: 100%; min-width: 0; }
 .document-table .source-link { height: auto; max-width: 100%; white-space: normal; text-align: left; overflow-wrap: anywhere; }
 .docs-empty { padding: var(--eb-space-12) var(--eb-space-4); text-align: center; }
 .docs-empty p { line-height: 1.8; }
-.document-footer { display: flex; justify-content: space-between; align-items: center; gap: var(--eb-space-3); margin-top: var(--eb-space-5); }
+.document-footer { display: flex; justify-content: space-between; align-items: center; gap: var(--eb-space-3); margin-top: var(--eb-space-5); flex-wrap: wrap; }
 @media (max-width: 1000px) { .documents-layout.with-import { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 600px) { .document-filter { width: 160px; } }
 </style>

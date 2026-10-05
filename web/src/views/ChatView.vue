@@ -15,7 +15,7 @@
       <header class="conversation-head">
         <div class="conversation-heading"><span class="status-dot" :class="{ ready: hasBucket && documents.length }"></span><strong>{{ libraryLabel }}</strong><span class="tiny">{{ documents.length }} 篇文档</span></div>
         <div class="form-actions">
-          <eb-button size="small" @click="pane = 'corpus'">语料</eb-button>
+          <eb-button size="small" @click="pane = 'corpus'">文档</eb-button>
           <eb-button v-if="hasBucket && resetting !== 'done'" size="small" :loading="resetting === 'busy'" @click="clearCache">清除缓存</eb-button>
           <eb-button v-else-if="resetting === 'done'" size="small" type="success" text @click="resetting = ''">✓ 已清除</eb-button>
           <eb-button class="history-toggle" type="primary" link size="small" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">历史会话</eb-button>
@@ -48,7 +48,7 @@
           </div>
           <EbChatList v-show="messages.length" class="conv-list" :messages="messages"
                       assistant-name="Cumulus" :show-avatar="false"
-                      @regenerate="regenerate">
+                      @regenerate="regenerate" @click="onBodyClick">
             <!-- 只接管正文渲染：消息外壳（思考/动作条）仍是组件默认的。
                  答案正文 + 分步时间轴 + 引用卡 + 运行卡都挂在本条消息下面，
                  随消息一起进历史、一起刷新恢复。 -->
@@ -136,6 +136,15 @@ const previewSource = ref("");
 const previewQuote = ref("");
 const samples = ["有哪些关键要求？", "有哪些例外情形？", "总结文档中的注意事项"];
 function preview(sourceId, quote) { previewSource.value = sourceId; previewQuote.value = quote || ""; }
+// 思考框日志里的文档链接：ChatMarkdown 把 [名](doc:id) 渲染成带 data-ref-id
+// 的 eb-ref-chip，这里事件代理接住点击，解码出源 id 开原文预览。
+function onBodyClick(e) {
+  const chip = e.target?.closest?.('.eb-ref-chip[data-protocol="doc"]');
+  if (!chip) return;
+  let id = chip.dataset.refId || "";
+  try { id = decodeURIComponent(id); } catch { /* 残缺编码原样试 */ }
+  if (id) preview(id, "");
+}
 function tierLabel(mode) { return mode === "DEEP" ? "深度检索" : mode === "FAST" ? "快速回答" : mode || "检索"; }
 function totalMsOf(message) {
   const total = timelineFor(message).reduce((sum, st) => sum + (st.ms || 0), 0);
@@ -224,6 +233,37 @@ onMounted(loadDocuments);
    （EbAiPromptBox 是 width:100%，留白由宿主给，不给就贴视口边）。 */
 .conversation-stream { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 24px 12px; }
 .conv-list { flex: 1; min-height: 0; overflow: auto; }
+/* 思考框里的文档链接：ChatMarkdown 的 doc: 协议芯片，这里收成链接样式——
+   标准图标（book-open 的路径做 mask，与库件同源，不用 emoji）+ 蓝色加粗，
+   点击由 onBodyClick 代理开原文预览。只作用于思考框，答案正文里的其他
+   协议芯片不受影响。 */
+.conv-list :deep(.eb-chat-thinking .eb-ref-chip) {
+  background: none;
+  border: none; /* --info 主题自带描边，这里要的是链接不是胶囊 */
+  padding: 0;
+  margin: 0 1px;
+  border-radius: 0;
+  color: var(--eb-color-primary);
+  font-weight: 600;
+}
+.conv-list :deep(.eb-chat-thinking .eb-ref-chip::before) {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 3px;
+  vertical-align: -2px;
+  /* 库件给 ::before 塞了 color: var(--eb-bg-color)（白），currentColor 会被
+     解析成白——图标必须显式钉主色，不吃继承。 */
+  background-color: var(--eb-color-primary);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 21V23H11V21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3H9C10.1947 3 11.2671 3.52375 12 4.35418C12.7329 3.52375 13.8053 3 15 3H21C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H13ZM20 19V5H15C13.8954 5 13 5.89543 13 7V19H20ZM11 19V7C11 5.89543 10.1046 5 9 5H4V19H11Z'/%3E%3C/svg%3E") no-repeat center / contain;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 21V23H11V21H3C2.44772 21 2 20.5523 2 20V4C2 3.44772 2.44772 3 3 3H9C10.1947 3 11.2671 3.52375 12 4.35418C12.7329 3.52375 13.8053 3 15 3H21C21.5523 3 22 3.44772 22 4V20C22 20.5523 21.5523 21 21 21H13ZM20 19V5H15C13.8954 5 13 5.89543 13 7V19H20ZM11 19V7C11 5.89543 10.1046 5 9 5H4V19H11Z'/%3E%3C/svg%3E") no-repeat center / contain;
+}
+.conv-list :deep(.eb-chat-thinking .eb-ref-chip:hover) {
+  text-decoration: underline;
+  transform: none;
+  filter: none;
+}
 .welcome { flex: 1; max-width: 1000px; width: 100%; margin: auto; padding: 40px 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
 .welcome-eyebrow { color: var(--eb-color-primary); font-size: 12px; font-weight: 600; letter-spacing: .08em; }
 .welcome h2 { margin: 16px 0 12px; font-size: clamp(22px, 2.5vw, 30px); line-height: 1.4; letter-spacing: -.7px; }

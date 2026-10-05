@@ -450,7 +450,7 @@ echo "$SESSN" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert len(
 UI="$(curl -fsS "http://127.0.0.1:$SPORT/ui/")"
 echo "$UI" | grep -q "认知检索" ; check "web UI serves the embedded workbench page" $?
 UIA="$(curl -fsS "http://127.0.0.1:$SPORT/ui/assets/$(ls cmd/cumulus-cluster/web/dist/assets | grep '^index-.*\.js$' | head -1)")"
-echo "$UIA" | grep -q "知识簇是什么" ; check "web UI carries the cluster browse panel (UI v3)" $?
+echo "$UIA" | grep -q "复核这个簇" ; check "web UI carries the cluster browse panel (UI v3)" $?
 echo "$UIA" | grep -q "当前知识库" ; check "web UI carries the namespace selector (B1)" $?
 SNEW="$(curl -fsS -X POST "http://127.0.0.1:$SPORT/v1/sessions" -d '{}')"
 echo "$SNEW" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("id"), d' ; check "POST /v1/sessions creates a session (P7 REST)" $?

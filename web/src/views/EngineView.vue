@@ -1,12 +1,6 @@
 <template>
-  <section class="pane engine-page" aria-labelledby="engine-heading">
-    <header class="page-heading">
-      <div>
-        <h2 id="engine-heading">引擎</h2>
-        <p class="sub">模型配置改动即时生效，无需重启。</p>
-      </div>
-    </header>
-    <!-- 引擎四分段（segmented 胶囊滑块）：先看健康，再管配置，再对账，最后直接打接口。 -->
+  <section class="pane engine-page" aria-label="引擎">
+    <!-- 页名顶栏已有；备注类说明句一律不留，配置热生效是行为不是标语。 -->
     <eb-segmented v-model="tab" :options="segments" />
     <div :key="tab" class="tab-swap engine-body">
       <MonitorView v-if="tab === 'status'" />
@@ -39,5 +33,5 @@ const segments = [
 <style src="./common.css"></style>
 <style scoped>
 .engine-page { display: flex; flex-direction: column; gap: var(--eb-space-4); }
-.engine-body { min-width: 0; padding-top: var(--eb-space-4); }
+.engine-body { min-width: 0; padding-top: var(--eb-space-2); }
 </style>

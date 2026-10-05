@@ -1,8 +1,7 @@
 <template>
-  <section class="pane corpus-page" aria-labelledby="corpus-heading">
-    <header class="page-heading">
-      <div><span class="eyebrow">语料 / {{ libraryLabel }}</span><h2 id="corpus-heading">语料</h2></div>
-    </header>
+  <section class="pane corpus-page" aria-label="文档">
+    <!-- 页名顶栏已有、库选择器也在顶栏：页内不再重复页头，主体（文档表）直接起排。
+         路由 id 叫 corpus、导航已改「文档」——这页就是文档列表管理。 -->
     <div v-if="!hasBucket" class="empty-guide">
       <h3>先创建一个知识库</h3>
       <eb-button type="primary" @click="$emit('create-library')">新建知识库</eb-button>
@@ -12,41 +11,34 @@
         <eb-button link type="primary" size="small" @click="refreshOverview">重试</eb-button>
       </eb-alert>
 
-      <!-- 主读数一行 + 最近评测一行，都是这一页的注脚；主体是下面的入库流水线。 -->
+      <!-- 库读数压成一行注脚：篇数 + 最近评测。大数字块曾把文档表推到首屏之外。 -->
       <div v-if="overviewBusy && !learning" class="tiny" role="status">正在读取库状态…</div>
-      <div v-else class="ov-strip">
-        <div class="ov-hero">
-          <b class="num">{{ documents.length }}</b>
-          <span class="ov-hero-label">篇文档在库</span>
-        </div>
-        <div class="ov-line">
-          <span class="ov-line-label">最近评测</span>
-          <template v-if="lastRun">
-            <eb-status-tag :value="lastRun.state" :statuses="runStatuses" size="small" />
-            <b>{{ lastRun.name || lastRun.id }}</b>
-            <span class="tiny num">{{ fmtPct(lastRun.summary?.rule_match) }} 规则匹配 · {{ fmtPct(lastRun.summary?.evidence_hit) }} 证据命中 · {{ lastRun.done ?? 0 }}/{{ lastRun.total ?? 0 }} 题</span>
-            <eb-button link type="primary" size="small" @click="pane = 'evals'">查看</eb-button>
-          </template>
-          <template v-else>
-            <span class="tiny dim">还没跑过评测</span>
-            <eb-button link type="primary" size="small" @click="pane = 'evals'">去评测</eb-button>
-          </template>
-        </div>
+      <div v-else class="ov-line">
+        <b class="num ov-count">{{ documents.length }}</b><span>篇在库</span>
+        <span class="ov-sep">·</span>
+        <span class="ov-label">最近评测</span>
+        <template v-if="lastRun">
+          <eb-status-tag :value="lastRun.state" :statuses="runStatuses" size="small" />
+          <b>{{ lastRun.name || lastRun.id }}</b>
+          <span class="tiny num">{{ fmtPct(lastRun.summary?.rule_match) }} 规则匹配 · {{ fmtPct(lastRun.summary?.evidence_hit) }} 证据命中 · {{ lastRun.done ?? 0 }}/{{ lastRun.total ?? 0 }} 题</span>
+          <eb-button link type="primary" size="small" @click="pane = 'evals'">查看</eb-button>
+        </template>
+        <template v-else>
+          <span class="tiny dim">还没跑过评测</span>
+          <eb-button link type="primary" size="small" @click="pane = 'evals'">去评测</eb-button>
+        </template>
       </div>
 
       <!-- 主操作：开始摄取。扫描→勾选→字段映射→上传/目录 都在这一个面板里。 -->
       <DocumentsPanel />
 
-      <!-- 注销是库级破坏性操作，低频且重，默认收起。
-           「清空学得物」不在这页——它删的是簇与证据，属于「知识」。 -->
-      <details class="danger-fold">
-        <summary>库管理（注销这个知识库）</summary>
-        <div class="danger-body">
-          <eb-button type="danger" plain :loading="deleteBusy" @click="deleteDialog = true">注销这个知识库</eb-button>
-          <p class="tiny">注销仅移除该库的注册，语料与学得物都仍在存储中，重新注册同名库即可找回。</p>
-          <eb-alert v-if="deleteError" type="error" :title="deleteError" :closable="false" show-icon />
-        </div>
-      </details>
+      <!-- 注销是库级破坏性操作，低频且重：页脚行常驻（说明在左、动作在右），
+           不再折进手风琴。「清空学得物」不在这页——它删的是簇与证据，属于「知识」。 -->
+      <eb-alert v-if="deleteError" type="error" :title="deleteError" :closable="false" show-icon />
+      <div class="page-foot">
+        <span class="tiny">注销仅移除该库的注册，语料与学得物仍在存储中，重新注册同名库即可找回。</span>
+        <eb-button text type="danger" :loading="deleteBusy" @click="deleteDialog = true">注销这个知识库</eb-button>
+      </div>
     </template>
 
     <eb-dialog v-model="deleteDialog" title="注销知识库" width="min(92%, 440px)" align-center>
@@ -64,7 +56,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from "vue";
 import { useLibraryPane } from "../panes/library.js";
-import { documents, loadDocuments, hasBucket, libraryLabel, nsSel, pane } from "../state.js";
+import { documents, loadDocuments, hasBucket, nsSel, pane } from "../state.js";
 import DocumentsPanel from "./DocumentsPanel.vue";
 
 defineEmits(["create-library"]);
@@ -102,16 +94,9 @@ onMounted(() => {
 <style src="./common.css"></style>
 <style scoped>
 .corpus-page { display: flex; flex-direction: column; gap: var(--eb-space-4); }
-.ov-strip { display: flex; flex-direction: column; gap: var(--eb-space-3); max-width: 860px; }
-.ov-hero { display: flex; align-items: baseline; gap: var(--eb-space-3); }
-.ov-hero b { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
-.ov-hero-label { color: var(--eb-text-color-secondary); font-size: 14px; }
-.ov-line { display: flex; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; padding: var(--eb-space-3) 0; border-top: 1px solid var(--eb-border-color-lighter); }
-.ov-line-label { flex: none; width: 64px; font-size: 12px; color: var(--eb-text-color-placeholder); }
-.ov-line .tiny { line-height: 1.7; }
+.ov-line { display: flex; align-items: baseline; gap: var(--eb-space-2); flex-wrap: wrap; }
+.ov-count { font-size: var(--eb-font-size-md); font-weight: var(--eb-font-weight-semibold); }
+.ov-sep { color: var(--eb-text-color-placeholder); }
+.ov-label { font-size: var(--eb-font-size-xs); color: var(--eb-text-color-placeholder); }
 .dim { color: var(--eb-text-color-placeholder); }
-.danger-fold { border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; padding: 8px 12px; }
-.danger-fold summary { cursor: pointer; font-size: 13px; color: var(--eb-text-color-secondary); user-select: none; }
-.danger-body { padding-top: var(--eb-space-3); display: flex; flex-direction: column; gap: var(--eb-space-3); align-items: flex-start; }
-.danger-body .tiny { color: var(--eb-text-color-placeholder); line-height: 1.8; margin: 0; }
 </style>

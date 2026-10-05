@@ -275,10 +275,60 @@ test("reasoning streams into the thinking box and stages stop overwriting it", a
   const state = app(server.fetch);
   await state.onSend("闯红灯怎么罚");
   const msg = state.messages.value.find((m) => m.role === "assistant");
-  assert.ok(msg.thinkContent.includes("分析问题与检索意图 完成"), "stage line shows before the stream starts");
+  assert.ok(msg.thinkContent.includes("分析问题与检索意图 · 120ms"), "stage line logs before the stream starts");
   assert.ok(msg.thinkContent.includes("先在语料里找处罚依据"), "reasoning streams into the thinking box");
   assert.ok(msg.thinkContent.includes("再核对幅度与记分。"), "chunks append in arrival order");
-  assert.ok(!msg.thinkContent.includes("合成答案 完成"), "a later stage must not clobber the streamed reasoning");
+  assert.ok(!msg.thinkContent.includes("合成答案"), "a later stage must not clobber the streamed reasoning");
+});
+
+// 检索期的过程日志：阶段 detail 人话与深度循环的逐篇评分行都要实时进思考框
+// （用户点名的要求——合成之前不是黑盒，做了什么、看到哪些文档全在框里）。
+test("stage details and per-file scoring append into the thinking box as a retrieval log", async () => {
+  const sse = new Response(
+    'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"rewrite","ms":800,"detail":{"from":"闯红灯","to":"不按交通信号灯指示通行"}}}}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"cascade","ms":90,"detail":{"arm":"primary","top":["道路交通安全法","记分管理办法"]}}}}\n\n' +
+    'data: {"cumulus":{"kind":"file","payload":{"stage":"file","file":"记分管理办法.txt","id":"src:b#1","score":8.5,"windows":3,"elapsed_ms":900}}}\n\n' +
+    'data: {"cumulus":{"kind":"file","payload":{"stage":"file","file":"麻醉药品目录.txt","id":"src:c#1","score":0,"windows":2,"elapsed_ms":1200}}}\n\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"DEEP","conf":0.9,"loops":2}}}\n\n' +
+    'data: [DONE]\n\n',
+  );
+  const server = chatBackend(() => sse);
+  const state = app(server.fetch);
+  await state.onSend("闯红灯怎么罚");
+  const msg = state.messages.value.find((m) => m.role === "assistant");
+  assert.ok(msg.thinkContent.includes("词汇鸿沟改写检索词：「闯红灯」→「不按交通信号灯指示通行」 · 800ms"), "rewrite detail joins the log");
+  assert.ok(msg.thinkContent.includes("关键词级联排序候选文档：主词命中；候选 道路交通安全法、记分管理办法 · 90ms"), "cascade detail names the candidates");
+  // 文件帧带 id：评分行以 doc: 链接渲染（视图层点开预览），无 id 的降级形状由 chat.test 单测覆盖
+  assert.ok(msg.thinkContent.includes("评分 [记分管理办法.txt](doc:src%3Ab%231) 8.5 分 · 3 窗"), "each scored file logs a preview link with title, score, windows");
+  assert.ok(msg.thinkContent.includes("评分 [麻醉药品目录.txt](doc:src%3Ac%231) 0.0 分 · 2 窗"), "zero-score files log too");
+  assert.ok(msg.thinkContent.indexOf("评分 [记分管理办法.txt]") < msg.thinkContent.indexOf("评分 [麻醉药品目录.txt]"), "file lines append in scoring order");
+  assert.equal(msg.stages.length, 2, "file frames do not pollute the stage timeline");
+});
+
+// FAST 先合成（reasoning 已进框）、置信度不足 DEEP 重跑：逐文件评分与
+// deep_sample 是更晚发生的检索过程，必须如实追加在 FAST 思考原文之后，
+// 而不是被「reasoning 接管」的门挡掉——否则深度检索期又是一段黑盒。
+test("deep-loop file lines append after the FAST reasoning, deep resynth gets a separator", async () => {
+  const sse = new Response(
+    'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n' +
+    'data: {"cumulus":{"kind":"reasoning","payload":{"text":"FAST 合成思考原文。"}}}\n\n' +
+    'data: {"cumulus":{"kind":"file","payload":{"stage":"file","file":"实施条例.txt","id":"src:d#2","score":6.2,"windows":2,"elapsed_ms":40000}}}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"deep_sample","ms":52000,"detail":{"facts":7,"admitted":3}}}}\n\n' +
+    'data: {"cumulus":{"kind":"stage","payload":{"name":"deep_synth","ms":9000}}}\n\n' +
+    'data: {"cumulus":{"kind":"reasoning","payload":{"text":"DEEP 重新合成思考。"}}}\n\n' +
+    'data: {"cumulus":{"kind":"done","payload":{"mode":"DEEP","conf":0.5,"loops":3}}}\n\n' +
+    'data: [DONE]\n\n',
+  );
+  const server = chatBackend(() => sse);
+  const state = app(server.fetch);
+  await state.onSend("实习期上高速有什么规定");
+  const msg = state.messages.value.find((m) => m.role === "assistant");
+  const box = msg.thinkContent;
+  assert.ok(box.indexOf("FAST 合成思考原文。") < box.indexOf("评分 [实施条例.txt](doc:src%3Ad%232) 6.2 分 · 2 窗"), "file line appends after the earlier reasoning, in timeline order");
+  assert.ok(box.includes("深度采样：逐篇收容评分：事实 7 项 · 收容窗口 3 个 · 52.0s"), "deep_sample detail joins the log after reasoning");
+  assert.ok(box.includes("—— 重新合成 ——"), "resynth separator marks the second pass");
+  assert.ok(box.endsWith("DEEP 重新合成思考。"), "the second reasoning continues after the separator");
 });
 
 test("send uses one lazily-materialized session, preserves two rounds and avoids chatbot user duplication", async () => {

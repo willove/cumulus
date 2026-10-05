@@ -2,17 +2,9 @@
   <div class="pane">
     <eb-alert v-if="clusterError" type="error" :title="clusterError" :closable="false" show-icon><eb-button type="primary" link @click="loadClusters">重试列表</eb-button></eb-alert>
 
-    <!-- 这个面板过去最大的问题是「不知道它是干什么的」：口径解释收进
-         帮助折叠（默认收起，占屏的是数据不是说明书）。统计数字只在右上
-         一行，与概览段口径一致。知识簇 = 问过的问题按主题归档的答案缓存。 -->
-    <details class="intro-help">
-      <summary>知识簇是什么</summary>
-      <div class="intro-help-body">
-        <p>系统把问过的问题按主题自动归并：同一个主题再问，直接复用已合成好的答案——<b>毫秒级返回、不再调用模型、不烧 token</b>。每个簇记着它依据的原文窗口，可逐条核对。</p>
-        <p class="tiny">待复核 = 该簇的证据窗口还没对当前语料验证过（语料可能已更新）；选中后点「复核」即可以当前原文逐窗校验，通过则转为稳定。</p>
-      </div>
-    </details>
-
+    <!-- 这个面板过去最大的问题是「不知道它是干什么的」——但解释条/帮助折叠
+         本身又成了要收的东西。现在页面自明：列表+生命周期筛选+复核动作，
+         「待复核」的含义由复核结果消息就地解释，不再放说明书。 -->
     <div class="split">
       <aside class="rail">
         <div class="rail-head"><span class="rail-title">知识簇 · {{ clusters.length }}</span></div>
@@ -45,7 +37,7 @@
           </div>
 
           <div style="margin: 10px 0">
-            <span class="sub">问法（命中这些问题时直接复用）：</span>
+            <span class="sub">问法：</span>
             <eb-tag v-for="q in (clusterCur.cluster.queries || [])" :key="q" size="small">{{ q }}</eb-tag>
           </div>
           <pre class="pre-block">{{ clusterCur.cluster.content }}</pre>
@@ -66,7 +58,7 @@
           </ul>
 
           <div style="margin-top: 14px">
-            <div class="sub" style="margin-bottom: 6px">依据的原文窗口（{{ clusterCur.cites.length }}）</div>
+            <div class="sub" style="margin-bottom: 6px">依据的原文窗口 · {{ clusterCur.cites.length }}</div>
             <div v-if="!clusterCur.cites.length" class="tiny">暂无 cites 边——复用簇可能不带窗口。</div>
             <div v-else class="cite-cards">
               <article v-for="(e, i) in clusterCur.cites" :key="i" class="evi-card">
@@ -86,7 +78,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useClustersPane, lifecycleLabel, clusterStats } from "../panes/clusters.js";
 import { displaySourceId } from "../panes/chat.js";
 import { pane } from "../state.js";
@@ -115,15 +107,22 @@ const activeFilter = ref("");
 const visibleClusters = computed(() =>
   activeFilter.value ? clusters.value.filter((c) => c.lifecycle === activeFilter.value) : clusters.value);
 
+// 首次加载自动选中一个簇（优先待复核）：右栏详情是这页的主体，空着的
+// 「从左侧选一个」等于把最重要的内容挡在第一次点击之后。只补一次，之后
+// 选不选、选哪个都归用户。
+let autoPicked = false;
+watch([clusters, clusterLoading], () => {
+  if (autoPicked || clusterLoading.value || clusterCur.value) return;
+  const first = visibleClusters.value.find((c) => c.lifecycle === "emerging") || visibleClusters.value[0];
+  if (first) { autoPicked = true; openCluster(first._id); }
+}, { immediate: true });
+
 // 证据得分 → 强度条宽度百分比（0–10 分制）。
 function scorePct(score) { return Math.max(4, Math.min(100, ((score ?? 0) / 10) * 100)) + "%"; }
 </script>
 
 <style scoped src="./common.css"></style>
 <style scoped>
-.intro-help { border: 1px dashed var(--eb-border-color-lighter); border-radius: 10px; padding: 8px 12px; margin-bottom: 12px; }
-.intro-help summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--eb-text-color-regular); user-select: none; }
-.intro-help-body p { margin: 8px 0 0; font-size: 12.5px; line-height: 1.8; color: var(--eb-text-color-secondary); }
 /* segmented 筛选行贴栏宽，条目留呼吸位后即列表。 */
 .rail :deep(.eb-segmented) { width: 100%; margin: 0 0 8px; }
 .review-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }

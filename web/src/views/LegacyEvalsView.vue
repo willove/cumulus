@@ -1,10 +1,10 @@
 <template>
   <section class="legacy-evals" aria-labelledby="legacy-evals-heading">
     <div class="page-heading"><h3 id="legacy-evals-heading">旧版历史报告</h3><eb-button :loading="evalLoading" @click="loadEvals">刷新旧版报告</eb-button></div>
-    <eb-alert type="info" title="旧版评分协议，与评测工作台不可直接比较" :closable="false">旧版 EM 字段可能采用历史判官覆盖语义；未判官评测不标为判官分数。此处只读保留原报告，不参与新版运行对比。</eb-alert>
+    <eb-alert type="info" title="旧版评分协议，与评测工作台不可直接比较" :closable="false" />
     <eb-alert v-if="evalError" type="error" :title="evalError" :closable="false" />
     <div class="table-scroll"><eb-table :data="evalRuns" row-key="_id" :scroll-x="600" aria-label="旧版评测报告"><eb-table-column label="报告" min-width="240"><template #default="{ row }"><eb-button link type="primary" @click="openEval(row._id)">{{ row.tag || row._id }}</eb-button></template></eb-table-column><eb-table-column prop="at" label="时间" min-width="180" /><eb-table-column label="历史 EM" width="120" :formatter="row => percent(row.system?.em)" /></eb-table></div>
-    <p v-if="!evalRuns.length && !evalLoading" class="sub">当前库没有旧版报告。请前往评测工作台新建评测。</p>
+    <p v-if="!evalRuns.length && !evalLoading" class="sub">当前库没有旧版报告</p>
     <eb-section-card v-if="evalCur" :title="evalCur.tag || evalCur._id">
       <div class="legacy-evals">
         <eb-tag>{{ evalCur.judged ? '旧版已判官协议' : '未启用判官' }} · n={{ evalCur.n ?? 'N/A' }}</eb-tag>

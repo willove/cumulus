@@ -20,7 +20,7 @@
 
     <!-- 档案列表：一行一个端点配置，激活徽标 + 动作。 -->
     <div class="profile-list" role="list" aria-label="模型配置档案">
-      <div v-if="!profiles.length && !modelsBusy" class="tiny empty-note">还没有模型配置——新建一条，填入端点与密钥。</div>
+      <div v-if="!profiles.length && !modelsBusy" class="tiny empty-note">还没有模型配置</div>
       <div v-for="p in profiles" :key="p.id" class="profile-row" role="listitem" :class="{ active: p.id === activeProfile }">
         <div class="profile-main">
           <b>{{ p.label || p.id }}</b>
@@ -52,22 +52,21 @@
     <!-- 编辑/新建：通用配置表单（label 左置，无卡片堆）。 -->
     <eb-form v-if="editing" label-position="left" :label-width="150" class="profile-form" @submit.prevent>
       <h3 class="form-heading">{{ editing.created_at ? '编辑模型配置' : '新建模型配置' }}</h3>
-      <eb-form-item label="标识（不可改）">
+      <eb-form-item label="标识">
         <eb-input v-if="!editing.created_at" v-model="editing.id" :clearable="false" placeholder="例如 minimax" />
         <b v-else class="num">{{ editing.id }}</b>
       </eb-form-item>
       <eb-form-item label="名称"><eb-input v-model="editing.label" :clearable="false" placeholder="例如 MiniMax 生产" /></eb-form-item>
-      <eb-form-item label="Base URL（含 /v1）"><eb-input v-model="editing.base_url" :clearable="false" placeholder="https://api.example.com/v1" /></eb-form-item>
-      <eb-form-item :label="'API Key' + (editing.api_key_set ? '（已设置，留空不修改）' : '（未设置）')">
+      <eb-form-item label="Base URL"><eb-input v-model="editing.base_url" :clearable="false" placeholder="https://api.example.com/v1" /></eb-form-item>
+      <eb-form-item label="API Key">
         <eb-input v-model="editing.api_key" type="password" :clearable="false" :placeholder="editing.api_key_set ? '留空 = 保持现有密钥' : '粘贴供应商密钥'" />
       </eb-form-item>
       <eb-form-item label="Chat 模型"><eb-input v-model="editing.chat_model" :clearable="false" placeholder="例如 MiniMax-M3" /></eb-form-item>
-      <eb-form-item label="Embed 模型（空 = 本地）"><eb-input v-model="editing.embed_model" :clearable="false" placeholder="留空使用本地 embedder" /></eb-form-item>
-      <eb-form-item label="思维链分离（MiniMax 系）"><eb-switch v-model="editing.reasoning_split" /></eb-form-item>
+      <eb-form-item label="Embed 模型"><eb-input v-model="editing.embed_model" :clearable="false" placeholder="留空使用本地" /></eb-form-item>
+      <eb-form-item label="思维链分离"><eb-switch v-model="editing.reasoning_split" /></eb-form-item>
       <div class="cfg-actions">
         <eb-button type="primary" :loading="saveBusy" :disabled="!editing.id.trim() || !editing.base_url.trim()" @click="save">保存</eb-button>
         <eb-button @click="editing = null">取消</eb-button>
-        <span class="tiny">启用即写入 .env 并热生效。</span>
       </div>
     </eb-form>
     <div v-else class="cfg-actions">
@@ -77,14 +76,12 @@
     <!-- 本地模型权重：嵌入侧的本地选项，与端点配置同页收纳。 -->
     <div class="weights-section">
       <div class="form-heading-row">
-        <h3 class="form-heading">本地模型权重（MiniLM-L12 · 384 维）</h3>
+        <h3 class="form-heading">本地模型权重</h3>
         <eb-status-tag :value="weightState.value" :statuses="weightState.statuses" />
       </div>
       <div class="krow"><span>目录</span><b class="num">{{ settingsModel ? settingsModel.dir : '—' }}</b></div>
-      <div class="tiny" style="margin: 8px 0">
-        {{ settingsModel && settingsModel.installed
-          ? '已安装只表示文件可用；是否用于检索取决于上面的嵌入配置。'
-          : '未检测到权重。下载约 485MB（魔搭社区）后自动验证。' }}
+      <div class="tiny" style="margin: 8px 0" v-if="!(settingsModel && settingsModel.installed)">
+        未检测到权重。下载约 485MB（魔搭社区）后自动验证。
       </div>
       <div class="cfg-actions">
         <eb-button v-if="!(settingsModel && settingsModel.installed)" :loading="settingsBusy || (settingsModel && settingsModel.installing)" @click="installWeights">下载权重</eb-button>
@@ -96,8 +93,7 @@
                          :statuses="[{ value: 'pass', label: '验证通过', type: 'success' }, { value: 'fail', label: '验证失败', type: 'danger' }]" />
           <span class="tiny" v-if="settingsVerify.ok">{{ settingsVerify.dims }} 维 · 用时 {{ settingsVerify.ms }} ms · 范数 {{ Number(settingsVerify.norm).toFixed(4) }}</span>
         </div>
-          <p class="tiny" style="margin: 6px 0 0" v-if="settingsVerify.ok">权重可加载、可编码；是否用于检索取决于上面的嵌入配置。</p>
-        <p class="tiny" style="margin: 6px 0 0" v-else>{{ settingsVerify.error }}</p>
+        <p class="tiny" style="margin: 6px 0 0" v-if="!settingsVerify.ok">{{ settingsVerify.error }}</p>
       </div>
       <div class="tiny num" v-if="settingsModel && settingsModel.installing && settingsModel.progress" style="margin-top: 8px">
         {{ settingsModel.progress.file }} · {{ fmtMB(settingsModel.progress.done) }} / {{ fmtMB(settingsModel.progress.total) }}

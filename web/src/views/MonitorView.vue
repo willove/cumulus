@@ -1,7 +1,6 @@
 <template>
   <div class="pane">
     <div class="mon-toolbar">
-      <span class="tiny">检索与系统指标为全服务累计；知识层为当前知识库。</span>
       <eb-button :loading="monBusy" size="small" @click="loadMonitor">刷新</eb-button>
     </div>
     <eb-alert v-if="monError" type="error" :title="monError" :closable="false" show-icon />
@@ -15,12 +14,12 @@
       <eb-section-card title="检索趋势" style="margin-bottom: 14px">
         <div class="chart-grid">
           <div>
-            <div class="chart-cap">最近 {{ recentQueries.length }} 次查询耗时（毫秒，右端最新）</div>
+            <div class="chart-cap">最近查询耗时</div>
             <eb-chart v-if="recentQueries.length >= 2" :options="latencyOptions" :height="240" aria-label="最近查询耗时" />
             <eb-empty-state v-else icon="line-chart" size="compact" title="还没有查询样本" />
           </div>
           <div>
-            <div class="chart-cap">档位分布（累计）</div>
+            <div class="chart-cap">档位分布</div>
             <eb-chart v-if="modeData.length" :options="modeOptions" :height="240" aria-label="检索档位分布" />
             <eb-empty-state v-else icon="dashboard" size="compact" title="还没有档位记录" />
           </div>
@@ -37,12 +36,10 @@
           <div class="ratio">
             <div class="ratio-head"><span>平均置信度</span><b class="num">{{ (mon.retrieval.avg_confidence || 0).toFixed(3) }}</b></div>
             <eb-progress :percentage="pct(mon.retrieval.avg_confidence)" />
-            <div class="tiny">回答置信度的均值（0–1）</div>
           </div>
           <div class="ratio">
             <div class="ratio-head"><span>平均事实覆盖</span><b class="num">{{ (mon.retrieval.avg_coverage || 0).toFixed(3) }}</b></div>
             <eb-progress :percentage="pct(mon.retrieval.avg_coverage)" />
-            <div class="tiny">查询分解出的原子事实被证据覆盖的比例</div>
           </div>
           <div class="ratio">
             <div class="ratio-head"><span>错误率</span><b class="num">{{ fmtPct(errorRate) }}</b></div>
@@ -51,8 +48,8 @@
           </div>
         </div>
         <div class="krow" style="margin-top: 10px">
-          <span>延迟分位（复用 / 全量）</span>
-          <b class="num">{{ fmtUS(mon.retrieval.warm_p50_us) }} / {{ fmtUS(mon.retrieval.cold_p50_us) }} p50</b>
+          <span>延迟 p50 · 复用 / 全量</span>
+          <b class="num">{{ fmtUS(mon.retrieval.warm_p50_us) }} / {{ fmtUS(mon.retrieval.cold_p50_us) }}</b>
         </div>
         <div class="krow">
           <span>嵌入器</span>
@@ -100,7 +97,7 @@
           <span>存储目录</span><b class="num tiny">{{ mon.system.store_dir }}</b>
         </div>
         <div class="krow">
-          <span>内存占用（Heap / RSS）</span>
+          <span>内存 Heap / RSS</span>
           <b class="num">{{ (mon.system?.heap_mb || 0).toFixed(1) }} / {{ (mon.system?.rss_mb || 0).toFixed(1) }} MB</b>
         </div>
       </eb-section-card>
@@ -238,7 +235,7 @@ const lifecycleOptions = computed(() => ({ type: "doughnut", pieData: lifecycleD
 
 <style src="./common.css"></style>
 <style>
-.mon-toolbar { display: flex; justify-content: space-between; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; margin-bottom: var(--eb-space-4); }
+.mon-toolbar { display: flex; justify-content: flex-end; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; margin-bottom: var(--eb-space-4); }
 .chart-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: var(--eb-space-5); }
 .chart-cap { font-size: var(--eb-font-size-xs); color: var(--eb-text-color-secondary); margin-bottom: var(--eb-space-2); }
 .ratio-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--eb-space-4); }

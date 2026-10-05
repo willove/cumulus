@@ -66,7 +66,8 @@ import EngineView from "./views/EngineView.vue";
 const views = { chat: ChatView, corpus: CorpusView, knowledge: KnowledgeView, evals: EvalsView, engine: EngineView };
 const navigation = [
   { id: "chat", title: "检索问答", icon: "question-answer" },
-  { id: "corpus", title: "语料", icon: "database" },
+  // 这页实质是文档列表管理，导航跟内容叫「文档」；pane id 仍是 corpus（旧收藏链接不断）。
+  { id: "corpus", title: "文档", icon: "database" },
   { id: "knowledge", title: "知识", icon: "book-open" },
   { id: "evals", title: "评测", icon: "bar-chart-h" },
   { id: "engine", title: "引擎", icon: "dashboard" },

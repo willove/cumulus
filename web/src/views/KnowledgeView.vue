@@ -1,8 +1,6 @@
 <template>
-  <section class="pane knowledge-page" aria-labelledby="knowledge-heading">
-    <header class="page-heading">
-      <div><span class="eyebrow">知识 / {{ libraryLabel }}</span><h2 id="knowledge-heading">知识</h2></div>
-    </header>
+  <section class="pane knowledge-page" aria-label="知识">
+    <!-- 页名顶栏已有：页内不重复页头，簇列表即刻起排。 -->
     <div v-if="!hasBucket" class="empty-guide">
       <h3>先创建一个知识库</h3>
       <eb-button type="primary" @click="$emit('create-library')">新建知识库</eb-button>
@@ -12,16 +10,16 @@
         <eb-button link type="primary" size="small" @click="loadOverview">重试</eb-button>
       </eb-alert>
 
-      <div class="ov-strip">
-        <div class="ov-hero">
-          <b class="num">{{ stats.total }}</b>
-          <span class="ov-hero-label">个答案簇<template v-if="stats.emerging"> · <b class="num warn">{{ stats.emerging }}</b> 待复核</template></span>
-        </div>
-        <div class="ov-line">
-          <span class="ov-line-label">证据窗口</span>
-          <span class="tiny">{{ evidenceCount == null ? "—" : evidenceCount }} 个原文窗口被簇引用</span>
-          <eb-button link size="small" @click="pane = 'corpus'">看语料</eb-button>
-        </div>
+      <!-- 库读数一行注脚：簇数 + 待复核 + 证据窗口。 -->
+      <div class="ov-line">
+        <b class="num ov-count">{{ stats.total }}</b><span>个答案簇</span>
+        <template v-if="stats.emerging">
+          <span class="ov-sep">·</span>
+          <b class="num warn">{{ stats.emerging }}</b><span>待复核</span>
+        </template>
+        <span class="ov-sep">·</span>
+        <span class="tiny">证据窗口 {{ evidenceCount == null ? "—" : evidenceCount }} 个被簇引用</span>
+        <eb-button link size="small" @click="pane = 'corpus'">看文档</eb-button>
       </div>
 
       <!-- 主体：簇列表 / 详情 / 证据星图 / 复核。 -->
@@ -54,17 +52,14 @@
         </template>
       </section>
 
-      <!-- 清空学得物删的是簇、证据窗口、引用边、账本与会话——都是这一页的东西，
-           所以它在这里而不在「语料」。语料本身不动。 -->
-      <details class="danger-fold">
-        <summary>清空学得物并重学</summary>
-        <div class="danger-body">
-          <eb-button :loading="resetBusy" @click="resetDialog = true">清空学得物并重学</eb-button>
-          <p class="tiny">会删除答案簇、证据窗口、引用边、关联账本与会话，<b>语料不动</b>，下次提问重新学习。</p>
-          <eb-alert v-if="resetReport" type="success" :closable="false" :title="`已清空 ${resetReport.total} 项学得物`">{{ resetSummary }}</eb-alert>
-          <eb-alert v-if="resetError" type="error" :title="resetError" :closable="false" show-icon />
-        </div>
-      </details>
+      <!-- 清空学得物删的是簇、证据窗口、引用边、账本与会话——都是这一页的东西。
+           破坏性动作常驻页脚行（说明在左、动作在右），不再折进手风琴。 -->
+      <eb-alert v-if="resetReport" type="success" :closable="false" :title="`已清空 ${resetReport.total} 项学得物`">{{ resetSummary }}</eb-alert>
+      <eb-alert v-if="resetError" type="error" :title="resetError" :closable="false" show-icon />
+      <div class="page-foot">
+        <span class="tiny">删除答案簇、证据窗口、引用边、关联账本与会话，语料不动，下次提问重新学习。</span>
+        <eb-button text type="danger" :loading="resetBusy" @click="resetDialog = true">清空学得物并重学</eb-button>
+      </div>
     </template>
 
     <eb-dialog v-model="resetDialog" title="清空学得物" width="min(92%, 440px)" align-center>
@@ -85,7 +80,7 @@ import { useLibraryPane } from "../panes/library.js";
 import { useClustersPane, clusterStats } from "../panes/clusters.js";
 import { useAffinityPane } from "../panes/affinity.js";
 import { displaySourceId } from "../panes/chat.js";
-import { documents, loadDocuments, hasBucket, libraryLabel, nsSel, pane } from "../state.js";
+import { documents, loadDocuments, hasBucket, nsSel, pane } from "../state.js";
 import ClustersView from "./ClustersView.vue";
 
 defineEmits(["create-library"]);
@@ -142,18 +137,10 @@ onMounted(() => {
 <style src="./common.css"></style>
 <style scoped>
 .knowledge-page { display: flex; flex-direction: column; gap: var(--eb-space-4); }
-.ov-strip { display: flex; flex-direction: column; gap: var(--eb-space-3); max-width: 860px; }
-.ov-hero { display: flex; align-items: baseline; gap: var(--eb-space-3); }
-.ov-hero b { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
-.ov-hero-label { color: var(--eb-text-color-secondary); font-size: 14px; }
-.ov-hero-label .warn { color: var(--eb-color-warning); font-size: 18px; }
-.ov-line { display: flex; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; padding: var(--eb-space-3) 0; border-top: 1px solid var(--eb-border-color-lighter); }
-.ov-line-label { flex: none; width: 64px; font-size: 12px; color: var(--eb-text-color-placeholder); }
-.ov-line .tiny { line-height: 1.7; }
-.danger-fold { border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; padding: 8px 12px; }
-.danger-fold summary { cursor: pointer; font-size: 13px; color: var(--eb-text-color-secondary); user-select: none; }
-.danger-body { padding-top: var(--eb-space-3); display: flex; flex-direction: column; gap: var(--eb-space-3); align-items: flex-start; }
-.danger-body .tiny { color: var(--eb-text-color-placeholder); line-height: 1.8; margin: 0; }
+.ov-line { display: flex; align-items: baseline; gap: var(--eb-space-2); flex-wrap: wrap; }
+.ov-count { font-size: var(--eb-font-size-md); font-weight: var(--eb-font-weight-semibold); }
+.ov-line .warn { color: var(--eb-color-warning); }
+.ov-sep { color: var(--eb-text-color-placeholder); }
 /* 词档关联：一行一个文档，权重画成条+数字两个通道（长度易比、数字可核）。 */
 .affinity { display: flex; flex-direction: column; gap: var(--eb-space-3); border-top: 1px solid var(--eb-border-color-lighter); padding-top: var(--eb-space-4); }
 .affinity-head h3 { margin: 0; font-size: var(--eb-font-size-md); }

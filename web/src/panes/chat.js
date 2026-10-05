@@ -47,7 +47,10 @@ export function stageDetailLines(name, d) {
   if (name === "cascade") {
     out.push(CASCADE_ARM_TEXT[d.arm] || String(d.arm || ""));
     if (Array.isArray(d.terms) && d.terms.length) out.push("扩展词 " + d.terms.slice(0, 5).join("、"));
-    if (Array.isArray(d.top) && d.top.length) out.push("候选 " + d.top.join("、"));
+    if (Array.isArray(d.top) && d.top.length) {
+      // top 现在是 {t, id} 对象（id 供思考框链接预览用）；旧持久化数据仍是纯标题串
+      out.push("候选 " + d.top.map(x => (typeof x === "string" ? x : x?.t) || "").filter(Boolean).join("、"));
+    }
   }
   if (name === "sample") {
     const bits = [];
@@ -69,6 +72,83 @@ export function stageDetailLines(name, d) {
   return out.filter(Boolean);
 }
 export function fmtMS(ms) { return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : ms + "ms"; }
+
+// 思考框的过程日志行。合成思考流开始前，模型思考原文还不存在，检索期的
+// 「当时做了什么、看到了哪些文档」就由这两类行顶上：阶段行 = 阶段名 +
+// detail 人话（时间轴同一套渲染）+ 耗时；文件行 = 深度循环逐篇评分的实时
+// 记录（哪篇文档、最高几分、几窗）。
+// 文档名一律走 markdown 链接（doc: 协议）：ChatMarkdown 把非标准协议渲染成
+// 带 data-ref-id 的 eb-ref-chip，点击由视图层拦截打开原文预览；无 id（旧数据）
+// 退化为纯文本。md 特殊字符转义防文档名里的 [ ] _ 破坏链接结构。
+const escMd = (s) => String(s ?? "").replace(/([\\[\]*`_])/g, "\\$1");
+const docLink = (name, id) => id ? `[${escMd(name)}](doc:${encodeURIComponent(id)})` : escMd(name);
+
+export function stageThinkLine(name, d, ms) {
+  const bits = [];
+  if (d && typeof d === "object") {
+    if (name === "rewrite" && d.from && d.to) bits.push(`「${escMd(d.from)}」→「${escMd(d.to)}」`);
+    if (name === "analyze") {
+      if (d.intent) bits.push("意图 " + d.intent);
+      if (Array.isArray(d.primary) && d.primary.length) bits.push("关键词 " + d.primary.map(escMd).join("、"));
+    }
+    if (name === "cascade") {
+      bits.push(CASCADE_ARM_TEXT[d.arm] || String(d.arm || ""));
+      if (Array.isArray(d.terms) && d.terms.length) bits.push("扩展词 " + d.terms.slice(0, 5).map(escMd).join("、"));
+      if (Array.isArray(d.top) && d.top.length) {
+        bits.push("候选 " + d.top.map(x => (typeof x === "string" ? docLink(x) : docLink(x?.t || "", x?.id))).filter(s => s).join("、"));
+      }
+    }
+    if (name === "sample") {
+      const seg = [];
+      if (d.source) seg.push(docLink(String(d.source), d.source_id));
+      if (d.kept != null) seg.push(`过线窗口 ${d.kept} 个`);
+      if (d.bridge) seg.push("会话桥接");
+      if (seg.length) bits.push(seg.join(" · "));
+    }
+    if (name === "deep_sample") {
+      const seg = [];
+      if (d.facts != null) seg.push(`事实 ${d.facts} 项`);
+      if (d.admitted != null) seg.push(`收容窗口 ${d.admitted} 个`);
+      if (Array.isArray(d.missing) && d.missing.length) {
+        const shown = d.missing.slice(0, 4).join("、");
+        seg.push(`未覆盖：${shown}${d.missing.length > 4 ? "…" : ""}`);
+      }
+      if (seg.length) bits.push(seg.join(" · "));
+    }
+  }
+  return stageText(name) + (bits.length ? "：" + bits.join("；") : "") + (ms ? " · " + fmtMS(ms) : "");
+}
+export function fileThinkLine(file, score, windows, id) {
+  const s = typeof score === "number" && Number.isFinite(score) ? score.toFixed(1) : "?";
+  // 显示名解码（blk 源的 business key 是 URL 编码路径），预览 id 原样进链接
+  return "评分 " + docLink(displaySourceId(file), id) + " " + s + " 分" + (windows != null ? " · " + windows + " 窗" : "");
+}
+
+// 会话恢复的重放：服务端随答案落库的是原始事件序列（stage/file/reasoning，
+// 到达顺序，连续思考原文并成一段），这里用与实时折叠完全相同的行渲染器
+// 重放出思考框全文——切换会话或刷新后，检索日志与思考原文原样回来。
+export function thinkContentFromSteps(steps) {
+  if (!Array.isArray(steps) || !steps.length) return "";
+  let out = "";
+  let sawReasoning = false;
+  for (const s of steps) {
+    if (s?.kind === "stage") {
+      if (sawReasoning) {
+        // 合成段本身不起行（思考原文即过程）；二次合成补分隔——与实时折叠同规则
+        if (s.name === "deep_synth") { out += "\n\n—— 重新合成 ——\n"; continue; }
+        if (s.name === "synth") continue;
+      }
+      out += (out ? "\n" : "") + stageThinkLine(s.name, s.detail, s.ms);
+    } else if (s?.kind === "file") {
+      out += (out ? "\n" : "") + fileThinkLine(s.file, s.score, s.windows, s.id);
+    } else if (s?.kind === "reasoning") {
+      const first = !sawReasoning;
+      sawReasoning = true;
+      out += (first ? "\n\n" : "") + (s.text || "");
+    }
+  }
+  return out;
+}
 
 // token 去向的分段名 → 人话（引擎侧键：rewrite/fast/decompose/rank/score/
 // widen/synth）。只列出现的段；这段是注脚级数据，标签必须自解释。
@@ -246,22 +326,42 @@ export function useChatPane() {
         const msg = m();
         if (msg) {
           msg.stages = [...(msg.stages || []), row];
-          // 思考框在推理流开始前显示阶段进度；一旦 reasoning 接管，阶段行
-          // 不再覆写（思考框 = 思考过程，进度归悬浮条与时间轴）。第二遍
-          // 合成（FAST 弃→DEEP 重合）续在同一条流里，补一道分隔。
-          if ((msg.thinking || msg.status === "pending") && !msg.reasoning) {
-            updateMessage(msg.id, { thinkContent: stageText(row.name) + " 完成" + (row.ms ? " · " + fmtMS(row.ms) : "") });
-          } else if (msg.reasoning && row.name === "deep_synth") {
-            appendThinkContent(msg.id, "\n\n—— 重新合成 ——\n");
+          // 思考框 = 全程过程日志：检索阶段行（含 FAST 先合成失败后 DEEP 重跑
+          // 的 deep_sample）按到达顺序如实追加——reasoning 已在流中也让位不
+          // 阻挡，日志与思考原文按真实时间线交错。合成段本身不起行：思考原
+          // 文就是它的过程；二次合成（FAST 弃→DEEP 重合）只补一道分隔。
+          const alive = msg.status === "pending" || msg.status === "streaming" || msg.thinking;
+          const synthStage = row.name === "synth" || row.name === "deep_synth";
+          if (!alive) {
+            // 消息已收尾：迟到帧无处安放，也不该重开思考框。
+          } else if (synthStage && msg.reasoning) {
+            if (row.name === "deep_synth") appendThinkContent(msg.id, "\n\n—— 重新合成 ——\n");
+          } else {
+            appendThinkContent(msg.id, (msg.thinkContent ? "\n" : "") + stageThinkLine(row.name, row.detail, row.ms));
           }
         }
         if (p.elapsed_ms) elapsed.value = Math.round(p.elapsed_ms / 1000);
         return "";
       }
+      case "file": {
+        // 深度循环逐篇评分，一篇一行进思考框：正在看哪篇文档、最高几分、
+        // 几窗。FAST 先合成过时 reasoning 已非空，但这是更晚发生的检索过程，
+        // 照常追加（时间线如实交错）。
+        if (!p.file) return "";
+        ensureWireMessage(messageId);
+        const msg = m();
+        const alive = msg && (msg.status === "pending" || msg.status === "streaming" || msg.thinking);
+        if (alive) {
+          // id 是完整修订标识，缺了 docLink 退纯文本——老 serve 的帧没有它
+          appendThinkContent(msg.id, (msg.thinkContent ? "\n" : "") + fileThinkLine(p.file, p.score, p.windows, p.id));
+        }
+        return "";
+      }
       case "reasoning": {
         // 合成思考原文：端点反正会生成，这里直接流进消息的思考框
         // （ChatThinking：流式中自动展开滚动，完成后收成「已深度思考」
-        // 可再展开）。逐块追加，不持久化（会话恢复只有分段耗时）。
+        // 可再展开）。逐块追加；服务端同一流也录进 think 步骤随回合落库，
+        // 会话恢复时由 thinkContentFromSteps 重放。
         ensureWireMessage(messageId);
         const msg = m();
         if (!msg) return "";
@@ -473,20 +573,26 @@ export function useChatPane() {
       if (!valid(op)) return;
       if (!d || (d.messages != null && !Array.isArray(d.messages))) throw new Error("会话响应格式无效");
       current.value = s.id;
-      // 恢复每条消息的附属数据：引用、运行卡、时间轴、时间戳——服务端会话
-      // 文档现在随答案一起存了这些（sessionMessage 的 sources/stats），
-      // 刷新后重新打开会话，答案下面的引用卡和分段耗时原样回来。
-      messages.value = (d.messages || []).map((m, i) => ({
-        id: s.id + "-" + i, role: m.role, content: m.content, status: "done",
-        createdAt: m.at || undefined,
-        sources: Array.isArray(m.sources) ? m.sources.map(mapRef) : [],
-        // 持久化字段是 latency_ms，界面运行卡读 latency：归一化，别让刷新后
-        // 总耗时变成 0.0s。
-        stats: m.stats ? { ...m.stats, latency: m.stats.latency ?? m.stats.latency_ms ?? 0 } : null,
-        stages: m.stats?.stages
-          ? Object.entries(m.stats.stages).map(([name, us]) => ({ name, ms: Math.round(us / 1000) }))
-          : [],
-      }));
+      // 恢复每条消息的附属数据：引用、运行卡、时间轴、思考框、时间戳——
+      // 服务端会话文档随答案一起存了这些（sessionMessage 的 sources/stats/
+      // think），刷新或切回会话后原样回来。时间轴 detail 从 think 的阶段步
+      // 骤回填（stats.stages 只有耗时），思考框按原始序列重放。
+      messages.value = (d.messages || []).map((m, i) => {
+        const thinkSteps = Array.isArray(m.think?.steps) ? m.think.steps : [];
+        const detailByName = new Map(thinkSteps.filter(s => s?.kind === "stage" && s.detail).map(s => [s.name, s.detail]));
+        return {
+          id: s.id + "-" + i, role: m.role, content: m.content, status: "done",
+          createdAt: m.at || undefined,
+          sources: Array.isArray(m.sources) ? m.sources.map(mapRef) : [],
+          // 持久化字段是 latency_ms，界面运行卡读 latency：归一化，别让刷新后
+          // 总耗时变成 0.0s。
+          stats: m.stats ? { ...m.stats, latency: m.stats.latency ?? m.stats.latency_ms ?? 0 } : null,
+          stages: m.stats?.stages
+            ? Object.entries(m.stats.stages).map(([name, us]) => ({ name, ms: Math.round(us / 1000), detail: detailByName.get(name) || null }))
+            : [],
+          thinkContent: thinkContentFromSteps(thinkSteps),
+        };
+      });
     } catch (e) {
       if (valid(op)) showError(e);
     } finally {

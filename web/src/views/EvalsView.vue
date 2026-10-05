@@ -1,11 +1,6 @@
 <template>
-  <section class="pane eval-workbench" aria-labelledby="eval-heading">
-    <header class="page-heading">
-      <div><span class="eyebrow">知识库 / {{ libraryLabel }}<span v-if="nsSel"> · {{ nsSel }}</span></span><h2 id="eval-heading">评测</h2></div>
-      <div class="form-actions">
-        <eb-button :disabled="!hasBucket || busy.runs" @click="refresh">刷新</eb-button>
-      </div>
-    </header>
+  <section class="pane eval-workbench" aria-label="评测">
+    <!-- 页名顶栏已有：页内不重复页头，运行条直接起排，刷新与旧版报告收在条尾。 -->
     <div v-if="!hasBucket" class="empty-guide">
       <h3>先选择一个知识库</h3><p class="sub">在顶部选择或创建知识库。</p>
     </div>
@@ -23,6 +18,10 @@
         <eb-segmented v-model="mode" :options="modeOptions" size="small" />
         <eb-button type="primary" :disabled="!datasetPreview || busy.submit" :loading="busy.submit" @click="startRunClick">运行</eb-button>
         <eb-button link type="primary" @click="uploadOpen = !uploadOpen">{{ uploadOpen ? '收起上传' : '上传题集' }}</eb-button>
+        <span class="run-bar-end">
+          <eb-button :disabled="!hasBucket || busy.runs" @click="refresh">刷新</eb-button>
+          <eb-button link @click="section = 'legacy'">旧版历史报告</eb-button>
+        </span>
       </div>
 
       <!-- 上传/校验折叠面板：JSONL 上传或粘贴 → 校验 → 存为题集。 -->
@@ -78,8 +77,6 @@
         <EvalRunDetail v-if="run" :key="run.id" :run="run" :items="filteredItems" :runs="runs" :progress="progress" :active="isActive(run)" :busy="busy" :item-filter="itemFilter" :live-confirmed="retryConfirmed" :compare-id="compareID" :comparison="comparison" :compare-error="compareError" @update:item-filter="itemFilter = $event" @update:live-confirmed="retryConfirmed = $event" @update:compare-id="compareID = $event" @action="runAction" @export="exportRun" @compare="compareRuns" @select-item="selectedItem = $event" @new-run="backToRunBar" />
         <EvalItemDetail v-if="selectedItem" :item="selectedItem" @close="selectedItem = null" />
       </template>
-
-      <div class="legacy-entry"><eb-button link @click="section = 'legacy'">旧版历史报告</eb-button></div>
     </template>
 
     <!-- 真实模式确认：计费是事实，不是吓唬。 -->
@@ -96,7 +93,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { useEvaluationWorkbench } from '../panes/evals.js';
-import { nsSel, hasBucket, libraryLabel } from '../state.js';
+import { nsSel, hasBucket } from '../state.js';
 import EvalRunDetail from './EvalRunDetail.vue';
 import EvalItemDetail from './EvalItemDetail.vue';
 import LegacyEvalsView from './LegacyEvalsView.vue';
@@ -174,13 +171,13 @@ function downloadTemplate() {
 .eval-workbench { display: flex; flex-direction: column; gap: var(--eb-space-5); }
 .eval-workbench > * { flex-shrink: 0; min-width: 0; }
 .run-bar { display: flex; align-items: center; gap: var(--eb-space-3); flex-wrap: wrap; }
+.run-bar-end { margin-left: auto; display: flex; align-items: center; gap: var(--eb-space-2); }
 .dataset-pick { width: min(100%, 300px); }
 .upload-fold { border: 1px solid var(--eb-border-color-lighter); border-radius: 10px; padding: var(--eb-space-4); display: flex; flex-direction: column; gap: var(--eb-space-4); }
 .upload-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 0 var(--eb-space-5); }
 .upload-grid > :last-child { grid-column: 1 / -1; }
 .validate-list { margin: 0; padding-left: 18px; line-height: 1.8; }
-.eval-empty { max-width: 640px; margin: var(--eb-space-10) auto var(--eb-space-4); }
+.eval-empty { max-width: 640px; margin: var(--eb-space-8) auto var(--eb-space-4); }
 .eval-empty .form-actions { justify-content: center; margin-top: var(--eb-space-5); }
-.legacy-entry { display: flex; justify-content: flex-end; }
 @media (max-width: 760px) { .upload-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>

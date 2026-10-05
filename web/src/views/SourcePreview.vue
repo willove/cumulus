@@ -10,7 +10,10 @@
       <p v-else-if="highlight" class="tiny dim">该引用窗口与当前原文已对不上（源可能已更新）。</p>
       <pre class="source-body" ref="bodyEl"><template v-for="(part, i) in bodyParts" :key="i"><mark v-if="part.hit" class="quote-hit">{{ part.text }}</mark><template v-else>{{ part.text }}</template></template></pre>
     </template>
-    <template #footer><eb-button @click="$emit('close')">关闭</eb-button></template>
+    <template #footer>
+      <eb-button @click="download">下载原文</eb-button>
+      <eb-button @click="$emit('close')">关闭</eb-button>
+    </template>
   </eb-drawer>
 </template>
 
@@ -59,6 +62,22 @@ const bodyParts = computed(() => {
   return [{ text: body }];
 });
 const bodyHasQuote = computed(() => bodyParts.value.some((p) => p.hit));
+// 下载原文：详情接口已回全量 body，前端落 Blob 即可，不需要新端点。
+function download() {
+  const s = source.value;
+  if (!s) return;
+  let name = s.title || s.id || "document";
+  if (!/\.(txt|md|markdown|html?|json|csv)$/i.test(name)) name += ".txt";
+  name = name.replace(/[\\/:*?"<>|#]+/g, "_");
+  const url = URL.createObjectURL(new Blob([s.body ?? ""], { type: "text/plain;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 // 打开后把引文滚到视口顶部（高亮在超长文档里否则找不到）。
 watch(bodyHasQuote, async (hit) => {
   if (!hit) return;
