@@ -609,7 +609,10 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		// counter so "already on screen" is detectable on either.
 		var streamMu sync.Mutex
 		streamed := 0
-		streamSt := &streamState{mu: &streamMu, streamed: &streamed}
+		// think 累加器挂在本请求的 streamState 上：阶段/文件/思考原文按到达
+		// 顺序录进 thinkLog，回合收尾时快照进 turnExtras 随答案落库——切换
+		// 会话或刷新后，思考框由客户端按同一套行渲染器重放恢复。
+		streamSt := &streamState{mu: &streamMu, streamed: &streamed, think: &thinkLog{}}
 		// recStage/emitDelta read streamSt.onStage/emit WITHOUT st.mu.
 		// That is safe by structure, not by luck: sseSearch installs the
 		// hooks, runs runSearch (whose engine hooks call back
@@ -677,6 +680,7 @@ func registerSearchFace(mux *http.ServeMux, c cumulite.Port, st *ingest.Store, s
 		// JSON face has nowhere to put an incrementally arriving text.
 		if stream {
 			emitReasoning := func(chunk string) {
+				streamSt.think.reasoning(chunk)
 				if streamSt.emit != nil {
 					streamSt.emit("status", map[string]any{"stage": "reasoning", "text": chunk})
 				}
@@ -851,6 +855,9 @@ type streamState struct {
 	streamed *int
 	emit     func(event string, data any)
 	onStage  func(name string, d time.Duration, detail any)
+	// think records the same events the live frames carry, in arrival order,
+	// for the turn's persisted thinking log (sessionMessage.Think).
+	think *thinkLog
 }
 
 func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query string, sess *sessionStore, sessionID string, verbose bool, stages map[string]int64, st *streamState, wire wireFunc) (deep.Result, error) {
@@ -885,6 +892,7 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 		st.mu.Lock()
 		st.emit = emit
 		st.onStage = func(name string, d time.Duration, detail any) {
+			st.think.stage(name, d, detail)
 			frame := map[string]any{
 				"stage": "stage", "name": name,
 				"elapsed_ms": time.Since(started).Milliseconds(),
@@ -932,8 +940,10 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	}()
 	defer func() { close(heartbeat); <-hbDone }()
 
-	ss.dE.OnFile = func(key string, best float64, windows int) {
-		emit("status", map[string]any{"stage": "file", "file": key, "score": best, "elapsed_ms": time.Since(started).Milliseconds()})
+	ss.dE.OnFile = func(id, key string, best float64, windows int) {
+		st.think.file(id, key, best, windows)
+		emit("status", map[string]any{"stage": "file", "file": key, "id": id, "score": best,
+			"windows": windows, "elapsed_ms": time.Since(started).Milliseconds()})
 	}
 
 	res, err := runSearch(r.Context(), ss, query)
@@ -979,6 +989,12 @@ func sseSearch(w http.ResponseWriter, r *http.Request, ss *searchStack, query st
 	}
 	if sess != nil {
 		extra := turnExtrasFrom(res.Citations.Refs, statsFromDone(res, stages))
+		if think := st.think.snapshot(); think != nil {
+			if extra == nil {
+				extra = &turnExtras{}
+			}
+			extra.Think = think
+		}
 		if _, aerr := sess.appendTurnDurable(r.Context(), sessionID, query, query, ans.Summary, extra); aerr == nil {
 			done["session"] = sessionID
 		} else {

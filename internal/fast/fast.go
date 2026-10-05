@@ -197,15 +197,17 @@ func topTerms(m map[string]float64, n int) []string {
 	return out
 }
 
-// topTitles labels the first n ranked sources for the cascade detail.
-func topTitles(ranked []scored, n int) []string {
-	out := make([]string, 0, n)
+// topDocs labels the first n ranked sources for the cascade detail: display
+// title plus the full source id, so the UI can link each candidate to its
+// preview drawer instead of naming an unclickable file.
+func topDocs(ranked []scored, n int) []map[string]string {
+	out := make([]map[string]string, 0, n)
 	for _, r := range ranked {
 		label := r.src.Title
 		if label == "" {
 			label = r.src.ID
 		}
-		out = append(out, label)
+		out = append(out, map[string]string{"t": label, "id": r.src.ID})
 		if len(out) == n {
 			break
 		}
@@ -299,7 +301,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 			e.Verbose("expander failed, cascade stays at primary/fallback: %v", xerr)
 		}
 	}
-	cascadeDetail := map[string]any{"arm": cascadeArm, "top": topTitles(ranked, 3)}
+	cascadeDetail := map[string]any{"arm": cascadeArm, "top": topDocs(ranked, 3)}
 	if len(expandedTerms) > 0 {
 		cascadeDetail["terms"] = expandedTerms
 	}
@@ -380,7 +382,7 @@ func (e *Engine) Search(ctx context.Context, query string, sources []source.Sour
 	// The stage closes AFTER the bridge rescue: the bridge's rescoring calls
 	// are sampling work too, and the detail says what survived them.
 	sampleDetail := map[string]any{
-		"source": srcLabel(best), "kept": len(kept), "best": primaryBest,
+		"source": srcLabel(best), "source_id": best.ID, "kept": len(kept), "best": primaryBest,
 	}
 	if bridged {
 		sampleDetail["bridge"] = true

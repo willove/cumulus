@@ -48,9 +48,9 @@ func TestSearchStagesCarryDetail(t *testing.T) {
 	if !ok || c["arm"] == "" {
 		t.Fatalf("cascade detail must carry the arm that hit: %#v", details["cascade"])
 	}
-	top, _ := c["top"].([]string)
-	if len(top) == 0 || top[0] != "配置手册" {
-		t.Fatalf("cascade detail's top docs must label the ranked source: %#v", c["top"])
+	top, _ := c["top"].([]map[string]string)
+	if len(top) == 0 || top[0]["t"] != "配置手册" || top[0]["id"] == "" {
+		t.Fatalf("cascade detail's top docs must label the ranked source with a preview id: %#v", c["top"])
 	}
 	s, ok := details["sample"].(map[string]any)
 	if !ok {

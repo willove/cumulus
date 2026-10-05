@@ -131,7 +131,7 @@ func TestTokenBudgetStopsEveryPayingStage(t *testing.T) {
 			strings.Repeat("无关填充 padding。\n", 12), nil))
 	}
 	scored, widenCalls, simCalls := 0, 0, 0
-	e.OnFile = func(string, float64, int) { scored++ }
+	e.OnFile = func(string, string, float64, int) { scored++ }
 	e.Widen = func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
 		widenCalls++
 		return nil, nil

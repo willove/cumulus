@@ -19,7 +19,7 @@ func TestUtilityStopHaltsHopelessAdmission(t *testing.T) {
 	ctx := context.Background()
 	e := newEngine()
 	var sampled, widenCalls int
-	e.OnFile = func(string, float64, int) { sampled++ }
+	e.OnFile = func(string, string, float64, int) { sampled++ }
 	e.Widen = func(context.Context, string, map[string]bool, int, map[string]bool) ([]source.Source, error) {
 		widenCalls++
 		return nil, nil
@@ -60,7 +60,7 @@ func TestUtilityStopDisabledWalksAllCandidates(t *testing.T) {
 	ctx := context.Background()
 	e := newEngine()
 	var sampled int
-	e.OnFile = func(string, float64, int) { sampled++ }
+	e.OnFile = func(string, string, float64, int) { sampled++ }
 	h := abstain.Default()
 	h.EarlyAbove = 0 // opt-out: the default wiring (CLUS_EARLY_ABSTAIN unset)
 	e.Abstain = h

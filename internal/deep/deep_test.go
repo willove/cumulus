@@ -369,7 +369,7 @@ func TestZeroHitPreFilterSkipsScorerCalls(t *testing.T) {
 	fe := fast.New(mcs.KeywordScorer{Keywords: []string{"连接池"}})
 	e := New(kb.New(fe, cluster.NewMemory(), cluster.Local{N: 64}), NewMemoryConflict())
 	var sampled []string
-	e.OnFile = func(key string, best float64, windows int) { sampled = append(sampled, key) }
+	e.OnFile = func(_, key string, best float64, windows int) { sampled = append(sampled, key) }
 	hit := source.New("命中", "md", "", "a", "zh",
 		"连接池最大 128，超时 30 秒。"+strings.Repeat("填充填充填充。\n", 40), nil)
 	miss := source.New("零命中", "md", "", "b", "zh",

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
@@ -255,4 +256,75 @@ func TestStatsFromKeepsTypedStages(t *testing.T) {
 	if st2 == nil || st2.Stages["synth"] != 900000 {
 		t.Fatalf("any-map stages = %v", st2.Stages)
 	}
+}
+
+// The thinking log persists the stream's raw events in arrival order so a
+// session switch or refresh can replay the box: contiguous reasoning deltas
+// fold into one step, kind boundaries flush the pending buffer, and the
+// recorded sequence rides appendTurn → sessionMessage.Think unchanged.
+func TestThinkLogMergesReasoningAndPersistsWithTurn(t *testing.T) {
+	tl := &thinkLog{}
+	tl.stage("analyze", 120*time.Millisecond, map[string]any{"intent": "search"})
+	tl.file("src:blk/%E8%AE%B0%E5%88%86.txt%2F000001#1", "记分管理办法.txt", 8.5, 3)
+	tl.reasoning("FAST ")
+	tl.reasoning("思考。")
+	tl.stage("deep_sample", 52*time.Second, nil)
+	tl.reasoning("DEEP 思考。")
+	got := tl.snapshot()
+	if got == nil || len(got.Steps) != 5 {
+		t.Fatalf("snapshot = %+v, want 5 steps", got)
+	}
+	wantKinds := "stage,file,reasoning,stage,reasoning"
+	if k := kinds(got.Steps); k != wantKinds {
+		t.Fatalf("kinds = %q, want %q (kind boundary must flush pending reasoning)", k, wantKinds)
+	}
+	if got.Steps[2].Text != "FAST 思考。" || got.Steps[4].Text != "DEEP 思考。" {
+		t.Fatalf("reasoning texts = %q / %q", got.Steps[2].Text, got.Steps[4].Text)
+	}
+	if got.Steps[1].Windows == nil || *got.Steps[1].Windows != 3 {
+		t.Fatalf("file windows = %v", got.Steps[1].Windows)
+	}
+	if got.Steps[1].ID == "" || got.Steps[1].File != "记分管理办法.txt" {
+		t.Fatalf("file step must carry both the preview id and the display key: %+v", got.Steps[1])
+	}
+	// snapshot 深拷贝：后续录制不得渗进已落库的序列。
+	tl.reasoning("迟到")
+	if n := len(got.Steps); n != 5 {
+		t.Fatalf("post-snapshot leakage: %d steps", n)
+	}
+	if again := tl.snapshot(); len(again.Steps) != 6 {
+		t.Fatalf("second snapshot should see 6 steps, got %d", len(again.Steps))
+	}
+
+	// 落库往返：appendTurn 带 Think → load 后原样回来（omitempty 不吞）。
+	p := newTestPort()
+	st := sessionStore{c: p, ns: "alpha"}
+	if _, err := st.appendTurn(context.Background(), "think", "t", "q", "a",
+		&turnExtras{Think: got}); err != nil {
+		t.Fatalf("appendTurn: %v", err)
+	}
+	d, err := st.load(context.Background(), "think")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var asst *sessionMessage
+	for i := range d.Messages {
+		if d.Messages[i].Role == "assistant" {
+			asst = &d.Messages[i]
+		}
+	}
+	if asst == nil || asst.Think == nil || len(asst.Think.Steps) != 5 {
+		t.Fatalf("persisted think = %+v", asst.Think)
+	}
+	if asst.Think.Steps[0].Detail == nil {
+		t.Fatalf("stage detail lost in persist round-trip")
+	}
+}
+
+func kinds(steps []sessionThinkStep) string {
+	out := make([]string, len(steps))
+	for i, s := range steps {
+		out[i] = s.Kind
+	}
+	return strings.Join(out, ",")
 }

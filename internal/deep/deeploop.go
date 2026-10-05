@@ -392,7 +392,7 @@ func (e *Engine) runDeep(ctx context.Context, query string, sources []source.Sou
 			}
 		}
 		if e.OnFile != nil {
-			e.OnFile(s.BusinessKey, localBest, len(samples))
+			e.OnFile(s.ID, s.BusinessKey, localBest, len(samples))
 		}
 		if e.Verbose != nil {
 			e.Verbose("file %s: windows=%d best=%.1f kept=%d", s.BusinessKey, len(samples), localBest, len(kept))

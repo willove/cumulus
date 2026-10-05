@@ -394,6 +394,25 @@ func (e *Engine) Persist(ctx context.Context, ans fast.Answer, sources []source.
 	return e.saveAnswer(ctx, ans, sources, qe, true)
 }
 
+// LinkLearned completes the learning bookkeeping for an answer persisted
+// OUTSIDE the Ask flow — the DEEP escalation path (Persist → saveAnswer).
+// Ask's finish() writes the query_seq edge and advances the cursor for
+// FAST-served answers; a cluster persisted via Persist got neither, so
+// escalated turns chained the previous ask to the DISCARDED FAST cluster —
+// or, with the K=1 defer arm armed, to nothing at all (the e2e query_seq
+// and pathway gates starved twice: 2026-10-04 and 2026-10-05). Same contract
+// as finish(): a cursor or edge error never fails the search.
+func (e *Engine) LinkLearned(ctx context.Context, clusterID string) {
+	if clusterID == "" {
+		return
+	}
+	prevID := e.prevClusterID(ctx)
+	if prevID != "" && prevID != clusterID {
+		_ = graph.LinkQuerySeq(ctx, e.edgeStore(), prevID, clusterID)
+	}
+	e.rememberCluster(ctx, clusterID)
+}
+
 // candidates is the fold-candidate set: same-topic clusters plus cross-topic
 // near hits. saveAnswer re-derives it under the write lock, because the fold
 // decision must see what the store holds now, not what it held before the

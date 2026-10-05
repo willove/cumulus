@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +43,88 @@ type sessionMessage struct {
 	// omitempty keeps old documents byte-compatible.
 	Sources []sessionCite `json:"sources,omitempty"`
 	Stats   *sessionStats `json:"stats,omitempty"`
+	// Think is the raw thinking-box event stream (stages, per-file scoring,
+	// synthesis reasoning) in arrival order; the client replays it through the
+	// same line renderers it used live, so switching sessions or refreshing
+	// rebuilds the box instead of dropping it.
+	Think *sessionThink `json:"think,omitempty"`
+}
+
+// sessionThinkStep is one ordered event in the thinking log. Contiguous
+// reasoning deltas fold into a single step; stages keep their detail payload;
+// files keep the display key, the full source id (preview lookups resolve
+// it), score and windows. Kind discriminates: stage | file | reasoning.
+type sessionThinkStep struct {
+	Kind    string  `json:"kind"`
+	Name    string  `json:"name,omitempty"`
+	MS      int64   `json:"ms,omitempty"`
+	Detail  any     `json:"detail,omitempty"`
+	File    string  `json:"file,omitempty"`
+	ID      string  `json:"id,omitempty"`
+	Score   float64 `json:"score,omitempty"`
+	Windows *int    `json:"windows,omitempty"`
+	Text    string  `json:"text,omitempty"`
+}
+
+// sessionThink is the persisted thinking log attached to an assistant turn.
+type sessionThink struct {
+	Steps []sessionThinkStep `json:"steps,omitempty"`
+}
+
+// thinkLog accumulates the stream's thinking events in arrival order. It
+// mirrors what the browser folds into the message live; the merge point is
+// here so the session document stores the raw sequence once, rendered by the
+// client on restore (no Chinese line formatting duplicated in Go).
+type thinkLog struct {
+	mu   sync.Mutex
+	q    []sessionThinkStep
+	rbuf strings.Builder
+}
+
+func (t *thinkLog) reasoning(chunk string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rbuf.WriteString(chunk)
+}
+
+// flushLocked folds pending reasoning into one step; called on every
+// kind boundary and before snapshot so FAST/DEEP reasoning stay separate.
+func (t *thinkLog) flushLocked() {
+	if t.rbuf.Len() > 0 {
+		t.q = append(t.q, sessionThinkStep{Kind: "reasoning", Text: t.rbuf.String()})
+		t.rbuf.Reset()
+	}
+}
+
+func (t *thinkLog) stage(name string, d time.Duration, detail any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.flushLocked()
+	t.q = append(t.q, sessionThinkStep{Kind: "stage", Name: name, MS: d.Milliseconds(), Detail: detail})
+}
+
+func (t *thinkLog) file(id, key string, best float64, windows int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.flushLocked()
+	t.q = append(t.q, sessionThinkStep{Kind: "file", ID: id, File: key, Score: best, Windows: &windows})
+}
+
+// snapshot copies the accumulated steps (nil when nothing was recorded —
+// offline stubs and non-stream faces have no thinking stream).
+func (t *thinkLog) snapshot() *sessionThink {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.flushLocked()
+	if len(t.q) == 0 {
+		return nil
+	}
+	out := make([]sessionThinkStep, len(t.q))
+	copy(out, t.q)
+	return &sessionThink{Steps: out}
 }
 
 // sessionCite is one evidence window attached to a persisted answer.
@@ -78,6 +161,7 @@ type sessionStats struct {
 type turnExtras struct {
 	Sources []sessionCite
 	Stats   *sessionStats
+	Think   *sessionThink
 }
 
 // statsFrom is the bridge from the SSE done payload to the persisted card.
@@ -234,6 +318,7 @@ func (st sessionStore) appendTurn(ctx context.Context, id, title, query, answer 
 		}
 		assistant.Sources = e.Sources
 		assistant.Stats = e.Stats
+		assistant.Think = e.Think
 	}
 	d.Messages = append(d.Messages,
 		sessionMessage{Role: "user", Content: query, At: now},

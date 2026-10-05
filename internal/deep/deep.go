@@ -231,8 +231,10 @@ type Engine struct {
 	// CLUS_VERBOSE). nil → silent.
 	Verbose func(format string, a ...any)
 	// OnFile fires after each file's windows are sampled (admission order) —
-	// the SSE face forwards it so the UI shows live progress.
-	OnFile func(key string, best float64, windows int)
+	// the SSE face forwards it so the UI shows live progress. id is the full
+	// revision identity (preview lookups resolve it); key is the business
+	// path the log displays.
+	OnFile func(id, key string, best float64, windows int)
 	// RankAdmission orders the sources before the DEEP loop explores them.
 	// affinity carries the law prefixes of already-answered sources (same-law
 	// statutes answer in clusters — 同法亲缘准入). nil → caller order.
@@ -539,12 +541,14 @@ func (e *Engine) askEffective(ctx context.Context, query string, sources []sourc
 		// against the very samples afterBase re-evaluates — a rewritten
 		// sampleQuery can lexically cover the sentence while a fact stays
 		// open (live: 闯红灯 142s run paid a 64.8s render the escalation then
-		// discarded). Arming stays K>1 as measured: at K=1 an armed cover arm
-		// defers the fresh answers the L2 learning path persists on, and the
-		// offline query_seq gates starve (e2e B/P4/sixmod, 2026-10-04) — the
-		// K=1 rewrite-and-uncovered corner keeps its render; that trade is
-		// the standing measured decision, unchanged here.
-		e.KB.Fast.DeferThinCover = len(fx) > 1
+		// discarded). Arming is K≥1 since 2026-10-05: the starvation that kept
+		// K>1 was NOT the defer arm — escalated turns dropped out of the walk
+		// ledger because Persist never wrote the query_seq edge/cursor (fixed
+		// by KB.LinkLearned at the Persist site). With the chain repaired,
+		// the same-ruler (DeferFacts) K=1 arm defers exactly the fresh
+		// uncovered answers that always escalated, and the e2e walk gates
+		// pass with the ~29s discarded FAST render gone.
+		e.KB.Fast.DeferThinCover = len(fx) >= 1
 		e.KB.Fast.DeferFacts = fx
 	}
 
@@ -814,6 +818,14 @@ func (e *Engine) afterBase(ctx context.Context, started time.Time, query string,
 	res.ClusterVer = sub.ClusterVer
 	res.Persisted = sub.Persisted
 	res.Merged = sub.Merged
+	// The DEEP cluster joins the learning chain here: Persist saves the
+	// cluster but writes no query_seq edge and advances no cursor — Ask's
+	// finish() only covered the FAST-served answer this turn superseded.
+	// Without this, escalated turns dropped out of the walk ledger (and
+	// with the K=1 defer arm, starved it entirely — see deep.Search).
+	if sub.ClusterID != "" && sub.Persisted {
+		e.KB.LinkLearned(ctx, sub.ClusterID)
+	}
 	// The persist judge's verdict rides along: the record channel is the
 	// cluster stamp, but the response/eval must also SEE it (a fail-open
 	// error used to vanish here entirely).
