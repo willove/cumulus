@@ -104,9 +104,11 @@ type EvidenceStage struct {
 	Retrieve func(c *context.Context, rewrite Rewrite) ([]EvidenceWindow, error)
 }
 
-func (EvidenceStage) Name() string     { return "evidence-supply" }
-func (EvidenceStage) Reads() []string  { return []string{KeyRewrite.String()} }
-func (EvidenceStage) Writes() []string { return []string{KeyWindows.String()} }
+func (EvidenceStage) Name() string    { return "evidence-supply" }
+func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String()} }
+func (EvidenceStage) Writes() []string {
+	return []string{KeyWindows.String(), KeyRerank.String()}
+}
 func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
 	if !ok {

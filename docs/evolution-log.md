@@ -129,6 +129,31 @@ CLI：selftest -synth offline|llm；eval 走 CUMULUS_SYNTH / CUMULUS_JUDGE。
 真跑结果（3 题，全链路）：rule 100%、evidence 100%、citations 100%、
 judge 100% (n=3)、tokens(p/c/j)=1003/141/798、cost_unknown=0。
 
+## 三·补五、向量面：端口 + 语义重排组件（2026-10-07）
+
+对齐 harness×RAG 研究后落地（MiniLM 的正确位置：验证层组件，不是检索
+底物——文档级 KNN 检索臂 cumulus 已退役，不捡回来）：
+
+- `internal/embed`：Embedder 端口（384 维 L2 归一）+ Cosine/L2Norm。
+  唯一实现将是本地 MiniLM（vendor），**没有线上实现**——语料不出边界；
+- `internal/retrieval.RerankByCosine`：BM25 收窄后的段落级语义重排。
+  两条 cumulus 实测约束写进注释：只比小集合（top-50，MiniLM 甜蜜点）、
+  同分保原序（防向量抖动随机化词法序）；
+- `internal/qaflow`：`KeyEmbedder` + `SemanticRerank` Activator +
+  `KeyRerank` 审计态。三条纪律：embedder 缺席/失败/向量不全 → 保序并
+  记 skipped 原因（degraded, not dropped, and visible——cumulus 的
+  hash-64 假向量败局的根治）；成功记 applied。
+
+抓到的两个真问题：
+1. **Go 泛型推断坑**：`Set(c, Key[接口], 具体实现)` 推断冲突（T 从实参
+   推断成具体类型）。接口型 key 的调用方必须显式 `Set[embed.Embedder]`。
+   已写进 KeyEmbedder 注释——belief 那个 key 是指针具体型所以没暴露；
+2. **禁闭第二次抓到漏声明**：重排写 KeyRerank 但 stage 没声明，测试直接
+   红。补声明收场。
+
+MiniLM vendor（权重）与语义接地尺（SynthesizeStage.Verify 的语义版）是
+接下来的两步。
+
 ## 四、现在的样子（2026-10-07）
 
 ```
