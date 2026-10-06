@@ -45,3 +45,27 @@ func TestJudgeWithoutClientFails(t *testing.T) {
 		t.Fatal("no client must fail")
 	}
 }
+
+// 中文判定词必须认（提示词是中文，中文模型答中文——只认 YES/NO 等于
+// 对中文模型没有判官）。
+func TestJudgeChineseVerdicts(t *testing.T) {
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"是", true},
+		{"等价", true},
+		{"对", true},
+		{"否", false},
+		{"不等价", false},
+	}
+	for _, c := range cases {
+		v, err := (&LLM{Client: &fakeCompleter{text: c.text}}).Judge("q", "a", "b")
+		if err != nil {
+			t.Fatalf("%q must parse: %v", c.text, err)
+		}
+		if v.OK != c.want {
+			t.Fatalf("%q must give %v", c.text, c.want)
+		}
+	}
+}

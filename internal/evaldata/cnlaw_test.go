@@ -46,8 +46,8 @@ func TestLoadCNLawDedupesAndHashes(t *testing.T) {
 	if set.Items[0].GoldIDs[0] != set.Docs[0].ID {
 		t.Fatalf("gold must be the positive doc id: %v", set.Items[0].GoldIDs)
 	}
-	if set.Items[0].Answer != "专利法 第一条" {
-		t.Fatalf("answer should be the title segment, got %q", set.Items[0].Answer)
+	if set.Items[0].Answer != "第一条 为了保护专利权" {
+		t.Fatalf("answer should be the passage body, got %q", set.Items[0].Answer)
 	}
 	// 内容寻址：两次装载同一文件，指纹相同
 	set2, _ := LoadCNLaw(p, 10)

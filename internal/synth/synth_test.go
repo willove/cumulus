@@ -131,3 +131,32 @@ func TestOfflineSynthesize(t *testing.T) {
 		t.Fatal("no windows must fail")
 	}
 }
+
+// 拒答协议（真实运行学到的）：refused=true 且空答案空断言 → 合法拒答。
+func TestLLMSynthesizeAcceptsRefusalProtocol(t *testing.T) {
+	l := &LLM{Client: &fakeCompleter{
+		text:  `{"answer":"","assertions":[],"refused":true}`,
+		usage: usage2{prompt: 10, completion: 2, costKnown: true},
+	}}
+	ans, usage, err := l.Synthesize("q", windows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ans.Refused {
+		t.Fatal("refusal must be honored")
+	}
+	if ans.Text != "" || len(ans.Citations) != 0 {
+		t.Fatalf("refused answer must be empty: %+v", ans)
+	}
+	if !usage.CostKnown {
+		t.Fatal("refusal still costs tokens; usage must pass through")
+	}
+}
+
+// 拒答夹带答案/断言：混日子，按错误处理。
+func TestLLMSynthesizeRejectsRefusalWithContent(t *testing.T) {
+	l := &LLM{Client: &fakeCompleter{text: `{"answer":"100","assertions":[],"refused":true}`}}
+	if _, _, err := l.Synthesize("q", windows()); err == nil {
+		t.Fatal("refusal carrying an answer must be rejected")
+	}
+}

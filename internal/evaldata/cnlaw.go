@@ -85,10 +85,12 @@ func LoadCNLaw(path string, sampleN int) (*CNLawSet, error) {
 		items = append(items, evalfcore.Item{
 			ID:       "q" + strconv.Itoa(itemIdx),
 			Question: anchor,
-			// 规则臂的“金标答案”取法条标题（短）——本数据集上规则臂不是
-			// 记录指标（整段法条当答案规则臂恒 0，协议边界），记录指标是
-			// 证据命中。标题只让规则臂有个合法口径，不当真。
-			Answer:  titleOf(positive),
+			// 金标“答案”取金标段落正文首段（截断）——不是标题。判官问的
+			// 是“答案是否与金标内容一致”，拿标题当答案判官永远判不等价
+			// （真实运行：judge 15% 是金标字段选错，不是判官坏）。规则臂
+			// 在此数据集口径失效（答案非逐字）——登记为协议边界，记录
+			// 指标是证据命中 + 判官分。
+			Answer:  passageSnippet(positive, 120),
 			GoldIDs: []string{id},
 		})
 		itemIdx++
@@ -146,4 +148,19 @@ func hashItems(items []evalfcore.Item) string {
 // 小样本可跳过）。导出供调用方在语料子集化后稳定化。
 func SortDocsForStableIndex(docs []retrieval.Document) {
 	sort.Slice(docs, func(i, j int) bool { return docs[i].ID < docs[j].ID })
+}
+
+// passageSnippet 取 "title: … | text: …" 的正文部分前 n 个字符。
+func passageSnippet(positive string, n int) string {
+	const marker = " | text:"
+	body := positive
+	if i := strings.Index(positive, marker); i >= 0 {
+		body = positive[i+len(marker):]
+	}
+	body = strings.TrimSpace(body)
+	r := []rune(body)
+	if len(r) > n {
+		return string(r[:n])
+	}
+	return body
 }

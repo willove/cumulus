@@ -40,9 +40,10 @@ func FromEnv(baseURL, apiKey, model string) (*OpenAICompleter, error) {
 }
 
 type chatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []chatMessage `json:"messages"`
-	MaxTokens int           `json:"max_tokens,omitempty"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
+	MaxTokens       int           `json:"max_tokens,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"` // 轻思考信号；M3.1 认，旧端点无害忽略
 }
 
 type chatMessage struct {
@@ -79,7 +80,8 @@ func (c *OpenAICompleter) Complete(ctx context.Context, req Request) (Response, 
 			{Role: "system", Content: req.System},
 			{Role: "user", Content: req.Prompt},
 		},
-		MaxTokens: c.MaxTokens,
+		MaxTokens:       c.MaxTokens,
+		ReasoningEffort: "low",
 	}
 	if req.MaxTokens > 0 {
 		body.MaxTokens = req.MaxTokens
@@ -127,9 +129,14 @@ func (c *OpenAICompleter) Complete(ctx context.Context, req Request) (Response, 
 	msg := out.Choices[0].Message
 	text := msg.Content
 	if strings.TrimSpace(text) == "" && msg.ReasoningContent != "" {
-		// 推理模型：content 空而 reasoning 有东西时，宁可显式失败也不拿
-		// 推理链当答案
-		return Response{}, fmt.Errorf("llm: only reasoning content returned, no answer")
+		// 推理模型偶发把所有输出放进 reasoning_content。结构化契约调用
+		// （严格 JSON）可以救：取推理链里最后一个 JSON 对象。提取不放松
+		// 校验——调用方照旧全过或不过；救不回来就报错，不拿推理链当答案。
+		if obj := lastJSONObject(msg.ReasoningContent); obj != "" {
+			text = obj
+		} else {
+			return Response{}, fmt.Errorf("llm: only reasoning content returned, no answer")
+		}
 	}
 	usage := Usage{
 		PromptTokens:     int(out.Usage.PromptTokens),
@@ -144,4 +151,30 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// lastJSONObject 从任意文本里取最后一个配平且合法的 JSON 对象（推理链里
+// 挑结论）。找不到返回空串。
+func lastJSONObject(s string) string {
+	depth, start, found := 0, -1, ""
+	for i, r := range s {
+		switch r {
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					if candidate := s[start : i+1]; json.Valid([]byte(candidate)) {
+						found = candidate
+					}
+					start = -1
+				}
+			}
+		}
+	}
+	return found
 }

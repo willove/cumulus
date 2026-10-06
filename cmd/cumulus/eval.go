@@ -124,15 +124,26 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 // defaultGroundingFloor 语义接地地板的默认值（可过 CUMULUS_GROUNDING 调）。
 const defaultGroundingFloor = 0.5
 
+// defaultKnobs 默认旋钮。width=160 不是拍的：真实运行（cn-law-rag，
+// MiniMax 真合成）发现 60 字宽把法条拦腰截断（“为了保护专利权人的合法权”
+// 就断了），模型对碎片证据全部正确拒答——judge 一度只有 6%。法条平均
+// 长度决定宽度下限；换语料要重测（这正是旋钮该干的事）。
 func defaultKnobs() map[string]float64 {
-	return map[string]float64{"evidence.topk": 3, "evidence.width": 60}
+	return map[string]float64{"evidence.topk": 3, "evidence.width": 160}
 }
 
 func runEval(ctx gocontext.Context) error {
-	corpus := evalCorpus()
-	rawItems := evalItems()
-	corpusSHA := "inline"
-	itemsSHA := "inline"
+	var (
+		corpus    []retrieval.Document
+		rawItems  []evalfcore.Item
+		corpusSHA string
+		itemsSHA  string
+		err       error
+	)
+	corpus = evalCorpus()
+	rawItems = evalItems()
+	corpusSHA = "inline"
+	itemsSHA = "inline"
 	if os.Getenv("CUMULUS_REALDATA") == "cnlaw" {
 		path := os.Getenv("CNLAW_DIR")
 		if path == "" {
@@ -152,10 +163,12 @@ func runEval(ctx gocontext.Context) error {
 		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
 		fmt.Printf("realdata: %s sample=%d corpus=%d docs\n", path, len(rawItems), len(corpus))
 	}
-	ds, err := evalfcore.NewDataset(rawItems)
+	dset, err := evalfcore.NewDataset(rawItems)
+	ds = dset
 	if err != nil {
 		return err
 	}
+
 	idx := retrieval.Build(corpus)
 	st, err := store.Open("", true)
 	if err != nil {
@@ -288,8 +301,27 @@ func flips(base, variant evalfcore.RunState) (lost, gained int) {
 	return lost, gained
 }
 
+var ds evalfcore.Dataset
+
 func printRun(arm string, state evalfcore.RunState) {
+	verbose := os.Getenv("CUMULUS_EVAL_VERBOSE") == "1"
+	golds := map[string]string{}
+	if len(ds.Items) > 0 {
+		for _, it := range ds.Items {
+			golds[it.ID] = it.Answer
+		}
+	}
 	for _, r := range state.Results {
+		if verbose {
+			j := "N/A"
+			if r.JudgeOK != nil {
+				j = "yes"
+				if !*r.JudgeOK {
+					j = "NO"
+				}
+			}
+			fmt.Printf("    %s gold=%q answer=%q judge=%s\n", r.ItemID, truncateRunes(golds[r.ItemID], 40), truncateRunes(r.Answer, 60), j)
+		}
 		f := "ok"
 		if r.Failure != "" {
 			f = r.Failure
@@ -331,4 +363,13 @@ func judgeLabel(which string) string {
 		return "llm"
 	}
 	return "none (N/A)"
+}
+
+// truncateRunes 截断到 n 个字符（eval 明细打印用）。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

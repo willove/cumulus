@@ -48,7 +48,9 @@ type ItemResult struct {
 	RerankApplied     bool     `json:"rerank_applied,omitempty"` // 语义重排是否生效
 	RerankReason      string   `json:"rerank_reason,omitempty"`  // 未生效原因
 	CitedDocs         []string `json:"cited_docs,omitempty"`     // 信念观测的原料：哪些文档被引用了
+	Refused           bool     `json:"refused,omitempty"`        // 系统拒答（合法结局，不是崩溃）
 	JudgeOK           *bool    `json:"judge_ok,omitempty"`
+	JudgeErr          string   `json:"judge_err,omitempty"`    // 判官没判上分的原因（留痕，不许静默 N/A）
 	JudgeTokens       int      `json:"judge_tokens,omitempty"` // 判官花费（prompt+completion），进账单
 	Failure           string   `json:"failure,omitempty"`
 	LatencyMS         int64    `json:"latency_ms"`
@@ -192,6 +194,7 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 
 	res := ItemResult{
 		ItemID:            item.ID,
+		Refused:           out.Refused,
 		RerankApplied:     out.RerankApplied,
 		RerankReason:      out.RerankReason,
 		CitedDocs:         citedIDs,
@@ -205,19 +208,26 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		CompletionTokens:  out.CompletionTokens,
 		CostKnown:         out.CostKnown,
 	}
-	if r.Judge != nil {
+	if r.Judge != nil && !out.Refused {
 		v, jerr := r.Judge.Judge(item.Question, out.Answer, item.Answer)
 		if jerr == nil {
 			ok := v.OK
 			res.JudgeOK = &ok
 			res.JudgeTokens = v.PromptTokens + v.CompletionTokens
+		} else {
+			res.JudgeErr = jerr.Error()
 		}
 	}
 	unresolved := len(out.Cited) - resolvedCount
 	// 失败标签只出现在真失败的题上：答错、没命中证据、引用核不掉、拒答，
-	// 四者占一即失败。全过的题 Failure 为空——通过项不许挂失败标签
-	// （否则学习周期的诊断会把全对当成“有可学”）。
-	failed := res.RuleScore < 1 || !res.EvidenceHit || unresolved > 0 || out.Refused
+	// 失败判定四途：规则分不满、证据没命中、引用核不掉、拒答。
+	// 判官分是第五途且优先级更高：判官说对（JudgeOK=true）的题不算
+	// 失败——规则分是词法基线口径，LLM 答案天然不逐字含金标，拿规则分
+	// 判它失败是把口径当事实（真实运行：50 题 LLM 臂规则分 0、判官
+	// 46 题可判，全按旧口径会 100% 挂 rot）。判官说不对或未判时，
+	// 仍按四途。
+	judgeSaysOK := res.JudgeOK != nil && *res.JudgeOK
+	failed := !judgeSaysOK && (res.RuleScore < 1 || !res.EvidenceHit || unresolved > 0 || out.Refused)
 	if failed {
 		res.Failure = FormatCategory(Classify(ClassifyInput{
 			Windows:             out.Windows,

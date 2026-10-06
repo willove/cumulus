@@ -107,3 +107,50 @@ func TestFromEnvRequiresAllThree(t *testing.T) {
 		t.Fatalf("trailing slash must be trimmed: %q", c.BaseURL)
 	}
 }
+
+// 推理模型偶发把输出全放 reasoning_content：取推理链里最后一个合法
+// JSON 对象救结构化调用；救不回来照旧报错。
+func TestCompleteFallsBackToReasoningJSON(t *testing.T) {
+	resp := `{"choices":[{"message":{"content":"","reasoning_content":"先想一下……最终 {\"answer\":\"100\",\"assertions\":[]} 对"}}]}`
+	c := newTestServer(t, nil, resp, 200)
+	r, err := c.Complete(context.Background(), Request{System: "s", Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(r.Text)) {
+		t.Fatalf("must extract the JSON object from reasoning, got %q", r.Text)
+	}
+}
+
+func TestCompleteReasoningWithoutJSONStillFails(t *testing.T) {
+	resp := `{"choices":[{"message":{"content":"","reasoning_content":"lorem ipsum no json here"}}]}`
+	c := newTestServer(t, nil, resp, 200)
+	if _, err := c.Complete(context.Background(), Request{System: "s", Prompt: "p"}); err == nil {
+		t.Fatal("reasoning without a JSON object must fail")
+	}
+}
+
+// 请求必须带 reasoning_effort=low（M3.1 认的轻思考信号；reasoning_split
+// 被 M3.1 拒收，不许发）。
+func TestCompleteSendsReasoningEffortLow(t *testing.T) {
+	var gotEffort string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if v, ok := body["reasoning_effort"].(string); ok {
+			gotEffort = v
+		}
+		if _, bad := body["reasoning_split"]; bad {
+			t.Error("reasoning_split must not be sent (M3.1 rejects it)")
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := &OpenAICompleter{BaseURL: srv.URL, APIKey: "k", Model: "m", Client: srv.Client()}
+	if _, err := c.Complete(context.Background(), Request{System: "s", Prompt: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotEffort != "low" {
+		t.Fatalf("reasoning_effort must be low, got %q", gotEffort)
+	}
+}

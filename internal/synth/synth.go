@@ -43,6 +43,15 @@ func Offline(question string, windows []qaflow.EvidenceWindow) (qaflow.Answer, q
 //
 // 其中 window 是提示词里分配的窗口编号。引用编号在解析时换成
 // "docID#span" 坐标——模型只碰编号，碰不到原文坐标，减少幻觉面。
+//
+// **拒答是一等结局**（真实运行学到的）：契约第三字段
+//
+//	{"answer": "", "assertions": [], "refused": true}
+//
+// 证据确实答不了时模型必须走这个协议。第一版没有它，模型用自然语言
+// （"现有证据未提供……无法作答"）+ 空断言表达拒答，被契约当成错误
+// 把整题失败掉——拒答是合法结局，不是失败；失败的是把拒答混进答案。
+// 拒答时 answer 必须为空、断言必须为空（Verify 也查）。
 type LLM struct {
 	Client llm.Completer
 }
@@ -50,6 +59,7 @@ type LLM struct {
 type llmAnswer struct {
 	Answer     string         `json:"answer"`
 	Assertions []llmAssertion `json:"assertions"`
+	Refused    bool           `json:"refused"`
 }
 
 type llmAssertion struct {
@@ -106,8 +116,16 @@ func parseSynthesis(raw string, windows []qaflow.EvidenceWindow, labels []string
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return qaflow.Answer{}, fmt.Errorf("synth llm: output is not the agreed JSON contract: %w", err)
 	}
+	// 拒答协议：answer 与 assertions 都必须空；带文本的"拒答"是混日子，
+	// 按错误处理（拒答不许夹带答案）
+	if parsed.Refused {
+		if strings.TrimSpace(parsed.Answer) != "" || len(parsed.Assertions) > 0 {
+			return qaflow.Answer{}, fmt.Errorf("synth llm: refused answer must not carry text or assertions; raw=%q", truncate(raw, 200))
+		}
+		return qaflow.Answer{Refused: true}, nil
+	}
 	if strings.TrimSpace(parsed.Answer) == "" && len(parsed.Assertions) == 0 {
-		return qaflow.Answer{}, fmt.Errorf("synth llm: empty answer")
+		return qaflow.Answer{}, fmt.Errorf("synth llm: empty answer; raw=%q", truncate(raw, 200))
 	}
 
 	index := make(map[string]qaflow.EvidenceWindow, len(labels))
@@ -129,14 +147,18 @@ func parseSynthesis(raw string, windows []qaflow.EvidenceWindow, labels []string
 		}
 	}
 	if len(ans.Citations) == 0 {
-		return qaflow.Answer{}, fmt.Errorf("synth llm: no window-backed assertion; refusing to emit an uncited answer")
+		return qaflow.Answer{}, fmt.Errorf("synth llm: no window-backed assertion (assertions=%d, windows=%d); refusing to emit an uncited answer; raw=%q",
+			len(parsed.Assertions), len(windows), truncate(raw, 300))
 	}
 	return ans, nil
 }
 
 const synthesisSystemPrompt = `你是证据合成器。规则只有一条：每个断言都必须引用给定的证据窗口，
 不许凭记忆补充。输出严格 JSON：{"answer": "最终答案", "assertions": [{"text": "断言", "window": "wN"}]}。
-没有窗口支持的要点，删掉，不要写。`
+没有窗口支持的要点，删掉，不要写。
+
+证据不足以回答问题时，输出 {"answer": "", "assertions": [], "refused": true}——
+宁可说不知道，不许用窗口外的话拼答案。`
 
 func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, labels []string) string {
 	var b strings.Builder
@@ -146,4 +168,11 @@ func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, labe
 	}
 	b.WriteString("\n按系统提示的 JSON 契约作答。")
 	return b.String()
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

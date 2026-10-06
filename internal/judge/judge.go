@@ -34,7 +34,7 @@ func (l *LLM) Judge(question, answer, gold string) (evalfcore.Verdict, error) {
 		return evalfcore.Verdict{}, llm.ErrNotConfigured
 	}
 	prompt := fmt.Sprintf("问题：%s\n标准答案：%s\n候选答案：%s\n是否等价？", question, gold, answer)
-	resp, err := l.Client.Complete(gocontext.Background(), llm.Request{System: judgeSystem, Prompt: prompt, MaxTokens: 8})
+	resp, err := l.Client.Complete(gocontext.Background(), llm.Request{System: judgeSystem, Prompt: prompt, MaxTokens: 64})
 	if err != nil {
 		return evalfcore.Verdict{}, fmt.Errorf("judge: complete: %w", err)
 	}
@@ -43,12 +43,16 @@ func (l *LLM) Judge(question, answer, gold string) (evalfcore.Verdict, error) {
 		CompletionTokens: resp.Usage.CompletionTokens,
 		CostKnown:        resp.Usage.CostKnown,
 	}
-	switch upper := strings.ToUpper(strings.TrimSpace(resp.Text)); {
-	case strings.HasPrefix(upper, "YES"):
-		v.OK = true
-		return v, nil
-	case strings.HasPrefix(upper, "NO"):
+	// 判定词双语：提示词是中文，模型答中文（"是/否/等价/不等价"）远多于
+	// 英文。只认 YES/NO 的判官对中文模型等于没有判官（真实运行：50 题
+	// 只有 3 题判上分）。先判强信号（不等价为否），再判等价类为是。
+	verdict := strings.TrimSpace(resp.Text)
+	switch {
+	case strings.HasPrefix(verdict, "不等价"), strings.HasPrefix(verdict, "否"), strings.HasPrefix(verdict, "不对"), strings.HasPrefix(verdict, "NO"), strings.HasPrefix(verdict, "no"):
 		v.OK = false
+		return v, nil
+	case strings.HasPrefix(verdict, "等价"), strings.HasPrefix(verdict, "是"), strings.HasPrefix(verdict, "对"), strings.HasPrefix(verdict, "YES"), strings.HasPrefix(verdict, "yes"):
+		v.OK = true
 		return v, nil
 	default:
 		return evalfcore.Verdict{}, fmt.Errorf("judge: unparseable verdict %q", truncate(resp.Text, 40))
