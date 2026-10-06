@@ -15,7 +15,7 @@ import (
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/flow"
-	"github.com/willove/cumulus/internal/knowledge/belief"
+	"github.com/willove/cumulus/internal/knowledge"
 )
 
 // 本包登记的 key。命名规则 "<域>.<名>"，全进程唯一。
@@ -28,9 +28,6 @@ var (
 	// KeySynthUsage 是合成步记下的用量。记账步只读它——账目和发生额
 	// 是同一个来源，不许两处各写一份。
 	KeySynthUsage = context.NewKey[Usage]("qa.synthesis.usage")
-	// KeyBelief 是候选区信念的挂点。绑在 context 上，可用性因此可见：
-	// 没绑就是没绑，status 面看得到——可选组件不许静默失效（不变量 3）。
-	KeyBelief = context.NewKey[*belief.Belief]("knowledge.belief")
 )
 
 // Rewrite 是 stage 1 的产物：原问 + 假设文档双视图。
@@ -118,6 +115,11 @@ func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
 	if !ok {
 		return errors.New("rewrite missing; stage 1 must run first")
+	}
+	// 复用短路：ReuseStage 命中时窗口已在 context 里，本 stage 直接让路——
+	// 不调检索后端、不覆盖窗口（复用不是"再查一遍取平均"）
+	if rs, hit := context.Get(c, KeyReuseState); hit && rs.Hit {
+		return nil
 	}
 	if s.Retrieve == nil {
 		return errors.New("no retrieval backend wired")
@@ -364,8 +366,23 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
 	}
+	if opts.Reuse != nil {
+		// 复用查（evidence 前）与复用记（account 后）成对出现：
+		// 只查不记，第二次永远冷；只记不查，记了白记
+		stages = []flow.Stage{
+			stages[0],
+			ReuseStage{Session: opts.Session, Store: opts.Reuse, Query: query},
+			stages[1],
+			stages[2],
+			stages[3],
+			stages[4],
+		}
+	}
 	if opts.LearnEnabled {
 		stages = append(stages, LearnStage{Enabled: true})
+	}
+	if opts.Reuse != nil {
+		stages = append(stages, ReuseRecordStage{Session: opts.Session, Store: opts.Reuse, Query: query})
 	}
 	return &flow.Runner{
 		Flow:   "qa",
@@ -389,4 +406,8 @@ type Options struct {
 	LearnEnabled    bool
 	// GroundingFloor 语义接地地板：>0 且 embedder 绑定时启用语义尺。
 	GroundingFloor float64
+	// Reuse 会话复用件：非 nil 时流程在 evidence 前查复用、account 后记录。
+	// 同一问题（归一化）再问直接取上轮窗口——"同类问题越问越快"的执行处。
+	Reuse   *knowledge.ReuseStore
+	Session string
 }

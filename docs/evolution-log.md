@@ -239,6 +239,38 @@ positioning.md 适用边界的实证补充。
 - 把 flip 统计留在 A/B 输出里（总量持平但翻转不为零 = 部件在重新
   分配风险，这是比均值更细的判据）。
 
+## 三·补八、按诊断修：belief 退役、复用上台（2026-10-08）
+
+按上一轮的诊断执行（不是感觉，是 51 丢 / 18 赚的数字指的路）：
+
+1. **全局声望版 belief 从检索路径上摘掉**：BM25Evidence 不再读信念加权，
+   BeliefBoost 删除，BeliefBooster 组件退役（文件留作分类器纪律的注释
+   档案），learn 的 belief 演示路退役。belief 包本身留着——朴素后验
+   数学没错，错的是把它用成跨查询声望；
+2. **按会话复用上台**（belief 原设计的正确形态第一版）：
+   `knowledge.ReuseStore` 按会话记"问题→窗口+yield"；qaflow 加
+   ReuseStage（evidence 前查，命中直接短路——EvidenceStage 入口处
+   让路，不调检索不覆盖窗口）与 ReuseRecordStage（account 后记，
+   拒答不记）。归一化只去空白小写——宁可漏命中，不错复用（错复用
+   是把错答案当经验）；
+3. **复用窗口过同一把契约尺**：SourceID+Span 非空才让复用（Verify）。
+
+验收（selftest 两问并排）：
+
+```
+--- first ask (cold)   reuse: hit=false  answer=…citations=[law-1#rune[0:32]]
+--- second ask (reuse) reuse: hit=true   answer=…citations=[law-1#rune[0:32]]
+reuse store: 1 entries after two asks
+```
+
+同会话、同问题：第二问不检索、窗口同上轮。flip 判据也留在了 A/B 输出
+里（本语料 belief 臂已退役，两臂：bm25 74.0% / +rerank 74.0% 0 翻转
++118ms——回归确认）。
+
+过程中的真问题：短路第一版没实现（ReuseStage 命中后 EvidenceStage 照
+跑覆盖窗口），单元测试的"检索调用次数"判据当场抓住；selftest 的打印
+块读错了 context（第一问的状态），并排打印改造时才发现。
+
 ## 四、现在的样子（2026-10-08）
 
 ```

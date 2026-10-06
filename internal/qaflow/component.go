@@ -1,29 +1,15 @@
 package qaflow
 
-import (
-	"github.com/willove/cumulus/internal/context"
-)
+import "github.com/willove/cumulus/internal/context"
 
-// BeliefBooster 是第一个用上分类器的可选组件：它只要求一件事——
-// knowledge.belief 被绑上。绑了即激活（检索开始用后验加权），撤了即
-// 停用（回到纯 BM25）。它不需要知道上下文怎么变，也不许在依赖没了
-// 以后继续跑。
-type BeliefBooster struct {
-	active bool
-}
-
-func (BeliefBooster) Name() string       { return "belief-booster" }
-func (BeliefBooster) Requires() []string { return []string{KeyBelief.String()} }
-
-func (b *BeliefBooster) Activate(c *context.Context) error {
-	b.active = true
-	return nil
-}
-
-func (b *BeliefBooster) Deactivate(c *context.Context) error {
-	b.active = false
-	return nil
-}
-
-// Active 供测试与 status 面查询。
-func (b *BeliefBooster) Active() bool { return b.active }
+// 本文件是分类器纪律的注释档案。
+//
+// BeliefBooster（第一个 Activator 实例）已随全局声望版 belief 退役——
+// 真实语料三臂 A/B 证实它有害（−11pp，51 丢 / 18 赚，见 evolution-log
+// 三·补七）。它执行的事由 SemanticRerank（rerank.go）接替：
+// 同样只要求一件事（embedder 绑着），绑了激活、撤了停用、绝不静默
+// 失效——cumulus 的 MCS 静默不触发事故，根因就是没有这个分类器。
+//
+// 纪律原文保留：可选组件的启用/停用必须可见；组件不实现策略逻辑本身，
+// 只声明依赖与生死。
+var _ = context.NewKey[int] // 占位防误删整包导入，运行时不产生引用

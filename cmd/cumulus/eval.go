@@ -11,8 +11,6 @@ import (
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
-	"github.com/willove/cumulus/internal/knowledge/belief"
-	"github.com/willove/cumulus/internal/learncore"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
@@ -30,7 +28,6 @@ import (
 type bm25Executor struct {
 	idx           *retrieval.Index
 	knobs         map[string]float64 // evidence.topk / evidence.width
-	belief        *belief.Belief     // 可空：候选区信念（绑了才用）
 	embedder      embed.Embedder     // 可空：向量面（绑了才重排/才亮语义尺）
 	synthFn       qaflow.SynthFunc   // 合成面：offline 或 llm
 	groundingFlag bool               // semantic grounding scale (true=on)
@@ -77,11 +74,6 @@ func (e *bm25Executor) synth() qaflow.SynthFunc {
 
 func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.ItemOutcome, error) {
 	c := context.New("eval-sandbox")
-	if e.belief != nil {
-		if err := qaflow.BindBelief(c, e.belief); err != nil {
-			return evalfcore.ItemOutcome{}, err
-		}
-	}
 	if e.embedder != nil {
 		if err := qaflow.BindEmbedder(c, e.embedder); err != nil {
 			return evalfcore.ItemOutcome{}, err
@@ -190,18 +182,15 @@ func runEval(ctx gocontext.Context) error {
 	}
 	ab := os.Getenv("CUMULUS_AB") == "1"
 	// execFor 组装执行面：embedder/信念都是可选件，由参数决定装不装
-	execFor := func(withEmbed bool, beliefState *belief.Belief) *bm25Executor {
+	execFor := func(withEmbed bool) *bm25Executor {
 		ex := &bm25Executor{idx: idx, knobs: defaultKnobs(), synthFn: synthFn, groundingFlag: grounding > 0}
 		if withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
-		if beliefState != nil {
-			ex.belief = beliefState
-		}
 		return ex
 	}
-	runOne := func(runID, arm string, withEmbed bool, beliefState *belief.Belief) (evalfcore.RunState, error) {
-		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, beliefState), j)
+	runOne := func(runID, arm string, withEmbed bool) (evalfcore.RunState, error) {
+		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed), j)
 		state, err := runner.Start(ctx, runID, ds.Items)
 		state.Arm = arm
 		if err != nil {
@@ -213,34 +202,26 @@ func runEval(ctx gocontext.Context) error {
 	fmt.Printf("fingerprints items=%s corpus=%s config=%s\n", fp.ItemsSHA[:12], fp.CorpusSHA, fp.ConfigSHA[:12])
 
 	if ab {
-		// 三臂对照（同一指纹；臂是实验内维度，不进指纹）：
+		// 两臂对照（同一指纹；臂是实验内维度，不进指纹）：
 		//   bm25          纯词法
 		//   bm25+rerank   词法 + 段落级语义重排
-		//   bm25+belief   纯词法 + 候选区信念（从 bm25 臂观测，零泄漏）
-		a, err := runOne("run-ab-bm25", "bm25", false, nil)
+		// （belief 全局声望臂已在真实语料证伪退役，见 evolution-log 三·补七；
+		//   按会话复用路径由 selftest 的两问演示覆盖，不在此臂。）
+		a, err := runOne("run-ab-bm25", "bm25", false)
 		if err != nil {
 			return err
 		}
-		b, err := runOne("run-ab-rerank", "bm25+rerank", true, nil)
-		if err != nil {
-			return err
-		}
-		warm := belief.New(nil, 0.5)
-		n := learncore.ObserveBelief(warm, a, ds.Items)
-		fmt.Printf("belief: %d doc observations from bm25 arm\n", n)
-		cc, err := runOne("run-ab-belief", "bm25+belief", false, warm)
+		b, err := runOne("run-ab-rerank", "bm25+rerank", true)
 		if err != nil {
 			return err
 		}
 		printRun("bm25        ", a)
 		printRun("bm25+rerank ", b)
-		printRun("bm25+belief ", cc)
 		for _, pair := range []struct {
 			label string
 			x, y  evalfcore.RunState
 		}{
 			{"rerank-bm25", b, a},
-			{"belief-bm25", cc, a},
 		} {
 			diff, reasons := evalfcore.Compare(pair.x, pair.y)
 			if len(reasons) > 0 {
@@ -254,7 +235,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", nil)
+	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm")
 	if err != nil {
 		return err
 	}

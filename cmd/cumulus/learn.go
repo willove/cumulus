@@ -6,7 +6,6 @@ import (
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/evalfcore"
-	"github.com/willove/cumulus/internal/knowledge/belief"
 	"github.com/willove/cumulus/internal/learncore"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
@@ -122,25 +121,15 @@ func runLearn(ctx gocontext.Context) error {
 	}
 	fmt.Printf("persisted: cycle %s verdict=%s\n", saved.ID, saved.Verdict)
 
-	// —— 闭环的回流半圈：观测 → 信念 → 重排 ——
-	// 从基线（与候选）运行折出信念：哪些文档被引用过、有没有产出。
-	b := belief.New(nil, 0.5)
-	n := learncore.ObserveBelief(b, base, items) + learncore.ObserveBelief(b, candState, items)
-	fmt.Printf("observe:  %d doc observations folded into belief\n", n)
-
-	// 信念路径验证：把 topk 调回 3（旋钮的效果撤掉），只留信念——
-	// 如果信念真在排序里起作用，q3 应该照样被救回来。
+	// —— 闭环的回流半圈：观测 → 诊断 → 提议 ——
+	// knobs 路径的验证到此为止（topk 3→4 的候选被提升）。belief 回流
+	// 路径已退役：全局声望版在真实语料上 −11pp（51 丢 / 18 赚），
+	// 按查询候选区与按会话复用的正确形态在别处重建（evolution-log
+	// 三·补七/八）。
 	restored := reg.Snapshot()
-	restored["evidence.topk"] = 3
-	if err := reg.Restore(restored); err != nil {
-		return err
-	}
-	beliefExec := &bm25Executor{idx: idx, knobs: reg.Snapshot(), belief: b}
-	beliefRun, err := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, beliefExec, nil).Start(ctx, "belief-only", items)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("belief path: topk back to 3, %s\n", evalfcore.Summarize(beliefRun))
-	fmt.Printf("loop closed: observe -> diagnose -> propose -> evaluate -> promote -> belief -> rank\n")
+	_ = restored
+	// 候选运行的观测仍保留在诊断信息里（candState 已用于上面的对比打印）
+	_ = candState
+	fmt.Printf("loop closed: observe -> diagnose -> propose -> evaluate -> promote (knob path)\n")
 	return nil
 }

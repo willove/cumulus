@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/willove/cumulus/internal/context"
-	"github.com/willove/cumulus/internal/knowledge/belief"
+	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -42,6 +42,7 @@ func runSelftest(args []string) error {
 	fs := flag.NewFlagSet("selftest", flag.ContinueOnError)
 	realm := fs.String("realm", "default", "isolation realm (namespace)")
 	synthFlag := fs.String("synth", "offline", "synthesis backend: offline | llm")
+	embedFlag := fs.String("embed", "off", "embedding backend: off | minilm")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -52,14 +53,22 @@ func runSelftest(args []string) error {
 
 	c := context.New(context.Realm(*realm))
 
-	// 可选组件走分类器：组件登记后由 context 按依赖分类驱动启停。
-	// 先登记（此时不可用），再绑信念——随后应为激活。
-	booster := &qaflow.BeliefBooster{}
-	c.RegisterComponent(booster)
-	b := belief.New(nil, 0.5)
-	if err := qaflow.BindBelief(c, b); err != nil {
-		return err
+	// 可选组件走分类器：登记后由 context 按依赖驱动启停。语义重排只
+	// 要求 embedder 绑着（-embed minilm 时激活，否则可见地停用）。
+	reranker := &qaflow.SemanticRerank{}
+	c.RegisterComponent(reranker)
+	if *embedFlag == "minilm" {
+		embFn, _, err := pickEmbed(*embedFlag)
+		if err != nil {
+			return err
+		}
+		if err := qaflow.BindEmbedder(c, embFn()); err != nil {
+			return err
+		}
 	}
+
+	// 复用件（会话内）：第一问记、第二问取
+	reuse := knowledge.NewReuseStore()
 
 	// 真语料、真检索：倒排索引 + BM25（cumulus 验证过的那套）。
 	// 语料此刻由 selftest 内联给出；接上 store LoadFromStore 后改从库里读。
@@ -68,38 +77,41 @@ func runSelftest(args []string) error {
 		{ID: "ops-1", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484。"},
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
 	})
+	selftestIdx = idx
 	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), synthFn, qaflow.Options{
 		CorpusVersion:   "selftest",
 		ConfigVersion:   "selftest",
 		StrategyVersion: "v0.1",
 		BeliefVersion:   "none",
+		Reuse:           reuse,
+		Session:         "selftest",
 	})
 	if err := r.Run(c); err != nil {
 		return err
 	}
 
 	fmt.Printf("synth: %s\n", synthLabel)
-	if a, ok := context.Get(c, qaflow.KeyAnswer); ok {
-		state := "answered"
-		if a.Refused {
-			state = "refused"
-		}
-		fmt.Printf("answer: %s text=%q citations=%v\n", state, a.Text, a.Citations)
+	printAsk("first ask (cold)  ", c)
+
+	// 同一会话再问一次：复用命中，本轮不检索（"越问越快"的执行处）
+	c2 := context.New(context.Realm(*realm))
+	c2.RegisterComponent(&qaflow.SemanticRerank{})
+	if err := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), synthFn, qaflow.Options{
+		CorpusVersion: "selftest", ConfigVersion: "selftest", StrategyVersion: "v0.1", BeliefVersion: "none",
+		Reuse: reuse, Session: "selftest",
+	}).Run(c2); err != nil {
+		return err
 	}
-	for _, v := range c.Views() {
-		fmt.Printf("committed: flow=%s realm=%s corpus=%s strategy=%s at=%s\n",
-			v.Flow, v.Realm, v.CorpusVersion, v.StrategyVersion, v.At.Format("15:04:05"))
-	}
-	if ws, ok := context.Get(c, qaflow.KeyWindows); ok {
-		for _, w := range ws {
-			d, _ := idx.Doc(w.SourceID)
-			text, err := retrieval.ResolveSpan(d.Body, w.Span)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("window: %s score=%.2f span=%s text=%q\n", w.SourceID, w.Score, w.Span, text)
-		}
-	}
+	printAsk("second ask (reuse)", c2)
+	fmt.Printf("reuse store: %d entries after two asks\n", reuse.Len("selftest"))
+	fmt.Println("selftest ok")
+	return nil
+}
+
+// printAsk 打印一次问答的可观测事实：组件状态、复用决定、答案、提交
+// 视图、窗口。两次提问共用一台打印机——并排看才有对比。
+func printAsk(label string, c *context.Context) {
+	fmt.Printf("--- %s\n", label)
 	for _, s := range c.Components() {
 		state := "inactive"
 		if s.Active {
@@ -114,6 +126,43 @@ func runSelftest(args []string) error {
 		}
 		fmt.Println(line)
 	}
-	fmt.Println("selftest ok")
-	return nil
+	if rs, ok := context.Get(c, qaflow.KeyReuseState); ok {
+		fmt.Printf("reuse: hit=%v %s\n", rs.Hit, rs.Reason)
+	}
+	if a, ok := context.Get(c, qaflow.KeyAnswer); ok {
+		state := "answered"
+		if a.Refused {
+			state = "refused"
+		}
+		fmt.Printf("answer: %s text=%q citations=%v\n", state, a.Text, a.Citations)
+	}
+	for _, v := range c.Views() {
+		fmt.Printf("committed: flow=%s realm=%s corpus=%s strategy=%s at=%s\n",
+			v.Flow, v.Realm, v.CorpusVersion, v.StrategyVersion, v.At.Format("15:04:05"))
+	}
+	if ws, ok := context.Get(c, qaflow.KeyWindows); ok {
+		for _, w := range ws {
+			d, _ := idxDoc(w.SourceID)
+			text, err := retrieval.ResolveSpan(d, w.Span)
+			if err != nil {
+				fmt.Printf("window: %s score=%.2f span=%s (unresolvable: %v)\n", w.SourceID, w.Score, w.Span, err)
+				continue
+			}
+			fmt.Printf("window: %s score=%.2f span=%s text=%q\n", w.SourceID, w.Score, w.Span, text)
+		}
+	}
+}
+
+// idxDoc 是 selftest 内联语料的查表（包级变量在 runSelftest 里建）。
+var selftestIdx *retrieval.Index
+
+func idxDoc(id string) (string, error) {
+	if selftestIdx == nil {
+		return "", fmt.Errorf("no index")
+	}
+	d, ok := selftestIdx.Doc(id)
+	if !ok {
+		return "", fmt.Errorf("unknown doc %s", id)
+	}
+	return d.Body, nil
 }

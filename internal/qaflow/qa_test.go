@@ -7,7 +7,7 @@ import (
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/flow"
-	"github.com/willove/cumulus/internal/knowledge/belief"
+	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/retrieval"
 )
 
@@ -198,98 +198,73 @@ func TestBM25NoHitRefuses(t *testing.T) {
 	}
 }
 
-// 信念重排：观测过、没产出的文档下沉，金标从 BM25 的窗外捞回前三。
-func TestBeliefBoostRescuesGoldFromOutsideTopK(t *testing.T) {
-	corpus := []retrieval.Document{
-		{ID: "law-1", Body: "连接池最大连接数默认为 100，超过需调整配置并观察等待队列长度。"},
-		{ID: "cost-a", Body: "成本结构与分摊方法：成本按部门分摊，成本结构按季度复盘，成本口径见附则。"},
-		{ID: "cost-b", Body: "成本结构与定价：成本结构决定底线，成本结构变动需重新定价，成本归集周期一月。"},
-		{ID: "cost-c", Body: "成本结构与预算：成本结构分解到项目，成本结构偏差超百分之五需说明，成本台账按月."},
+// 复用按会话记录 + 命中：同一问题再问，直接取上轮窗口，本轮不再检索。
+// 判据是检索调用次数（冷过一次），不是"答案对不对"——复用管的是
+// 不走回头路（belief 全局声望版已被真实语料证伪退役，原设计按查询/
+// 按会话的正确形态从这里开始）。
+func TestReuseShortCircuitsSecondAsk(t *testing.T) {
+	// 复用测试不需要干扰语料（复用的是上轮窗口本身），单文档语料即可
+	idx := retrieval.Build([]retrieval.Document{
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
-	}
-	idx := retrieval.Build(corpus)
+		{ID: "cost-a", Body: "成本结构与分摊方法：成本按部门分摊。"},
+	})
+	store := knowledge.NewReuseStore()
 
-	// 无信念：前三名是三个干扰文档（BM25 词频决定的真排序）
-	c := context.New("default")
-	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), offlineStub, opts()).Run(c); err != nil {
-		t.Fatal(err)
+	calls := 0
+	retrieve := func(c *context.Context, r Rewrite) ([]EvidenceWindow, error) {
+		calls++
+		return BM25Evidence(idx, 3, 60)(c, r)
 	}
-	ws, _ := context.Get(c, KeyWindows)
-	if len(ws) != 3 {
-		t.Fatalf("want 3 windows, got %d", len(ws))
-	}
-	for _, w := range ws {
-		if w.SourceID == "fin-1" {
-			t.Fatal("without belief, gold must be pushed out of top-3 (this is the failure the corpus encodes)")
+	run := func(q string) *context.Context {
+		c := context.New("default")
+		if err := Runner(q, retrieve, offlineStub, Options{
+			CorpusVersion: "test", ConfigVersion: "test", StrategyVersion: "test", BeliefVersion: "test",
+			Reuse: store, Session: "s-1",
+		}).Run(c); err != nil {
+			t.Fatal(err)
 		}
+		return c
 	}
 
-	// 观测：三个干扰文档零产出，fin-1 有产出
-	b := belief.New(nil, 0.5)
-	b.Observe("cost-a", 0)
-	b.Observe("cost-b", 0)
-	b.Observe("cost-c", 0)
-	b.Observe("fin-1", 1)
-
-	// 绑信念重跑：fin-1 回到前三
-	c2 := context.New("default")
-	if err := BindBelief(c2, b); err != nil {
-		t.Fatal(err)
+	c1 := run("成本结构怎么样")
+	if calls != 1 {
+		t.Fatalf("first ask must retrieve, calls=%d", calls)
 	}
-	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), offlineStub, opts()).Run(c2); err != nil {
-		t.Fatal(err)
+	ws1, _ := context.Get(c1, KeyWindows)
+
+	c2 := run("成本结构怎么样")
+	if calls != 1 {
+		t.Fatalf("second ask must NOT retrieve, calls=%d", calls)
+	}
+	rs, _ := context.Get(c2, KeyReuseState)
+	if !rs.Hit {
+		t.Fatalf("second ask must be a reuse hit: %+v", rs)
 	}
 	ws2, _ := context.Get(c2, KeyWindows)
-	found := false
-	for _, w := range ws2 {
-		if w.SourceID == "fin-1" {
-			found = true
-		}
+	if len(ws2) != len(ws1) {
+		t.Fatalf("reused windows must match, got %v vs %v", ws2, ws1)
 	}
-	if !found {
-		t.Fatalf("belief must rescue gold into top-3, got %v", ws2)
+
+	run("连接池最大连接数是多少")
+	if calls != 2 {
+		t.Fatalf("different question must retrieve, calls=%d", calls)
 	}
 }
 
-// 分类器驱动：信念绑上→组件激活；信念被撤销→组件停用。
-// “依赖没了还在跑”在这个结构里无法表达。
-func TestBeliefBoosterFollowsClassifier(t *testing.T) {
+// 拒答不记：拒答的经验没有复用价值。
+func TestReuseSkipsRefusedAnswer(t *testing.T) {
+	store := knowledge.NewReuseStore()
+	retrieve := func(c *context.Context, r Rewrite) ([]EvidenceWindow, error) {
+		return nil, nil
+	}
 	c := context.New("default")
-	booster := &BeliefBooster{}
-	c.RegisterComponent(booster)
-
-	// 没绑信念：组件未激活，缺什么列得出来
-	if booster.Active() {
-		t.Fatal("must not activate before belief is bound")
-	}
-	states := c.Components()
-	if len(states) != 1 || len(states[0].Missing) != 1 || states[0].Missing[0] != KeyBelief.String() {
-		t.Fatalf("missing dep must be visible: %+v", states)
-	}
-
-	// 绑上：激活
-	b := belief.New(nil, 0.5)
-	if err := BindBelief(c, b); err != nil {
+	if err := Runner("量子引力飞船怎么造", retrieve, offlineStub, Options{
+		CorpusVersion: "test", ConfigVersion: "test", StrategyVersion: "test", BeliefVersion: "test",
+		Reuse: store, Session: "s-1",
+	}).Run(c); err != nil {
 		t.Fatal(err)
 	}
-	if !booster.Active() {
-		t.Fatal("bind must activate the booster")
-	}
-
-	// 撤销到未绑定：停用
-	mark := c.Mark()
-	if err := BindBelief(c, b); err != nil {
-		t.Fatal(err)
-	}
-	if !booster.Active() {
-		t.Fatal("rebind must keep active (neutral)")
-	}
-	_ = c.UnwindTo(mark)
-	if !booster.Active() {
-		t.Fatal("restore-to-present must keep active")
-	}
-	_ = c.UnwindTo(0)
-	if booster.Active() {
-		t.Fatal("unbind must deactivate the booster")
+	if n := store.Len("s-1"); n != 0 {
+		t.Fatalf("refused answer must not be recorded, got %d entries", n)
 	}
 }
