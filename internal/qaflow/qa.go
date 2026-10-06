@@ -1,14 +1,19 @@
 // Package qaflow 是流程一：一次问答的六个 stage（docs/flow-grammar.md §二）。
 //
-// v0.1 是骨架：stage 划分、契约、验证已经是真的；检索与合成是桩（TODO 标出），
-// 接口先于实现定死，之后往里填零件不改 runner。
+// stage 划分、契约、验证都是执行处：检索（BM25 + 可选语义重排）、路由
+// （便宜信号）、合成（SynthFunc 契约，离线/LLM 两实现）、记账（发生额
+// 同一来源）、学习（可选步）。lexical 与语义两把接地尺都在 Verify。
 package qaflow
 
 import (
 	"errors"
 	"fmt"
+	"strings"
+
+	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge/belief"
 )
@@ -190,9 +195,18 @@ type SynthFunc func(question string, windows []EvidenceWindow) (Answer, Usage, e
 
 // SynthesizeStage 只读窗口与改写。路由是 refuse 时标记拒答、不调合成面；
 // 非拒答而没有合成面是配置错误，直接失败——不许悄悄产无证据文本。
+//
+// Verify 有两把尺子：
+//   - lexical 尺（硬）：每条引用必须映射回窗口；无引用答案不存在；
+//   - 语义尺（软，阈值 GroundingFloor > 0 时启用）：答案与证据窗口的
+//     向量 cosine 低于地板 → 判“接地不足”。这一把治的是 lexical 抓不到
+//     的情况：答案的词都在窗口里出现过，但整句和证据不是一回事
+//     （拼接型幻觉）。语义尺不过 → 记 RouteDecision 不升级答案（见下），
+//     由路由层改判 escalate/refuse。
 type SynthesizeStage struct {
-	Query string
-	Synth SynthFunc
+	Query          string
+	Synth          SynthFunc
+	GroundingFloor float64 // 0 = 不启用语义尺（缺 embedder 时的默认）
 }
 
 func (SynthesizeStage) Name() string     { return "synthesize" }
@@ -221,7 +235,7 @@ func (s SynthesizeStage) Run(c *context.Context) error {
 }
 
 // Verify 强制：非拒答答案的每条引用都能映射回窗口；无引用的断言不允许存在。
-func (SynthesizeStage) Verify(c *context.Context) error {
+func (s SynthesizeStage) Verify(c *context.Context) error {
 	a, ok := context.Get(c, KeyAnswer)
 	if !ok {
 		return errors.New("answer missing")
@@ -245,7 +259,48 @@ func (SynthesizeStage) Verify(c *context.Context) error {
 	if len(a.Citations) == 0 {
 		return errors.New("non-refused answer has no citations; every claim must map to a window")
 	}
+	// 语义尺（可选）：embedder 绑了才查；没绑跳过——尺子缺席时不许拿
+	// lexical 通过冒充语义通过，也不许把流程搞失败（尺子是可选组件）。
+	if s.GroundingFloor > 0 {
+		emb, ok := context.Get(c, KeyEmbedder)
+		if ok && emb != nil {
+			cos, err := groundCosine(c, emb, a.Text, ws)
+			if err != nil {
+				return fmt.Errorf("grounding check failed: %w", err)
+			}
+			if cos < s.GroundingFloor {
+				return fmt.Errorf("semantic grounding %.3f below floor %.3f: answer is not about the evidence", cos, s.GroundingFloor)
+			}
+		}
+	}
 	return nil
+}
+
+// groundCosine 算答案与全部证据窗口的最大 cosine。取最大而不是平均：
+// 一条答案只需被它引用的那些窗口支撑，不是被所有窗口平均支撑。
+func groundCosine(c *context.Context, emb embed.Embedder, answer string, ws []EvidenceWindow) (float64, error) {
+	if strings.TrimSpace(answer) == "" || len(ws) == 0 {
+		return 0, fmt.Errorf("empty answer or no windows")
+	}
+	texts := make([]string, 0, len(ws)+1)
+	texts = append(texts, answer)
+	for _, w := range ws {
+		texts = append(texts, w.Text)
+	}
+	vecs, err := emb.Embed(gocontext.Background(), texts)
+	if err != nil {
+		return 0, err
+	}
+	if len(vecs) != len(texts) {
+		return 0, fmt.Errorf("embedder returned %d vectors for %d texts", len(vecs), len(texts))
+	}
+	best := 0.0
+	for _, wv := range vecs[1:] {
+		if cos := embed.Cosine(vecs[0], wv); cos > best {
+			best = cos
+		}
+	}
+	return best, nil
 }
 
 // ---------- stage 5: 记账 ----------
@@ -306,7 +361,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		RewriteStage{Query: query},
 		EvidenceStage{Retrieve: retrieve},
 		RouteStage{},
-		SynthesizeStage{Query: query, Synth: synth},
+		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
 	}
 	if opts.LearnEnabled {
@@ -332,4 +387,6 @@ type Options struct {
 	StrategyVersion string
 	BeliefVersion   string
 	LearnEnabled    bool
+	// GroundingFloor 语义接地地板：>0 且 embedder 绑定时启用语义尺。
+	GroundingFloor float64
 }

@@ -114,3 +114,71 @@ func TestSemanticRerankFollowsClassifier(t *testing.T) {
 		t.Fatal("unwind must deactivate")
 	}
 }
+
+// 语义尺：答案词都在窗口里（lexical 全过），但整句与证据不是一回事
+// （拼接型幻觉）——语义尺必须拦下。这正是 lexical 尺结构上抓不到的那类。
+func TestGroundingScaleCatchesLexicalPassingHallucination(t *testing.T) {
+	c := context.New("default")
+	// 词表两点：维度0=“连接池”（证据有），维度1=“财务报表”（答案硬凑）
+	fake := &fakeEmbedder{vocab: []string{"连接池", "财务报表"}, dims: 2}
+	if err := context.Set[embed.Embedder](c, KeyEmbedder, fake); err != nil {
+		t.Fatal(err)
+	}
+	// 证据窗口只含“连接池”语义
+	if err := context.Set(c, KeyWindows, []EvidenceWindow{
+		{SourceID: "law-1", Span: "rune[0:5]", Text: "连接池默认配置", Score: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 答案 lexically 引用合法（引用能映射回窗口），但语义半句是财务报表
+	ans := Answer{
+		Text:      "连接池与财务报表均见上文",
+		Citations: []string{"law-1#rune[0:5]"},
+	}
+	if err := context.Set(c, KeyAnswer, ans); err != nil {
+		t.Fatal(err)
+	}
+	stage := SynthesizeStage{GroundingFloor: 0.9}
+	err := stage.Verify(c)
+	if err == nil || !strings.Contains(err.Error(), "grounding") {
+		t.Fatalf("semantic scale must catch lexical-passing hallucination, got %v", err)
+	}
+}
+
+// 语义尺通过：答案与证据同向。
+func TestGroundingScalePassesAlignedAnswer(t *testing.T) {
+	c := context.New("default")
+	fake := &fakeEmbedder{vocab: []string{"连接池", "财务报表"}, dims: 2}
+	if err := context.Set[embed.Embedder](c, KeyEmbedder, fake); err != nil {
+		t.Fatal(err)
+	}
+	if err := context.Set(c, KeyWindows, []EvidenceWindow{
+		{SourceID: "law-1", Span: "rune[0:5]", Text: "连接池默认配置", Score: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ans := Answer{Text: "连接池默认配置", Citations: []string{"law-1#rune[0:5]"}}
+	if err := context.Set(c, KeyAnswer, ans); err != nil {
+		t.Fatal(err)
+	}
+	if err := (SynthesizeStage{GroundingFloor: 0.9}).Verify(c); err != nil {
+		t.Fatalf("aligned answer must pass, got %v", err)
+	}
+}
+
+// 尺子缺席（没绑 embedder）：语义尺跳过，lexical 尺说了算——
+// 尺子缺席不许冒充通过，也不许把流程搞失败。
+func TestGroundingScaleSkippedWithoutEmbedder(t *testing.T) {
+	c := context.New("default")
+	if err := context.Set(c, KeyWindows, []EvidenceWindow{
+		{SourceID: "law-1", Span: "rune[0:5]", Text: "任意证据", Score: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := context.Set(c, KeyAnswer, Answer{Text: "完全无关的话", Citations: []string{"law-1#rune[0:5]"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (SynthesizeStage{GroundingFloor: 0.9}).Verify(c); err != nil {
+		t.Fatalf("scale absent must skip, not fail: %v", err)
+	}
+}
