@@ -3,13 +3,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/knowledge/belief"
+	"github.com/willove/cumulus/internal/learncore"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
@@ -129,11 +132,34 @@ func defaultKnobs() map[string]float64 {
 }
 
 func runEval(ctx gocontext.Context) error {
-	idx := retrieval.Build(evalCorpus())
-	ds, err := evalfcore.NewDataset(evalItems())
+	corpus := evalCorpus()
+	rawItems := evalItems()
+	corpusSHA := "inline"
+	itemsSHA := "inline"
+	if os.Getenv("CUMULUS_REALDATA") == "cnlaw" {
+		path := os.Getenv("CNLAW_DIR")
+		if path == "" {
+			path = filepath.Join(os.Getenv("HOME"), "datasets/cn-law-rag/finetune_dataset.jsonl")
+		}
+		sample := 300
+		if v := os.Getenv("CUMULUS_SAMPLE"); v != "" {
+			if _, err := fmt.Sscanf(v, "%d", &sample); err != nil {
+				return fmt.Errorf("CUMULUS_SAMPLE not a number: %q", v)
+			}
+		}
+		set, err := evaldata.LoadCNLaw(path, sample)
+		if err != nil {
+			return err
+		}
+		corpus, rawItems = set.Docs, set.Items
+		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
+		fmt.Printf("realdata: %s sample=%d corpus=%d docs\n", path, len(rawItems), len(corpus))
+	}
+	ds, err := evalfcore.NewDataset(rawItems)
 	if err != nil {
 		return err
 	}
+	idx := retrieval.Build(corpus)
 	st, err := store.Open("", true)
 	if err != nil {
 		return err
@@ -158,19 +184,24 @@ func runEval(ctx gocontext.Context) error {
 	}
 	fmt.Printf("synth: %s  judge: %s  embed: %s\n", synthLabel, judgeLabel(os.Getenv("CUMULUS_JUDGE")), embedLabel)
 	fp := evalfcore.Fingerprints{
-		ItemsSHA:  ds.ItemsSHA,
-		CorpusSHA: "corpus-selftest",
+		ItemsSHA:  itemsSHA,
+		CorpusSHA: corpusSHA,
 		ConfigSHA: evalfcore.Config{Arms: []string{"rule"}, Model: "offline-stub"}.SHA(),
 	}
 	ab := os.Getenv("CUMULUS_AB") == "1"
-	runOne := func(runID, arm string, withEmbed bool) (evalfcore.RunState, error) {
-		// 执行面自建 context（隔离），embedder 必须交给执行面在 Answer 里绑——
-		// 绑在外层 context 传不进去（第一版就踩了这个，rerank 一直不生效）。
+	// execFor 组装执行面：embedder/信念都是可选件，由参数决定装不装
+	execFor := func(withEmbed bool, beliefState *belief.Belief) *bm25Executor {
 		ex := &bm25Executor{idx: idx, knobs: defaultKnobs(), synthFn: synthFn, groundingFlag: grounding > 0}
 		if withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
-		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, ex, j)
+		if beliefState != nil {
+			ex.belief = beliefState
+		}
+		return ex
+	}
+	runOne := func(runID, arm string, withEmbed bool, beliefState *belief.Belief) (evalfcore.RunState, error) {
+		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, beliefState), j)
 		state, err := runner.Start(ctx, runID, ds.Items)
 		state.Arm = arm
 		if err != nil {
@@ -182,35 +213,71 @@ func runEval(ctx gocontext.Context) error {
 	fmt.Printf("fingerprints items=%s corpus=%s config=%s\n", fp.ItemsSHA[:12], fp.CorpusSHA, fp.ConfigSHA[:12])
 
 	if ab {
-		// 同一指纹下的两个臂：bm25 与 bm25+rerank。臂是实验内的对照维度，
-		// 不进指纹——指纹冻结实验，臂回答“同一实验里哪个变体好”。
-		a, err := runOne("run-ab-bm25", "bm25", false)
+		// 三臂对照（同一指纹；臂是实验内维度，不进指纹）：
+		//   bm25          纯词法
+		//   bm25+rerank   词法 + 段落级语义重排
+		//   bm25+belief   纯词法 + 候选区信念（从 bm25 臂观测，零泄漏）
+		a, err := runOne("run-ab-bm25", "bm25", false, nil)
 		if err != nil {
 			return err
 		}
-		b, err := runOne("run-ab-rerank", "bm25+rerank", true)
+		b, err := runOne("run-ab-rerank", "bm25+rerank", true, nil)
 		if err != nil {
 			return err
 		}
-		printRun("bm25         ", a)
-		printRun("bm25+rerank  ", b)
-		diff, reasons := evalfcore.Compare(a, b)
-		if len(reasons) > 0 {
-			fmt.Printf("incomparable: %v\n", reasons)
-			return nil
+		warm := belief.New(nil, 0.5)
+		n := learncore.ObserveBelief(warm, a, ds.Items)
+		fmt.Printf("belief: %d doc observations from bm25 arm\n", n)
+		cc, err := runOne("run-ab-belief", "bm25+belief", false, warm)
+		if err != nil {
+			return err
 		}
-		// Compare 给的是 a-b；这里打印 (rerank − bm25)，取负
-		fmt.Printf("diff (rerank - bm25): evidence=%+.3f rule=%+.3f citations=%+.3f latency=%+.0fms\n",
-			-diff["evidence_hit"], -diff["rule_avg"], -diff["citations_ok"], -diff["avg_latency_ms"])
+		printRun("bm25        ", a)
+		printRun("bm25+rerank ", b)
+		printRun("bm25+belief ", cc)
+		for _, pair := range []struct {
+			label string
+			x, y  evalfcore.RunState
+		}{
+			{"rerank-bm25", b, a},
+			{"belief-bm25", cc, a},
+		} {
+			diff, reasons := evalfcore.Compare(pair.x, pair.y)
+			if len(reasons) > 0 {
+				fmt.Printf("diff %s: incomparable %v\n", pair.label, reasons)
+				continue
+			}
+			lost, gained := flips(pair.y, pair.x)
+			fmt.Printf("diff %-12s evidence=%+.3f citations=%+.3f latency=%+.0fms flips(lost/gained)=%d/%d\n",
+				pair.label, diff["evidence_hit"], diff["citations_ok"], diff["avg_latency_ms"], lost, gained)
+		}
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm")
+	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", nil)
 	if err != nil {
 		return err
 	}
 	printRun("default      ", state)
 	return nil
+}
+
+// flips 逐题对比基线与变体：lost = 基线命中而变体丢失，gained 反之。
+// 总量持平但翻转不为零，说明部件在重新分配风险，不是单纯改善或恶化。
+func flips(base, variant evalfcore.RunState) (lost, gained int) {
+	bh := make(map[string]bool)
+	for _, r := range base.Results {
+		bh[r.ItemID] = r.EvidenceHit
+	}
+	for _, r := range variant.Results {
+		if bh[r.ItemID] && !r.EvidenceHit {
+			lost++
+		}
+		if !bh[r.ItemID] && r.EvidenceHit {
+			gained++
+		}
+	}
+	return lost, gained
 }
 
 func printRun(arm string, state evalfcore.RunState) {
