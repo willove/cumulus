@@ -46,6 +46,7 @@ type ItemResult struct {
 	CitationsTotal    int      `json:"citations_total"`
 	CitedDocs         []string `json:"cited_docs,omitempty"` // 信念观测的原料：哪些文档被引用了
 	JudgeOK           *bool    `json:"judge_ok,omitempty"`
+	JudgeTokens       int      `json:"judge_tokens,omitempty"` // 判官花费（prompt+completion），进账单
 	Failure           string   `json:"failure,omitempty"`
 	LatencyMS         int64    `json:"latency_ms"`
 	PromptTokens      int      `json:"prompt_tokens"`
@@ -198,9 +199,11 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		CostKnown:         out.CostKnown,
 	}
 	if r.Judge != nil {
-		ok, jerr := r.Judge.Judge(item.Question, out.Answer, item.Answer)
+		v, jerr := r.Judge.Judge(item.Question, out.Answer, item.Answer)
 		if jerr == nil {
+			ok := v.OK
 			res.JudgeOK = &ok
+			res.JudgeTokens = v.PromptTokens + v.CompletionTokens
 		}
 	}
 	unresolved := len(out.Cited) - resolvedCount

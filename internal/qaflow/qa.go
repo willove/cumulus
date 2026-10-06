@@ -35,10 +35,12 @@ type Rewrite struct {
 }
 
 // EvidenceWindow 是一个证据窗口。SourceID + Span 非空是引用可回溯的
-// 最低契约，Verify 强制。
+// 最低契约，Verify 强制；Text 是窗口原文——合成面读它，模型看不到
+// 原文就等于没有证据（第一次真调用学到的：坐标不是内容）。
 type EvidenceWindow struct {
 	SourceID  string
 	Span      string
+	Text      string
 	Score     float64
 	Substrate string // text / structured / cross-doc，来自底物注册
 }

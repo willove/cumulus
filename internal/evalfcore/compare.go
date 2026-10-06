@@ -38,6 +38,7 @@ type Summary struct {
 	AvgLatencyMS          int64
 	TotalPromptTokens     int
 	TotalCompletionTokens int
+	TotalJudgeTokens      int // 判官花费：判官不是免费劳动力
 	CostUnknownItems      int // 上游不报 usage 的题数（计费诚实）
 }
 
@@ -67,6 +68,7 @@ func Summarize(s RunState) Summary {
 		latencySum += r.LatencyMS
 		out.TotalPromptTokens += r.PromptTokens
 		out.TotalCompletionTokens += r.CompletionTokens
+		out.TotalJudgeTokens += r.JudgeTokens
 		if !r.CostKnown {
 			out.CostUnknownItems++
 		}
@@ -89,8 +91,8 @@ func (s Summary) String() string {
 		judge = fmt.Sprintf("%.1f%% (n=%d)", s.JudgeAcc*100, s.JudgeN)
 	}
 	return fmt.Sprintf(
-		"items=%d rule=%.1f%% evidence=%.1f%% citations=%.1f%% judge=%s latency=%dms tokens(p/c)=%d/%d cost_unknown=%d",
+		"items=%d rule=%.1f%% evidence=%.1f%% citations=%.1f%% judge=%s latency=%dms tokens(p/c/j)=%d/%d/%d cost_unknown=%d",
 		s.ItemsDone, s.RuleAvg*100, s.EvidenceHitRate*100, s.CitationsOKRate*100,
-		judge, s.AvgLatencyMS, s.TotalPromptTokens, s.TotalCompletionTokens, s.CostUnknownItems,
+		judge, s.AvgLatencyMS, s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalJudgeTokens, s.CostUnknownItems,
 	)
 }

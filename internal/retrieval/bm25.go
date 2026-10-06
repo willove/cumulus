@@ -69,11 +69,13 @@ func Build(docs []Document) *Index {
 }
 
 // Hit 是一条检索命中。SpanCoord 是证据窗口在原文里的 rune 坐标
-// （"rune[起点:终点]"），空表示还没抽窗口。
+// （"rune[起点:终点]"）；SpanText 是该坐标解析出的原文——合成面要的是
+// 原文，坐标只是引用凭据。两样都在检索侧一次产出，别让下游再解一遍。
 type Hit struct {
 	DocID     string
 	Score     float64
 	SpanCoord string
+	SpanText  string
 }
 
 // Search 对查询做 BM25 排序，取前 k，并为每条命中抽证据窗口。
@@ -119,7 +121,14 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 	}
 	hits := make([]Hit, 0, len(ws))
 	for _, w := range ws {
-		hits = append(hits, Hit{DocID: w.id, Score: scores[w.id], SpanCoord: idx.Window(w.id, terms, width)})
+		coord := idx.Window(w.id, terms, width)
+		text := ""
+		if coord != "" {
+			if d, ok := idx.byID[w.id]; ok {
+				text, _ = ResolveSpan(d.Body, coord)
+			}
+		}
+		hits = append(hits, Hit{DocID: w.id, Score: scores[w.id], SpanCoord: coord, SpanText: text})
 	}
 	return hits
 }

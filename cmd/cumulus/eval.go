@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	gocontext "context"
 
@@ -23,9 +24,10 @@ import (
 // internal/synth 的 LLM 版同契约；抽取式的意义在规则臂——它读的是
 // 语料原话，不是生成。生产把这里换成 synth.LLM 即可，别处不动。
 type bm25Executor struct {
-	idx    *retrieval.Index
-	knobs  map[string]float64 // evidence.topk / evidence.width
-	belief *belief.Belief     // 可空：候选区信念（绑了才用）
+	idx     *retrieval.Index
+	knobs   map[string]float64 // evidence.topk / evidence.width
+	belief  *belief.Belief     // 可空：候选区信念（绑了才用）
+	synthFn qaflow.SynthFunc   // 合成面：offline 或 llm
 }
 
 func (e *bm25Executor) topk() int {
@@ -51,16 +53,8 @@ func (e *bm25Executor) synth() qaflow.SynthFunc {
 		}
 		ans := qaflow.Answer{}
 		for _, w := range ws {
-			d, ok := e.idx.Doc(w.SourceID)
-			if !ok {
-				return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("extractive synth: unknown doc %s", w.SourceID)
-			}
-			text, err := retrieval.ResolveSpan(d.Body, w.Span)
-			if err != nil {
-				return qaflow.Answer{}, qaflow.Usage{}, err
-			}
 			if ans.Text == "" {
-				ans.Text = text
+				ans.Text = w.Text
 			}
 			ans.Citations = append(ans.Citations, w.SourceID+"#"+w.Span)
 		}
@@ -75,7 +69,11 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 			return evalfcore.ItemOutcome{}, err
 		}
 	}
-	r := qaflow.Runner(question, qaflow.BM25Evidence(e.idx, e.topk(), e.width()), e.synth(), qaflow.Options{
+	synthFn := e.synthFn
+	if synthFn == nil {
+		synthFn = e.synth()
+	}
+	r := qaflow.Runner(question, qaflow.BM25Evidence(e.idx, e.topk(), e.width()), synthFn, qaflow.Options{
 		CorpusVersion:   "frozen",
 		ConfigVersion:   "eval",
 		StrategyVersion: "v0.1",
@@ -118,12 +116,21 @@ func runEval(ctx gocontext.Context) error {
 	if err != nil {
 		return err
 	}
+	synthFn, synthLabel, err := pickSynth(os.Getenv("CUMULUS_SYNTH"))
+	if err != nil {
+		return err
+	}
+	j, err := judgeFromEnv(os.Getenv("CUMULUS_JUDGE"))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("synth: %s  judge: %s\n", synthLabel, judgeLabel(os.Getenv("CUMULUS_JUDGE")))
 	fp := evalfcore.Fingerprints{
 		ItemsSHA:  ds.ItemsSHA,
 		CorpusSHA: "corpus-selftest",
 		ConfigSHA: evalfcore.Config{Arms: []string{"rule"}, Model: "offline-stub"}.SHA(),
 	}
-	runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, &bm25Executor{idx: idx, knobs: defaultKnobs()}, nil)
+	runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, &bm25Executor{idx: idx, knobs: defaultKnobs(), synthFn: synthFn}, j)
 	state, err := runner.Start(ctx, "run-selftest", ds.Items)
 	if err != nil {
 		return err
@@ -156,4 +163,11 @@ func evalItems() []evalfcore.Item {
 		{ID: "q2", Question: "默认端口是多少", Answer: "8484", GoldIDs: []string{"ops-1"}},
 		{ID: "q3", Question: "成本结构怎么样", Answer: "优化", GoldIDs: []string{"fin-1"}},
 	}
+}
+
+func judgeLabel(which string) string {
+	if which == "llm" {
+		return "llm"
+	}
+	return "none (N/A)"
 }

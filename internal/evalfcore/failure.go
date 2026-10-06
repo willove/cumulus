@@ -4,10 +4,19 @@ import (
 	"github.com/willove/cumulus/internal/failure"
 )
 
+// Verdict 是判官裁决。Tokens 是判官自己的花费——判官不是免费劳动力，
+// 它的 token 要进账单（计费诚实：花过钱的调用都记账）。
+type Verdict struct {
+	OK               bool
+	PromptTokens     int
+	CompletionTokens int
+	CostKnown        bool
+}
+
 // Judge 是判官。离线 stub 与真 LLM 判官都实现它；判官结论不覆盖规则分
 // （cumulus 的口径：两套分数并列呈现，谁不替谁说话）。
 type Judge interface {
-	Judge(question, answer, gold string) (ok bool, err error)
+	Judge(question, answer, gold string) (Verdict, error)
 }
 
 // ClassifyInput 是失败归类的输入。字段全部来自一次问答的可观测事实，

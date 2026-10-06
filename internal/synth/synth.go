@@ -27,11 +27,13 @@ func Offline(question string, windows []qaflow.EvidenceWindow) (qaflow.Answer, q
 		return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("synth offline: no evidence windows to synthesize from")
 	}
 	ans := qaflow.Answer{Refused: false}
+	var texts []string
 	for _, w := range windows {
 		cit := w.SourceID + "#" + w.Span
 		ans.Citations = append(ans.Citations, cit)
+		texts = append(texts, w.Text)
 	}
-	ans.Text = ans.Citations[0] // 占位文本：窗口坐标；真答案由 LLM 版给
+	ans.Text = strings.Join(texts, " ") // 离线合成的答案就是证据原文本身
 	return ans, qaflow.Usage{CostKnown: false}, nil
 }
 
@@ -140,7 +142,7 @@ func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, labe
 	var b strings.Builder
 	fmt.Fprintf(&b, "问题：%s\n\n证据窗口：\n", question)
 	for i, w := range windows {
-		fmt.Fprintf(&b, "[%s] 文档 %s 位置 %s 得分 %.2f\n", labels[i], w.SourceID, w.Span, w.Score)
+		fmt.Fprintf(&b, "[%s] 文档 %s 位置 %s 得分 %.2f\n原文：%s\n", labels[i], w.SourceID, w.Span, w.Score, w.Text)
 	}
 	b.WriteString("\n按系统提示的 JSON 契约作答。")
 	return b.String()

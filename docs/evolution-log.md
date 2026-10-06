@@ -104,6 +104,31 @@
 问题）——重写该文件收场；另有测试替身 usage 零值导致 CostKnown 断言
 失败（假件的默认值要和场景匹配）。
 
+## 三·补四、接真模型：MiniMax-M3.1-Flash-Preview（2026-10-07）
+
+第一次把真模型接进来验证（.env：LLM_BASE_URL/LLM_API_KEY/LLM_CHAT_MODEL，
+与 cumulus 同款约定）。抓到两个真问题，都不是单元测试能发现的：
+
+1. **证据原文没进提示词**：窗口只带了坐标（docID#rune[a:b]），合成提示词
+   列的是“文档/位置/得分”，模型看不到原文——它答“给定证据未提供连接池
+   最大连接数”，是对的，它真没看到。修法：检索侧就地解析坐标，
+   Hit.SpanText/EvidenceWindow.Text 一路带到提示词。教训：**坐标是引用
+   凭据，不是内容；合成面要的是内容**。
+2. **判官白嫖账单**：判官 3 次调用的 token 不进账。Judge 接口改为返回
+   带用量的 Verdict，ItemResult.JudgeTokens、Summary.TotalJudgeTokens
+   一路记账。计费诚实这条纪律，漏一次就是真的在漏钱。
+
+定版（llm.OpenAICompleter，OpenAI 兼容 /chat/completions，httptest 覆盖）：
+- 契约解析对齐 cumulus：choices[].message.content + usage；
+- 只回推理链不回答案 → 显式失败（不拿 reasoning 当答案）；
+- 上游不报 usage → CostKnown=false（成本未知不是 0）；
+- 缺 base_url/key/model → ErrNotConfigured，不许静默回落桩。
+
+CLI：selftest -synth offline|llm；eval 走 CUMULUS_SYNTH / CUMULUS_JUDGE。
+
+真跑结果（3 题，全链路）：rule 100%、evidence 100%、citations 100%、
+judge 100% (n=3)、tokens(p/c/j)=1003/141/798、cost_unknown=0。
+
 ## 四、现在的样子（2026-10-07）
 
 ```

@@ -38,6 +38,7 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 			windows = append(windows, EvidenceWindow{
 				SourceID:  h.DocID,
 				Span:      h.SpanCoord,
+				Text:      h.SpanText,
 				Score:     h.Score,
 				Substrate: "text",
 			})
