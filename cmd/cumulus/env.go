@@ -2,11 +2,14 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"strings"
 
+	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/judge"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/synth"
 )
@@ -93,4 +96,21 @@ func hostOf(baseURL string) string {
 // llmFromEnv 从环境变量装配真提供方（.env 已由 loadDotEnv 补入）。
 func llmFromEnv() (llmCompleter, error) {
 	return llmFromEnvImpl()
+}
+
+// pickEmbed 装向量面：minilm（本地权重，缺权重报错——不许静默无向量）或
+// off（默认，不绑 embedder）。
+func pickEmbed(which string) (func() embed.Embedder, string, error) {
+	switch which {
+	case "", "off":
+		return nil, "off", nil
+	case "minilm":
+		m := embed.NewMiniLM(minilm.DefaultDir())
+		if !m.Available() {
+			return nil, "", fmt.Errorf("embed: weights absent at %s — run `cumulus model install`", minilm.DefaultDir())
+		}
+		return func() embed.Embedder { return m }, "minilm@" + minilm.DefaultDir(), nil
+	default:
+		return nil, "", fmt.Errorf("unknown embed: %s (off|minilm)", which)
+	}
 }

@@ -154,6 +154,42 @@ judge 100% (n=3)、tokens(p/c/j)=1003/141/798、cost_unknown=0。
 MiniLM vendor（权重）与语义接地尺（SynthesizeStage.Verify 的语义版）是
 接下来的两步。
 
+## 三·补六、MiniLM 真权重 A/B（2026-10-07 深夜）
+
+向量面全链路接通到真权重（`CUMULUS_AB=1 CUMULUS_EMBED=minilm`，权重在
+`~/.cumulus/models/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`，
+463MB，vendored forward + tokenizer + 归一化表，`internal/minilm/VENDOR.md`）。
+
+**接线过程中抓到的三个真问题**：
+
+1. **执行面自建 context，外层绑定传不进去**：eval 的执行面每题新建
+   context（隔离设计），第一版把 embedder 绑在外层 context——rerank 永远
+   "embedder not bound"。修法：embedder 作为执行面字段，Answer 里绑；
+2. **rerank 静默失败不可见**：一开始 rerank=false 但看不出为什么。加
+   `RerankReason` 遥测（too few candidates / embedder not bound / …），
+   degraded 必须带原因留痕；
+3. **A/B diff 方向标签错**：Compare 给 a−b，打印却标 (rerank−bm25)，取负修。
+
+**真结果（构造语料，3 题含 3 个“成本结构”干扰文档）**：
+
+```
+bm25        evidence 66.7%（q3 recall-miss：干扰文档词频压过金标）
+bm25+rerank evidence 66.7%  evidence=+0.000  latency=+103ms
+```
+
+**诚实的阴性结果**：段落级语义重排没有救回 q3——查询与干扰文档、金标的
+ embedding 全都挤在“成本结构”附近，MiniLM-L12 分不开。这与 cumulus 的旧
+发现同向：相似文本间区分度差（他们因此退役了 KNN 检索臂）。延迟代价
++103ms/查询是真的（3 次 embed 推理）。
+
+**这个阴性结果的价值**：它把“上向量”从信仰变成问题——
+- 玩具语料上下结论不够，下一步必须上真实语料（cn-law-rag 1781 篇）跑
+  同一个 A/B；
+- 这类失败（同词面近重复干扰）上轮已验证 **belief 路径能救**（观测过
+  的零产出文档下沉），可能比语义重排更对症——两个部件治的是不同病：
+  belief 治“这个文档历史上没产出”，rerank 治“这个文档内容不相关”，本
+  例是前者。
+
 ## 四、现在的样子（2026-10-07）
 
 ```

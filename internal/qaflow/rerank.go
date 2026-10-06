@@ -1,6 +1,8 @@
 package qaflow
 
 import (
+	"errors"
+
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
@@ -87,4 +89,12 @@ func rerankHits(c *context.Context, hits []retrieval.Hit, query string, maxCompa
 	// 尾部（超出 maxCompare 的）按原序接回
 	out := append(append([]retrieval.Hit(nil), head...), hits[len(head):]...)
 	return out, RerankState{Applied: true}
+}
+
+// BindEmbedder 把向量面绑到 context（可选组件显式上线）。
+func BindEmbedder(c *context.Context, e embed.Embedder) error {
+	if e == nil {
+		return errors.New("bind embedder: nil embedder")
+	}
+	return context.Set[embed.Embedder](c, KeyEmbedder, e)
 }

@@ -27,6 +27,7 @@ var ErrStartNewRun = errors.New("evalfcore: start a new run")
 // 运行重启后只报 interrupted（绝不冷启动重放，那是没被同意的二次计费）。
 type RunState struct {
 	RunID        string       `json:"run_id"`
+	Arm          string       `json:"arm,omitempty"` // 臂标签（bm25 / bm25+rerank）：A/B 里的变动因子，不进指纹——指纹冻结实验，臂是实验内的对照维度
 	Status       Status       `json:"status"`
 	Fingerprints Fingerprints `json:"fingerprints"`
 	ItemsTotal   int          `json:"items_total"`
@@ -44,7 +45,9 @@ type ItemResult struct {
 	EvidenceHit       bool     `json:"evidence_hit"`
 	CitationsResolved int      `json:"citations_resolved"`
 	CitationsTotal    int      `json:"citations_total"`
-	CitedDocs         []string `json:"cited_docs,omitempty"` // 信念观测的原料：哪些文档被引用了
+	RerankApplied     bool     `json:"rerank_applied,omitempty"` // 语义重排是否生效
+	RerankReason      string   `json:"rerank_reason,omitempty"`  // 未生效原因
+	CitedDocs         []string `json:"cited_docs,omitempty"`     // 信念观测的原料：哪些文档被引用了
 	JudgeOK           *bool    `json:"judge_ok,omitempty"`
 	JudgeTokens       int      `json:"judge_tokens,omitempty"` // 判官花费（prompt+completion），进账单
 	Failure           string   `json:"failure,omitempty"`
@@ -64,6 +67,8 @@ type Citation struct {
 // ItemOutcome 是 executor 对一道题的产出。看不到金标（见包注释）。
 type ItemOutcome struct {
 	Answer           string
+	RerankApplied    bool   // 语义重排是否真的生效（可选组件审计）
+	RerankReason     string // 没生效的原因（留痕：degraded 必须可见）
 	Cited            []Citation
 	Refused          bool
 	RouteAction      string
@@ -187,6 +192,8 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 
 	res := ItemResult{
 		ItemID:            item.ID,
+		RerankApplied:     out.RerankApplied,
+		RerankReason:      out.RerankReason,
 		CitedDocs:         citedIDs,
 		Answer:            out.Answer,
 		RuleScore:         RuleScore(out.Answer, item.Answer),
