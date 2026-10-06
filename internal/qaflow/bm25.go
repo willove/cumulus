@@ -27,9 +27,9 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 		if idx == nil {
 			return nil, errors.New("bm25 evidence: nil index")
 		}
-		hits := idx.SearchWith(r.Original, k, width, nil)
+		hits := idx.SearchWith(r.Effective(), k, width, nil)
 		// 语义重排（可选组件）：绑了 embedder 才走；没绑/失败都保序并留痕
-		hits, rerankState := rerankHits(c, hits, r.Original, maxRerankCompare)
+		hits, rerankState := rerankHits(c, hits, r.Effective(), maxRerankCompare)
 		if err := context.Set(c, KeyRerank, rerankState); err != nil {
 			return nil, err
 		}

@@ -13,9 +13,11 @@ import (
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/retrieval"
 )
 
 // 本包登记的 key。命名规则 "<域>.<名>"，全进程唯一。
@@ -32,8 +34,19 @@ var (
 
 // Rewrite 是 stage 1 的产物：原问 + 假设文档双视图。
 type Rewrite struct {
-	Original     string
-	Hypothetical string // TODO: 接 llm 生成假设摘要（HyDE 式）
+	Original      string
+	Hypothetical  string   // 改写文本（HyDE 式假设摘要）；空 = 用原问检索
+	DriftRejected bool     // 改写被漂移闸拦下（内容词丢了原问的）
+	DroppedTerms  []string // 被拦下的改写丢了哪些内容词
+}
+
+// Effective 是检索实际使用的文本：改写通过漂移闸才用，否则原问。
+// 覆盖度始终按 Original 算——改写管召回，原问管接地。
+func (r Rewrite) Effective() string {
+	if r.Hypothetical != "" && !r.DriftRejected {
+		return r.Hypothetical
+	}
+	return r.Original
 }
 
 // EvidenceWindow 是一个证据窗口。SourceID + Span 非空是引用可回溯的
@@ -75,16 +88,36 @@ type Usage struct {
 
 // RewriteStage 读会话、写改写。Verify 强制“改写可逆回原问”：
 // 防假设漂移把用户的意图带走。
-type RewriteStage struct{ Query string }
+type RewriteStage struct {
+	Query        string
+	Hypothetical string           // 注入的改写（HyDE 式）；空 = 不改写
+	Idx          *retrieval.Index // 漂移闸判语料内/外用；nil = 闸不启动
+}
 
 func (RewriteStage) Name() string     { return "intent-clarify" }
 func (RewriteStage) Reads() []string  { return []string{"session"} }
 func (RewriteStage) Writes() []string { return []string{KeyRewrite.String()} }
 func (s RewriteStage) Run(c *context.Context) error {
-	return context.Set(c, KeyRewrite, Rewrite{
-		Original:     s.Query,
-		Hypothetical: "", // TODO: llm
-	})
+	rw := Rewrite{Original: s.Query, Hypothetical: s.Hypothetical}
+	// 漂移闸（BioHarness：改写管召回，原问管接地）：注入的改写丢掉原问
+	// 的语料内内容词 → 拦下，检索回退原问，丢词清单入账
+	if s.Hypothetical != "" && s.Idx != nil {
+		var dropped []string
+		for _, term := range dedupe(retrieval.Fields(s.Query)) {
+			if !s.Idx.HasTerm(term) {
+				continue // 语料外词：改写不可能保留，不算漂移
+			}
+			if !strings.Contains(s.Hypothetical, term) {
+				dropped = append(dropped, term)
+			}
+		}
+		if len(dropped) > 0 {
+			rw.DriftRejected = true
+			rw.DroppedTerms = dropped
+			rw.Hypothetical = ""
+		}
+	}
+	return context.Set(c, KeyRewrite, rw)
 }
 func (s RewriteStage) Verify(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
@@ -420,8 +453,9 @@ func (LearnStage) Verify(c *context.Context) error { return nil }
 // 不留空壳注册（可选组件的启用必须是显式的）。
 func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error), synth SynthFunc, opts Options) *flow.Runner {
 	stages := []flow.Stage{
-		RewriteStage{Query: query},
+		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx},
 		EvidenceStage{Retrieve: retrieve},
+		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
@@ -470,4 +504,12 @@ type Options struct {
 	// 同一问题（归一化）再问直接取上轮窗口——"同类问题越问越快"的执行处。
 	Reuse   *knowledge.ReuseStore
 	Session string
+	// Hypothetical 注入改写文本（HyDE 式；空 = 不改写）。漂移闸审核它。
+	Hypothetical string
+	// RewriteIdx 漂移闸用的索引（判语料内/外词）；nil = 闸不启动。
+	RewriteIdx *retrieval.Index
+	// CtxBudget 合成前的上下文预算（按源配额/语义近重合并/窗口预算）。
+	// 零值 = 默认预算（MaxWindows 8 / PerSource 2 / Dedup 0.92——
+	// 0.92 是 Volt 论文的合并阈值，不是我们拍的）。
+	CtxBudget ctxmgmt.Budget
 }

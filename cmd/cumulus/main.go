@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -105,6 +106,9 @@ func runSelftest(args []string) error {
 	}), synthFn, qaflow.Options{
 		CorpusVersion: "selftest", ConfigVersion: "selftest", StrategyVersion: "v0.1", BeliefVersion: "none",
 		Reuse: reuse, Session: "selftest",
+		// 紧预算：深循环攒了 5 个窗口，预算只留 3 个——驱逐真实发生，
+		// 账目打出来（合成前最后一道上下文管理）
+		CtxBudget: ctxmgmt.Budget{MaxWindows: 3, PerSourceMax: 2, DedupCosine: 0.92},
 	}).Run(cDeep); err != nil {
 		return err
 	}
@@ -117,7 +121,16 @@ func runSelftest(args []string) error {
 	}
 	if ws, ok := context.Get(cDeep, qaflow.KeyWindows); ok {
 		for _, w := range ws {
-			fmt.Printf("deep window: %s %s\n", w.SourceID, w.Span)
+			fmt.Printf("deep window: %s %s score=%.2f\n", w.SourceID, w.Span, w.Score)
+		}
+	}
+	if ev, ok := context.Get(cDeep, qaflow.KeyEviction); ok {
+		for _, m := range ev.Merged {
+			fmt.Printf("evict: merged %s#%s into %s#%s (cosine=%.3f)\n",
+				m.Merged.SourceID, m.Merged.Span, m.Kept.SourceID, m.Kept.Span, m.Cosine)
+		}
+		for _, d := range ev.Dropped {
+			fmt.Printf("evict: dropped %s#%s (%s)\n", d.Window.SourceID, d.Window.Span, d.Reason)
 		}
 	}
 

@@ -30,9 +30,17 @@ type Window struct {
 type Entry struct {
 	Question string
 	Windows  []Window
-	YieldHit bool    // 上轮这个问题是否命中金标（调用方给的反馈）
-	Coverage float64 // 上轮的查询词覆盖度（同问同窗的属性，回放即诚实——
-	// 不回放会让路由信号缺省成 0，把复用的问句误判成"没覆盖"而升级）
+	YieldHit bool     // 上轮这个问题是否命中金标（调用方给的反馈）
+	Coverage Coverage // 上轮的查询词覆盖度（同问同窗的属性，回放即诚实——
+	// 不回放会让路由信号缺省成 0，把复用的问句误判成"没覆盖"而升级。
+	// 带词表：驱逐后要重算，没词表重算会把覆盖度归零）
+}
+
+// Coverage 是覆盖度的完整记录（与 qaflow.CoverageInfo 同字段）。
+type Coverage struct {
+	Value float64
+	Terms []string
+	OOV   []string
 }
 
 // ReuseStore 按会话 + 归一化问题存复用记录。并发安全。
@@ -65,7 +73,7 @@ func (s *ReuseStore) Lookup(session, question string) (Entry, bool) {
 }
 
 // Record 写入/覆盖一个问题的复用记录（同问题再问即刷新）。
-func (s *ReuseStore) Record(session, question string, windows []Window, yieldHit bool, coverage float64) {
+func (s *ReuseStore) Record(session, question string, windows []Window, yieldHit bool, coverage Coverage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.bySess[session]

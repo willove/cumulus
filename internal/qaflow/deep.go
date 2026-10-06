@@ -20,6 +20,7 @@ var KeyCoverage = context.NewKey[CoverageInfo]("evidence.coverage")
 // 的词——单独上报，它是查询与语料错配的信号，不是覆盖度的扣分项）。
 type CoverageInfo struct {
 	Value float64
+	Terms []string // 可达词表（语料内出现过的查询词）——驱逐后重算覆盖度用
 	OOV   []string
 }
 
@@ -46,7 +47,7 @@ func BM25DeepEvidence(idx *retrieval.Index, width int, deep DeepOptions) func(*c
 				// 全送进 MiniLM，一次 300 题的评测就是几万次 CPU 推理，
 				// 机器直接被打满（实测过，+680ms/题）。重排是收敛后的
 				// 事：最终窗口最多十几条，比一次就够。
-				hits := idx.SearchWith(r.Original, k*page, width, nil)
+				hits := idx.SearchWith(r.Effective(), k*page, width, nil)
 				out := make([]deepcore.Window, 0, len(hits))
 				for _, h := range hits {
 					out = append(out, deepcore.Window{
@@ -164,12 +165,13 @@ func coverageOf(idx *retrieval.Index, query string, texts []string) CoverageInfo
 	}
 	hay := all.String()
 	var covered, reachable int
-	var oov []string
+	var oov, reach []string
 	for _, term := range terms {
 		if idx == nil || !idx.HasTerm(term) {
 			oov = append(oov, term) // 语料外词：不可达，不计分母
 			continue
 		}
+		reach = append(reach, term)
 		reachable++
 		if strings.Contains(hay, term) {
 			covered++
@@ -178,7 +180,28 @@ func coverageOf(idx *retrieval.Index, query string, texts []string) CoverageInfo
 	if reachable == 0 {
 		return CoverageInfo{OOV: oov}
 	}
-	return CoverageInfo{Value: float64(covered) / float64(reachable), OOV: oov}
+	return CoverageInfo{Value: float64(covered) / float64(reachable), Terms: reach, OOV: oov}
+}
+
+// recomputeCoverage 用既有可达词表重算覆盖度（驱逐后调用；不需要索引——
+// 语料没变，词表不变）。
+func recomputeCoverage(query string, terms []string, texts []string) CoverageInfo {
+	if len(terms) == 0 || len(texts) == 0 {
+		return CoverageInfo{}
+	}
+	var all strings.Builder
+	for _, w := range texts {
+		all.WriteString(w)
+		all.WriteByte('\n')
+	}
+	hay := all.String()
+	covered := 0
+	for _, term := range terms {
+		if strings.Contains(hay, term) {
+			covered++
+		}
+	}
+	return CoverageInfo{Value: float64(covered) / float64(len(terms)), Terms: terms}
 }
 
 // deepK 每页候选数。固定 3：与单轮 BM25 的默认 topk 一致——A/B 时

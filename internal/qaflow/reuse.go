@@ -59,7 +59,7 @@ func (s ReuseStage) Run(c *context.Context) error {
 	}
 	// 覆盖度随窗口回放：复用命中时路由看到的是上轮同一口径的事实，
 	// 不是缺省 0
-	if err := context.Set(c, KeyCoverage, CoverageInfo{Value: e.Coverage}); err != nil {
+	if err := context.Set(c, KeyCoverage, CoverageInfo{Value: e.Coverage.Value, Terms: e.Coverage.Terms, OOV: e.Coverage.OOV}); err != nil {
 		return err
 	}
 	return context.Set(c, KeyReuseState, ReuseState{Hit: true})
@@ -108,7 +108,9 @@ func (s ReuseRecordStage) Run(c *context.Context) error {
 		wins = append(wins, knowledge.Window{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
 	cov, _ := context.Get(c, KeyCoverage)
-	s.Store.Record(s.Session, s.Query, wins, len(ans.Citations) > 0, cov.Value)
+	s.Store.Record(s.Session, s.Query, wins, len(ans.Citations) > 0, knowledge.Coverage{
+		Value: cov.Value, Terms: cov.Terms, OOV: cov.OOV,
+	})
 	return nil
 }
 
