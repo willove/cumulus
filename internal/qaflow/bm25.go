@@ -46,6 +46,13 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 				Substrate: "text",
 			})
 		}
+		texts := make([]string, 0, len(windows))
+		for _, w := range windows {
+			texts = append(texts, w.Text)
+		}
+		if err := context.Set(c, KeyCoverage, coverageOf(idx, r.Original, texts)); err != nil {
+			return nil, err
+		}
 		return windows, nil
 	}
 }

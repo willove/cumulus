@@ -30,7 +30,7 @@ func (ReuseStage) Name() string { return "reuse" }
 // 本 stage 只写窗口（短路检索），不读 context 中的检索数据
 func (ReuseStage) Reads() []string { return nil }
 func (ReuseStage) Writes() []string {
-	return []string{KeyWindows.String(), KeyReuseState.String()}
+	return []string{KeyWindows.String(), KeyReuseState.String(), KeyCoverage.String()}
 }
 
 func (s ReuseStage) Run(c *context.Context) error {
@@ -55,6 +55,11 @@ func (s ReuseStage) Run(c *context.Context) error {
 		return context.Set(c, KeyReuseState, ReuseState{Hit: false, Reason: "record has no windows"})
 	}
 	if err := context.Set(c, KeyWindows, windows); err != nil {
+		return err
+	}
+	// 覆盖度随窗口回放：复用命中时路由看到的是上轮同一口径的事实，
+	// 不是缺省 0
+	if err := context.Set(c, KeyCoverage, CoverageInfo{Value: e.Coverage}); err != nil {
 		return err
 	}
 	return context.Set(c, KeyReuseState, ReuseState{Hit: true})
@@ -102,7 +107,8 @@ func (s ReuseRecordStage) Run(c *context.Context) error {
 	for _, w := range ws {
 		wins = append(wins, knowledge.Window{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
-	s.Store.Record(s.Session, s.Query, wins, len(ans.Citations) > 0)
+	cov, _ := context.Get(c, KeyCoverage)
+	s.Store.Record(s.Session, s.Query, wins, len(ans.Citations) > 0, cov.Value)
 	return nil
 }
 

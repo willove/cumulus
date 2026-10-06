@@ -4,13 +4,24 @@ import (
 	gocontext "context"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/deepcore"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/retrieval"
 )
+
+// KeyCoverage 是覆盖度记录（两条检索路都写）：数值 + 语料外词。
+// 充足性路由读它当草稿信号——路由要的是可观测事实，不是调用方手填的
+// 置信度（那正是 04 落点 1 要修掉的形态）。
+var KeyCoverage = context.NewKey[CoverageInfo]("evidence.coverage")
+
+// CoverageInfo 是词面覆盖的完整记录：值 + 语料外词（任何窗口都覆盖不了
+// 的词——单独上报，它是查询与语料错配的信号，不是覆盖度的扣分项）。
+type CoverageInfo struct {
+	Value float64
+	OOV   []string
+}
 
 // KeyDeep 是深循环遥测的挂点：跑了几轮、取过多少文档、几条死路、
 // 覆盖度轨迹、为什么停。循环内部状态必须可观测——不可观测的循环
@@ -73,6 +84,13 @@ func BM25DeepEvidence(idx *retrieval.Index, width int, deep DeepOptions) func(*c
 		if len(out) > 1 {
 			out = rerankWindows(c, out, r.Original)
 		}
+		texts := make([]string, 0, len(out))
+		for _, w := range out {
+			texts = append(texts, w.Text)
+		}
+		if err := context.Set(c, KeyCoverage, coverageOf(idx, r.Original, texts)); err != nil {
+			return nil, err
+		}
 		return out, nil
 	}
 }
@@ -126,13 +144,22 @@ func rerankWindows(c *context.Context, windows []EvidenceWindow, query string) [
 //
 // 第一版不说语义——语义覆盖等 embedder 就位再做，不装样子。
 func lexicalCoverage(idx *retrieval.Index, query string, ws []deepcore.Window) float64 {
+	texts := make([]string, 0, len(ws))
+	for _, w := range ws {
+		texts = append(texts, w.Text)
+	}
+	return coverageOf(idx, query, texts).Value
+}
+
+// coverageOf 算覆盖并把语料外词一并记下（语料外词单独上报）。
+func coverageOf(idx *retrieval.Index, query string, texts []string) CoverageInfo {
 	terms := dedupe(retrieval.Fields(query))
-	if len(terms) == 0 || len(ws) == 0 {
-		return 0
+	if len(terms) == 0 || len(texts) == 0 {
+		return CoverageInfo{}
 	}
 	var all strings.Builder
-	for _, w := range ws {
-		all.WriteString(w.Text)
+	for _, w := range texts {
+		all.WriteString(w)
 		all.WriteByte('\n')
 	}
 	hay := all.String()
@@ -148,33 +175,10 @@ func lexicalCoverage(idx *retrieval.Index, query string, ws []deepcore.Window) f
 			covered++
 		}
 	}
-	lastOOV.Store(oov)
 	if reachable == 0 {
-		return 0
+		return CoverageInfo{OOV: oov}
 	}
-	return float64(covered) / float64(reachable)
-}
-
-// lastOOV 是 lexicalCoverage 的语料外词上报通道（单线程 selftest/CLI
-// 用；并发场景以后再改成显式返回值——那时覆盖函数签名会带 context 键）。
-var lastOOV syncT
-
-type syncT struct {
-	mu sync.Mutex
-	v  []string
-}
-
-func (s *syncT) Store(v []string) {
-	s.mu.Lock()
-	s.v = v
-	s.mu.Unlock()
-}
-
-// LastOOV 取最近一次覆盖计算认定的语料外词（ selftest/诊断用）。
-func LastOOV() []string {
-	lastOOV.mu.Lock()
-	defer lastOOV.mu.Unlock()
-	return append([]string(nil), lastOOV.v...)
+	return CoverageInfo{Value: float64(covered) / float64(reachable), OOV: oov}
 }
 
 // deepK 每页候选数。固定 3：与单轮 BM25 的默认 topk 一致——A/B 时
@@ -190,6 +194,15 @@ func dedupe(in []string) []string {
 		}
 		seen[s] = true
 		out = append(out, s)
+	}
+	return out
+}
+
+// textsOf 取窗口文本（覆盖度只关心原文，不关心坐标）。
+func textsOf(ws []EvidenceWindow) []string {
+	out := make([]string, 0, len(ws))
+	for _, w := range ws {
+		out = append(out, w.Text)
 	}
 	return out
 }

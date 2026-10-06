@@ -111,7 +111,9 @@ func runSelftest(args []string) error {
 	if tel, ok := context.Get(cDeep, qaflow.KeyDeep); ok {
 		fmt.Printf("deep: rounds=%d sampled=%d dead-ends=%d coverage=%v stop=%s\n",
 			tel.Rounds, tel.SampledDocs, tel.DeadEnds, tel.Coverage, tel.StopReason)
-		fmt.Printf("deep: out-of-corpus query terms (not in denominator): %v\n", qaflow.LastOOV())
+		if ci, ok := context.Get(cDeep, qaflow.KeyCoverage); ok {
+			fmt.Printf("deep: coverage=%.3f out-of-corpus terms (not in denominator): %v\n", ci.Value, ci.OOV)
+		}
 	}
 	if ws, ok := context.Get(cDeep, qaflow.KeyWindows); ok {
 		for _, w := range ws {
@@ -154,6 +156,9 @@ func printAsk(label string, c *context.Context) {
 	}
 	if rs, ok := context.Get(c, qaflow.KeyReuseState); ok {
 		fmt.Printf("reuse: hit=%v %s\n", rs.Hit, rs.Reason)
+	}
+	if rd, ok := context.Get(c, qaflow.KeyRoute); ok {
+		fmt.Printf("route: %s — %s\n", rd.Action, rd.Reason)
 	}
 	if a, ok := context.Get(c, qaflow.KeyAnswer); ok {
 		state := "answered"

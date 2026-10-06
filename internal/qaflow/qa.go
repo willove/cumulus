@@ -50,10 +50,10 @@ type EvidenceWindow struct {
 // RouteDecision 是 stage 3 的路由结论。信号与阈值都留痕，供回放
 // “当时为什么升级/拒答”。
 type RouteDecision struct {
-	Action     string // fast / escalate / refuse
-	Confidence float64
-	Grounded   bool
-	Reason     string
+	Action   string // fast / escalate / refuse
+	Signals  RouteSignals
+	Grounded bool
+	Reason   string
 }
 
 // Answer 是 stage 4 的产物。Citations 必须能映射回窗口 id。
@@ -109,7 +109,7 @@ type EvidenceStage struct {
 func (EvidenceStage) Name() string    { return "evidence-supply" }
 func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String()} }
 func (EvidenceStage) Writes() []string {
-	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String()}
+	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String(), KeyCoverage.String()}
 }
 func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
@@ -148,32 +148,92 @@ func (EvidenceStage) Verify(c *context.Context) error {
 
 // ---------- stage 3: 充足性路由 ----------
 
-// RouteStage 用两类便宜信号决定 fast / escalate / refuse：
-// 置信度（路由代理，非裁判）与接地检查。决策留痕。
+// RouteStage 用可观测信号决定 fast / escalate / refuse（04 落点 1）：
+// 草稿置信度由三个便宜信号算出——查询词覆盖度、候选区分度、死路率。
+// 置信度只当路由代理，不当正确性裁决（BioHarness）；信号与决策全部
+// 留痕，事后可回答"这次为什么升级/拒答"。
 type RouteStage struct {
-	Confidence float64
+	// MinConfidence 是 escalate 阈值。零值用默认 0.5。
+	MinConfidence float64
 }
 
-func (RouteStage) Name() string     { return "sufficiency-route" }
-func (RouteStage) Reads() []string  { return []string{KeyWindows.String()} }
+func (RouteStage) Name() string { return "sufficiency-route" }
+func (RouteStage) Reads() []string {
+	return []string{KeyWindows.String(), KeyCoverage.String(), KeyDeep.String()}
+}
 func (RouteStage) Writes() []string { return []string{KeyRoute.String()} }
+
 func (s RouteStage) Run(c *context.Context) error {
 	ws, _ := context.Get(c, KeyWindows)
 	grounded := len(ws) > 0
+	sig := gatherSignals(c, ws)
 
-	d := RouteDecision{Grounded: grounded, Confidence: s.Confidence}
+	d := RouteDecision{Grounded: grounded, Signals: sig}
+	threshold := s.MinConfidence
+	if threshold <= 0 {
+		threshold = 0.5
+	}
 	switch {
 	case !grounded:
 		d.Action = "refuse" // 没有证据：诚实的不知道，不许硬答
 		d.Reason = "no evidence window; refuse by grammar"
-	case s.Confidence < 0.5:
+	case sig.Confidence < threshold:
 		d.Action = "escalate"
-		d.Reason = "draft confidence below threshold; escalate to DEEP"
+		d.Reason = fmt.Sprintf("draft confidence %.3f below %.3f (coverage=%.3f margin=%.3f dead-rate=%.3f); escalate",
+			sig.Confidence, threshold, sig.Coverage, sig.Margin, sig.DeadRate)
 	default:
 		d.Action = "fast"
-		d.Reason = "grounded and confident enough"
+		d.Reason = fmt.Sprintf("draft confidence %.3f (coverage=%.3f margin=%.3f)",
+			sig.Confidence, sig.Coverage, sig.Margin)
 	}
 	return context.Set(c, KeyRoute, d)
+}
+
+// RouteSignals 是充足性路由的全部输入事实。全部来自流程内的可观测状态：
+// 覆盖度（evidence.coverage）、区分度（窗口打分的头部分差）、死路率
+// （deep 遥测）。没有调用方手填的数——手填置信度正是要修掉的旧形态。
+type RouteSignals struct {
+	Coverage   float64 // 查询词覆盖度（语料内可达词口径）
+	Margin     float64 // (top1-top2)/top1：候选区分度代理，0..1
+	DeadRate   float64 // 死路/取样：翻过多少空文档
+	Windows    int     // 最终窗口数
+	Confidence float64 // 上三项的加权组合（DraftConfidence）
+}
+
+// gatherSignals 从 context 采集路由信号。
+func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
+	sig := RouteSignals{Windows: len(ws)}
+	if ci, ok := context.Get(c, KeyCoverage); ok {
+		sig.Coverage = ci.Value
+	}
+	if len(ws) >= 2 && ws[0].Score > 0 {
+		sig.Margin = (ws[0].Score - ws[1].Score) / ws[0].Score
+		if sig.Margin < 0 {
+			sig.Margin = 0
+		}
+		if sig.Margin > 1 {
+			sig.Margin = 1
+		}
+	}
+	if tel, ok := context.Get(c, KeyDeep); ok && tel.SampledDocs > 0 {
+		sig.DeadRate = float64(tel.DeadEnds) / float64(tel.SampledDocs)
+	}
+	sig.Confidence = DraftConfidence(sig)
+	return sig
+}
+
+// DraftConfidence 权重公开可审：覆盖度 0.5（证据到没到位的直接度量）、
+// 区分度 0.3（top 与次席分不开 = 没把握）、死路率 0.2（翻过多少空文档，
+// 取负）。权重不是魔数，是默认值——改它要走评测对照，不靠感觉。
+func DraftConfidence(sig RouteSignals) float64 {
+	conf := 0.5*sig.Coverage + 0.3*sig.Margin + 0.2*(1-sig.DeadRate)
+	if conf < 0 {
+		return 0
+	}
+	if conf > 1 {
+		return 1
+	}
+	return conf
 }
 func (RouteStage) Verify(c *context.Context) error {
 	d, ok := context.Get(c, KeyRoute)

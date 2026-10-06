@@ -30,7 +30,9 @@ type Window struct {
 type Entry struct {
 	Question string
 	Windows  []Window
-	YieldHit bool // 上轮这个问题是否命中金标（调用方给的反馈）
+	YieldHit bool    // 上轮这个问题是否命中金标（调用方给的反馈）
+	Coverage float64 // 上轮的查询词覆盖度（同问同窗的属性，回放即诚实——
+	// 不回放会让路由信号缺省成 0，把复用的问句误判成"没覆盖"而升级）
 }
 
 // ReuseStore 按会话 + 归一化问题存复用记录。并发安全。
@@ -63,7 +65,7 @@ func (s *ReuseStore) Lookup(session, question string) (Entry, bool) {
 }
 
 // Record 写入/覆盖一个问题的复用记录（同问题再问即刷新）。
-func (s *ReuseStore) Record(session, question string, windows []Window, yieldHit bool) {
+func (s *ReuseStore) Record(session, question string, windows []Window, yieldHit bool, coverage float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.bySess[session]
@@ -71,7 +73,7 @@ func (s *ReuseStore) Record(session, question string, windows []Window, yieldHit
 		m = map[string]Entry{}
 		s.bySess[session] = m
 	}
-	m[Normalize(question)] = Entry{Question: question, Windows: windows, YieldHit: yieldHit}
+	m[Normalize(question)] = Entry{Question: question, Windows: windows, YieldHit: yieldHit, Coverage: coverage}
 }
 
 // Len 返回某会话的复用条数（观测/测试用）。
