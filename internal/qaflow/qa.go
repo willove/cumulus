@@ -109,7 +109,7 @@ type EvidenceStage struct {
 func (EvidenceStage) Name() string    { return "evidence-supply" }
 func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String()} }
 func (EvidenceStage) Writes() []string {
-	return []string{KeyWindows.String(), KeyRerank.String()}
+	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String()}
 }
 func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)

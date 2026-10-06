@@ -27,10 +27,11 @@ import (
 // 语料原话，不是生成。生产把这里换成 synth.LLM 即可，别处不动。
 type bm25Executor struct {
 	idx           *retrieval.Index
-	knobs         map[string]float64 // evidence.topk / evidence.width
-	embedder      embed.Embedder     // 可空：向量面（绑了才重排/才亮语义尺）
-	synthFn       qaflow.SynthFunc   // 合成面：offline 或 llm
-	groundingFlag bool               // semantic grounding scale (true=on)
+	knobs         map[string]float64  // evidence.topk / evidence.width
+	embedder      embed.Embedder      // 可空：向量面（绑了才重排/才亮语义尺）
+	synthFn       qaflow.SynthFunc    // 合成面：offline 或 llm
+	groundingFlag bool                // semantic grounding scale (true=on)
+	deep          *qaflow.DeepOptions // 非空 = 走深循环（多轮取证）
 }
 
 func (e *bm25Executor) topk() int {
@@ -83,7 +84,11 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 	if synthFn == nil {
 		synthFn = e.synth()
 	}
-	r := qaflow.Runner(question, qaflow.BM25Evidence(e.idx, e.topk(), e.width()), synthFn, qaflow.Options{
+	retrieve := qaflow.BM25Evidence(e.idx, e.topk(), e.width())
+	if e.deep != nil {
+		retrieve = qaflow.BM25DeepEvidence(e.idx, e.width(), *e.deep)
+	}
+	r := qaflow.Runner(question, retrieve, synthFn, qaflow.Options{
 		CorpusVersion:   "frozen",
 		ConfigVersion:   "eval",
 		StrategyVersion: "v0.1",
@@ -182,15 +187,15 @@ func runEval(ctx gocontext.Context) error {
 	}
 	ab := os.Getenv("CUMULUS_AB") == "1"
 	// execFor 组装执行面：embedder/信念都是可选件，由参数决定装不装
-	execFor := func(withEmbed bool) *bm25Executor {
-		ex := &bm25Executor{idx: idx, knobs: defaultKnobs(), synthFn: synthFn, groundingFlag: grounding > 0}
+	execFor := func(withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions) *bm25Executor {
+		ex := &bm25Executor{idx: idx, knobs: knobs, synthFn: synthFn, groundingFlag: grounding > 0, deep: deep}
 		if withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
 		return ex
 	}
-	runOne := func(runID, arm string, withEmbed bool) (evalfcore.RunState, error) {
-		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed), j)
+	runOne := func(runID, arm string, withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions) (evalfcore.RunState, error) {
+		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, knobs, deep), j)
 		state, err := runner.Start(ctx, runID, ds.Items)
 		state.Arm = arm
 		if err != nil {
@@ -202,27 +207,49 @@ func runEval(ctx gocontext.Context) error {
 	fmt.Printf("fingerprints items=%s corpus=%s config=%s\n", fp.ItemsSHA[:12], fp.CorpusSHA, fp.ConfigSHA[:12])
 
 	if ab {
-		// 两臂对照（同一指纹；臂是实验内维度，不进指纹）：
-		//   bm25          纯词法
-		//   bm25+rerank   词法 + 段落级语义重排
-		// （belief 全局声望臂已在真实语料证伪退役，见 evolution-log 三·补七；
-		//   按会话复用路径由 selftest 的两问演示覆盖，不在此臂。）
-		a, err := runOne("run-ab-bm25", "bm25", false)
+		// 三臂对照（同一指纹；臂是实验内维度，不进指纹）：
+		//   bm25        k=3 单轮（基线）
+		//   bm25-k9     k=9 单轮（预算对齐：与深循环的窗口上限同预算）
+		//   deep        k=3 起步的深循环（覆盖度驱动多轮，预算同上）
+		// 三者窗口预算一致才可比——不然"窗口多所以命中高"是预算差异不是
+		// 部件差异。（belief 全局声望臂已退役；按会话复用由 selftest 覆盖。）
+		deepOpts := &qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0}
+		k9 := defaultKnobs()
+		k9["evidence.topk"] = 9
+		deepEnabled := os.Getenv("CUMULUS_DEEP") == "1"
+		a, err := runOne("run-ab-bm25", "bm25", false, defaultKnobs(), nil)
 		if err != nil {
 			return err
 		}
-		b, err := runOne("run-ab-rerank", "bm25+rerank", true)
-		if err != nil {
-			return err
+		arms := []evalfcore.RunState{a}
+		labels := []string{"bm25   "}
+		if deepEnabled {
+			k9Run, err := runOne("run-ab-k9", "bm25-k9", false, k9, nil)
+			if err != nil {
+				return err
+			}
+			deepRun, err := runOne("run-ab-deep", "deep", true, defaultKnobs(), deepOpts)
+			if err != nil {
+				return err
+			}
+			arms = append(arms, k9Run, deepRun)
+			labels = append(labels, "bm25-k9", "deep    ")
+		} else {
+			b, err := runOne("run-ab-rerank", "bm25+rerank", true, defaultKnobs(), nil)
+			if err != nil {
+				return err
+			}
+			arms = append(arms, b)
+			labels = append(labels, "bm25+rerank")
 		}
-		printRun("bm25        ", a)
-		printRun("bm25+rerank ", b)
-		for _, pair := range []struct {
-			label string
-			x, y  evalfcore.RunState
-		}{
-			{"rerank-bm25", b, a},
-		} {
+		for i, s := range arms {
+			printRun(labels[i], s)
+		}
+		for i := 1; i < len(arms); i++ {
+			pair := struct {
+				label string
+				x, y  evalfcore.RunState
+			}{labels[i] + "-bm25", arms[i], a}
 			diff, reasons := evalfcore.Compare(pair.x, pair.y)
 			if len(reasons) > 0 {
 				fmt.Printf("diff %s: incomparable %v\n", pair.label, reasons)
@@ -235,7 +262,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm")
+	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", defaultKnobs(), nil)
 	if err != nil {
 		return err
 	}

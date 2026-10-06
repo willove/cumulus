@@ -74,8 +74,13 @@ func runSelftest(args []string) error {
 	// 语料此刻由 selftest 内联给出；接上 store LoadFromStore 后改从库里读。
 	idx := retrieval.Build([]retrieval.Document{
 		{ID: "law-1", Body: "连接池最大连接数默认为 100，超过需调整配置并观察等待队列长度。"},
-		{ID: "ops-1", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484。"},
+		{ID: "ops-1", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484；变更需值班经理审批并记录在案，回滚方案同步归档。"},
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
+		// 深循环演示用：三个词面沾边但不覆盖"部署端口"的干扰文档——
+		// 单轮 top-3 被它们占满，覆盖度不达标，循环必须展开第二轮
+		{ID: "noise-1", Body: "连接池端口巡检：连接池端口每季度巡检，端口状态记录在案。"},
+		{ID: "noise-2", Body: "连接池端口应急：连接池端口告警先扩容，端口变更需审批。"},
+		{ID: "noise-3", Body: "连接池端口基线：连接池端口默认策略，端口基线每月复核。"},
 	})
 	selftestIdx = idx
 	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), synthFn, qaflow.Options{
@@ -92,6 +97,27 @@ func runSelftest(args []string) error {
 
 	fmt.Printf("synth: %s\n", synthLabel)
 	printAsk("first ask (cold)  ", c)
+
+	// —— 深循环演示：同一问句，证据不够就多取几轮 ——
+	cDeep := context.New(context.Realm(*realm))
+	if err := qaflow.Runner("连接池的部署端口是多少", qaflow.BM25DeepEvidence(idx, 60, qaflow.DeepOptions{
+		MaxRounds: 3, CoverageTarget: 1.0,
+	}), synthFn, qaflow.Options{
+		CorpusVersion: "selftest", ConfigVersion: "selftest", StrategyVersion: "v0.1", BeliefVersion: "none",
+		Reuse: reuse, Session: "selftest",
+	}).Run(cDeep); err != nil {
+		return err
+	}
+	if tel, ok := context.Get(cDeep, qaflow.KeyDeep); ok {
+		fmt.Printf("deep: rounds=%d sampled=%d dead-ends=%d coverage=%v stop=%s\n",
+			tel.Rounds, tel.SampledDocs, tel.DeadEnds, tel.Coverage, tel.StopReason)
+		fmt.Printf("deep: out-of-corpus query terms (not in denominator): %v\n", qaflow.LastOOV())
+	}
+	if ws, ok := context.Get(cDeep, qaflow.KeyWindows); ok {
+		for _, w := range ws {
+			fmt.Printf("deep window: %s %s\n", w.SourceID, w.Span)
+		}
+	}
 
 	// 同一会话再问一次：复用命中，本轮不检索（"越问越快"的执行处）
 	c2 := context.New(context.Realm(*realm))

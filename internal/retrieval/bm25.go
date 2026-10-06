@@ -265,3 +265,13 @@ func (idx *Index) Doc(docID string) (Document, bool) {
 	d, ok := idx.byID[docID]
 	return d, ok
 }
+
+// HasTerm 报告某词是否在语料里出现过（至少一篇文档含它）。
+// 深循环的词面覆盖用它剔除语料外词——没有窗口能覆盖不存在的词，
+// 把它算进分母等于把目标设成永不可达。
+func (idx *Index) HasTerm(term string) bool {
+	if idx == nil {
+		return false
+	}
+	return len(idx.Postings[term]) > 0
+}
