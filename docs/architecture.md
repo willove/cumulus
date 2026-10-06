@@ -22,6 +22,7 @@ internal/
   learncore/             流程三：一次学习周期（受管变更五阶段：白名单旋钮/护栏/提升即注册）
   knowledge/             簇、冲突边、候选区信念（belief 后验）
   evidence/              证据供给：FAST/DEEP、充足性路由、证据窗口、接地检查
+  synth/                 合成面：离线确定性合成 + LLM 合成（窗口编号化、严格 JSON 契约）
   retrieval/             检索后端：BM25、CJK 二元组分词、证据窗口坐标（第一个真零件）
   knowledge/             簇、冲突边、候选区信念
   ingest/                适配器 + 任务状态机
@@ -88,5 +89,6 @@ scripts/gates.sh
 3. ~~learncore：受管变更五阶段~~（已落地）；
 4. retrieval 从 store 装语料（LoadFromStore），store 补 KV 与查询；
 5. ~~反应式依赖分类器~~（已落地：`context.Activator` + `qaflow.BeliefBooster`，selftest 可见组件状态）；
-6. HTTP 面与契约生成（contract-gen 门）；
-7. web 按审计重建，第一个页面是“问答”。
+6. ~~合成步接 LLM~~（契约 + 离线/LLM 两实现；待接真提供方 key）；
+7. HTTP 面与契约生成（contract-gen 门）；
+8. web 按审计重建，第一个页面是“问答”。

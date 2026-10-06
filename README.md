@@ -19,7 +19,8 @@ cumulus 的下一版。区别不在功能，在结构：一切共享状态经过
 ```
 internal/context/   typed key、realm、注册/释放、提交视图、stage 禁闭
 internal/flow/      stage 契约 + runner（禁闭、失败反卷、记视图）
-internal/qaflow/    问答六 stage（检索/路由/验证是真的，合成为桩；信念可绑可选）
+internal/qaflow/    问答六 stage（合成走 SynthFunc 契约；信念可绑可选）
+internal/synth/     合成面两种实现：离线确定性 + LLM（严格 JSON 契约，引用编号化）
 internal/evalfcore/ 评测 episode：三指纹冻结、原子落盘、中断不重跑、失败六分类
 internal/learncore/ 受管变更五阶段：旋钮白名单、率地板护栏、提升=注册、掉线回滚
 internal/knowledge/belief/ 候选区后验（observe-update 的 update 半边，纯函数）

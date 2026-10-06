@@ -12,6 +12,7 @@ import (
 	"github.com/willove/cumulus/internal/knowledge/belief"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
+	"github.com/willove/cumulus/internal/synth"
 )
 
 func main() {
@@ -62,12 +63,15 @@ func runSelftest(args []string) error {
 		{ID: "ops-1", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484。"},
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
 	})
-	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), qaflow.Options{
-		CorpusVersion:   "selftest",
-		ConfigVersion:   "selftest",
-		StrategyVersion: "v0.1",
-		BeliefVersion:   "none",
-	})
+	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60),
+		func(q string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+			return synth.Offline(q, ws)
+		}, qaflow.Options{
+			CorpusVersion:   "selftest",
+			ConfigVersion:   "selftest",
+			StrategyVersion: "v0.1",
+			BeliefVersion:   "none",
+		})
 	if err := r.Run(c); err != nil {
 		return err
 	}

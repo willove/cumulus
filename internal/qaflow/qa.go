@@ -20,6 +20,9 @@ var (
 	KeyRoute   = context.NewKey[RouteDecision]("qa.route")
 	KeyAnswer  = context.NewKey[Answer]("qa.answer")
 	KeyUsage   = context.NewKey[Usage]("qa.usage")
+	// KeySynthUsage 是合成步记下的用量。记账步只读它——账目和发生额
+	// 是同一个来源，不许两处各写一份。
+	KeySynthUsage = context.NewKey[Usage]("qa.synthesis.usage")
 	// KeyBelief 是候选区信念的挂点。绑在 context 上，可用性因此可见：
 	// 没绑就是没绑，status 面看得到——可选组件不许静默失效（不变量 3）。
 	KeyBelief = context.NewKey[*belief.Belief]("knowledge.belief")
@@ -176,14 +179,22 @@ func (RouteStage) Verify(c *context.Context) error {
 
 // ---------- stage 4: 合成 ----------
 
-// SynthesizeStage 只读窗口与改写。路由是 refuse 时标记拒答、
-// 不许产出无证据文本（Verify 强制）。
-type SynthesizeStage struct{}
+// SynthFunc 是合成面契约：问题 + 证据窗口 → 带引用的答案 + 用量。
+// 离线确定性合成与 LLM 合成都实现它（internal/synth）；区别只在文本
+// 从哪来，契约不变：每个断言挂窗口，挂不上的不许存在。
+type SynthFunc func(question string, windows []EvidenceWindow) (Answer, Usage, error)
+
+// SynthesizeStage 只读窗口与改写。路由是 refuse 时标记拒答、不调合成面；
+// 非拒答而没有合成面是配置错误，直接失败——不许悄悄产无证据文本。
+type SynthesizeStage struct {
+	Query string
+	Synth SynthFunc
+}
 
 func (SynthesizeStage) Name() string     { return "synthesize" }
 func (SynthesizeStage) Reads() []string  { return []string{KeyWindows.String(), KeyRoute.String()} }
-func (SynthesizeStage) Writes() []string { return []string{KeyAnswer.String()} }
-func (SynthesizeStage) Run(c *context.Context) error {
+func (SynthesizeStage) Writes() []string { return []string{KeyAnswer.String(), KeySynthUsage.String()} }
+func (s SynthesizeStage) Run(c *context.Context) error {
 	d, ok := context.Get(c, KeyRoute)
 	if !ok {
 		return errors.New("route missing; stage 3 must run first")
@@ -191,18 +202,18 @@ func (SynthesizeStage) Run(c *context.Context) error {
 	if d.Action == "refuse" {
 		return context.Set(c, KeyAnswer, Answer{Refused: true, Text: ""})
 	}
-	ws, _ := context.Get(c, KeyWindows)
-	if len(ws) == 0 {
-		return errors.New("non-refused synthesis requires at least one evidence window")
+	if s.Synth == nil {
+		return errors.New("no synthesizer wired: refusing to emit an uncited answer (misconfiguration fails loud)")
 	}
-	w := ws[0]
-	// TODO: 接 llm 合成。桩先带一条可解析引用，保证契约可验证；
-	// 文本明确标注未实现，不允许假装有答案。
-	return context.Set(c, KeyAnswer, Answer{
-		Refused:   false,
-		Text:      "TODO: llm synthesis not wired",
-		Citations: []string{w.SourceID + "#" + w.Span},
-	})
+	ws, _ := context.Get(c, KeyWindows)
+	ans, usage, err := s.Synth(s.Query, ws)
+	if err != nil {
+		return err
+	}
+	if err := context.Set(c, KeyAnswer, ans); err != nil {
+		return err
+	}
+	return context.Set(c, KeySynthUsage, usage)
 }
 
 // Verify 强制：非拒答答案的每条引用都能映射回窗口；无引用的断言不允许存在。
@@ -235,22 +246,21 @@ func (SynthesizeStage) Verify(c *context.Context) error {
 
 // ---------- stage 5: 记账 ----------
 
-// AccountStage 写用量台账。上游不报 usage 时记 CostKnown=false，
-// 按文法停止后续付费调用（由调用方检查本记录）。
-type AccountStage struct {
-	Prompt, Completion int
-	CostKnown          bool
-}
+// AccountStage 把合成步的发生额过到台账。账目和发生额同一个来源
+// （KeySynthUsage）——不许两处各写一份。上游不报 usage 时记
+// CostKnown=false：成本未知不是 0，且调用方据此停止后续付费调用。
+type AccountStage struct{}
 
 func (AccountStage) Name() string     { return "account" }
-func (AccountStage) Reads() []string  { return nil }
+func (AccountStage) Reads() []string  { return []string{KeySynthUsage.String()} }
 func (AccountStage) Writes() []string { return []string{KeyUsage.String()} }
-func (s AccountStage) Run(c *context.Context) error {
-	return context.Set(c, KeyUsage, Usage{
-		PromptTokens:     s.Prompt,
-		CompletionTokens: s.Completion,
-		CostKnown:        s.CostKnown,
-	})
+func (AccountStage) Run(c *context.Context) error {
+	u, ok := context.Get(c, KeySynthUsage)
+	if !ok {
+		// 没有合成发生额（例如拒答）：零发生额，但仍要记一笔
+		return context.Set(c, KeyUsage, Usage{})
+	}
+	return context.Set(c, KeyUsage, u)
 }
 func (AccountStage) Verify(c *context.Context) error {
 	u, ok := context.Get(c, KeyUsage)
@@ -258,7 +268,7 @@ func (AccountStage) Verify(c *context.Context) error {
 		return errors.New("usage missing")
 	}
 	if !u.CostKnown {
-		// 不是错误：是显式记录“成本未知”。调用方据此停止后续调用。
+		// 不是错误：显式记录“成本未知”
 		return nil
 	}
 	if u.PromptTokens < 0 || u.CompletionTokens < 0 {
@@ -287,12 +297,12 @@ func (LearnStage) Verify(c *context.Context) error { return nil }
 
 // Runner 组装问答流程的 stage。学习步按开关取舍：不启用就整个不进流程，
 // 不留空壳注册（可选组件的启用必须是显式的）。
-func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error), opts Options) *flow.Runner {
+func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error), synth SynthFunc, opts Options) *flow.Runner {
 	stages := []flow.Stage{
 		RewriteStage{Query: query},
 		EvidenceStage{Retrieve: retrieve},
 		RouteStage{},
-		SynthesizeStage{},
+		SynthesizeStage{Query: query, Synth: synth},
 		AccountStage{},
 	}
 	if opts.LearnEnabled {

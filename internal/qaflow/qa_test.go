@@ -1,6 +1,7 @@
 package qaflow
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,6 +10,21 @@ import (
 	"github.com/willove/cumulus/internal/knowledge/belief"
 	"github.com/willove/cumulus/internal/retrieval"
 )
+
+// offlineStub 是测试用的确定性合成：断言 = 窗口坐标，答案取第一条。
+// 与 synth.Offline 同契约；测试里本地定义，免得测试依赖 synth 成环
+// （synth 依赖 qaflow，测试再依赖回去就成环）。
+func offlineStub(question string, windows []EvidenceWindow) (Answer, Usage, error) {
+	if len(windows) == 0 {
+		return Answer{}, Usage{}, errors.New("offlineStub: no windows")
+	}
+	ans := Answer{}
+	for _, w := range windows {
+		ans.Citations = append(ans.Citations, w.SourceID+"#"+w.Span)
+	}
+	ans.Text = ans.Citations[0]
+	return ans, Usage{CostKnown: false}, nil
+}
 
 func stubRetrieve(_ *context.Context, r Rewrite) ([]EvidenceWindow, error) {
 	return []EvidenceWindow{{SourceID: "doc-1", Span: "第3条", Score: 0.9, Substrate: "text"}}, nil
@@ -36,7 +52,7 @@ func runnerWith(stages ...flow.Stage) *flow.Runner {
 // 跑通一次全流程：六步全过，提交视图落账。
 func TestRunnerHappyPath(t *testing.T) {
 	c := context.New("tenant_a")
-	r := Runner("连接池最大连接数是多少", stubRetrieve, opts())
+	r := Runner("连接池最大连接数是多少", stubRetrieve, offlineStub, opts())
 	if err := r.Run(c); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -61,7 +77,7 @@ func TestRunnerHappyPath(t *testing.T) {
 func TestRouteRefusesWithoutEvidence(t *testing.T) {
 	c := context.New("default")
 	empty := func(*context.Context, Rewrite) ([]EvidenceWindow, error) { return nil, nil }
-	if err := Runner("任意问题", empty, opts()).Run(c); err != nil {
+	if err := Runner("任意问题", empty, offlineStub, opts()).Run(c); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	d, _ := context.Get(c, KeyRoute)
@@ -126,7 +142,7 @@ func TestEvidenceVerifyRejectsUnresolvableWindow(t *testing.T) {
 	bad := func(*context.Context, Rewrite) ([]EvidenceWindow, error) {
 		return []EvidenceWindow{{SourceID: "doc-1", Span: ""}}, nil
 	}
-	err := Runner("q", bad, opts()).Run(c)
+	err := Runner("q", bad, offlineStub, opts()).Run(c)
 	if err == nil || !strings.Contains(err.Error(), "span") {
 		t.Fatalf("want span error, got: %v", err)
 	}
@@ -140,7 +156,7 @@ func TestBM25EndToEnd(t *testing.T) {
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
 	})
 	c := context.New("tenant_a")
-	r := Runner("连接池最大连接数是多少", BM25Evidence(idx, 3, 60), opts())
+	r := Runner("连接池最大连接数是多少", BM25Evidence(idx, 3, 60), offlineStub, opts())
 	if err := r.Run(c); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -172,7 +188,7 @@ func TestBM25EndToEnd(t *testing.T) {
 func TestBM25NoHitRefuses(t *testing.T) {
 	idx := retrieval.Build([]retrieval.Document{{ID: "a", Body: "连接池配置说明。"}})
 	c := context.New("default")
-	if err := Runner("量子引力飞船怎么造", BM25Evidence(idx, 3, 60), opts()).Run(c); err != nil {
+	if err := Runner("量子引力飞船怎么造", BM25Evidence(idx, 3, 60), offlineStub, opts()).Run(c); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	d, _ := context.Get(c, KeyRoute)
@@ -195,7 +211,7 @@ func TestBeliefBoostRescuesGoldFromOutsideTopK(t *testing.T) {
 
 	// 无信念：前三名是三个干扰文档（BM25 词频决定的真排序）
 	c := context.New("default")
-	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), opts()).Run(c); err != nil {
+	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), offlineStub, opts()).Run(c); err != nil {
 		t.Fatal(err)
 	}
 	ws, _ := context.Get(c, KeyWindows)
@@ -220,7 +236,7 @@ func TestBeliefBoostRescuesGoldFromOutsideTopK(t *testing.T) {
 	if err := BindBelief(c2, b); err != nil {
 		t.Fatal(err)
 	}
-	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), opts()).Run(c2); err != nil {
+	if err := Runner("成本结构怎么样", BM25Evidence(idx, 3, 60), offlineStub, opts()).Run(c2); err != nil {
 		t.Fatal(err)
 	}
 	ws2, _ := context.Get(c2, KeyWindows)
