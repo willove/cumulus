@@ -48,14 +48,6 @@ type CommittedView struct {
 	BeliefVersion   string
 }
 
-// Dependency 供 status 面使用：可选组件声明它依赖的 key 是否可用。
-// 不可用必须在这里可见，不允许静默失效（不变量 3）。
-type Dependency struct {
-	Component string
-	Key       string
-	Available bool
-}
-
 // Context 是单一中介。零值不可用，必须 New。
 type Context struct {
 	realm    Realm
@@ -67,7 +59,10 @@ type Context struct {
 	guardName string
 
 	views []CommittedView
-	deps  []Dependency
+
+	components  []*componentEntry // 可选组件（分类器驱动启停）
+	reevalDepth int               // 重入计数：激活回调里再 Set 会重入
+	reevalDirty bool              // 重入中发生过变化：最外层要重排
 }
 
 func New(realm Realm) *Context {
@@ -129,6 +124,7 @@ func Set[T any](c *Context, k Key[T], v T) error {
 		},
 	})
 	c.mu.Unlock()
+	c.touch() // 绑定变化：重分类可选组件
 	return nil
 }
 
@@ -196,6 +192,7 @@ func (c *Context) UnwindTo(mark int) []string {
 		}
 		notes = append(notes, doomed[i].Note)
 	}
+	c.touch() // 解绑变化：重分类可选组件
 	return notes
 }
 
@@ -214,21 +211,5 @@ func (c *Context) Views() []CommittedView {
 	defer c.mu.RUnlock()
 	out := make([]CommittedView, len(c.views))
 	copy(out, c.views)
-	return out
-}
-
-// DeclareDependency 声明一个可选组件对某个 key 的依赖是否可用。
-func (c *Context) DeclareDependency(component, key string, available bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.deps = append(c.deps, Dependency{Component: component, Key: key, Available: available})
-}
-
-// Dependencies 返回依赖声明，供 status 面渲染。
-func (c *Context) Dependencies() []Dependency {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	out := make([]Dependency, len(c.deps))
-	copy(out, c.deps)
 	return out
 }

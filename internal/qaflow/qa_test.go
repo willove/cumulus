@@ -234,3 +234,46 @@ func TestBeliefBoostRescuesGoldFromOutsideTopK(t *testing.T) {
 		t.Fatalf("belief must rescue gold into top-3, got %v", ws2)
 	}
 }
+
+// 分类器驱动：信念绑上→组件激活；信念被撤销→组件停用。
+// “依赖没了还在跑”在这个结构里无法表达。
+func TestBeliefBoosterFollowsClassifier(t *testing.T) {
+	c := context.New("default")
+	booster := &BeliefBooster{}
+	c.RegisterComponent(booster)
+
+	// 没绑信念：组件未激活，缺什么列得出来
+	if booster.Active() {
+		t.Fatal("must not activate before belief is bound")
+	}
+	states := c.Components()
+	if len(states) != 1 || len(states[0].Missing) != 1 || states[0].Missing[0] != KeyBelief.String() {
+		t.Fatalf("missing dep must be visible: %+v", states)
+	}
+
+	// 绑上：激活
+	b := belief.New(nil, 0.5)
+	if err := BindBelief(c, b); err != nil {
+		t.Fatal(err)
+	}
+	if !booster.Active() {
+		t.Fatal("bind must activate the booster")
+	}
+
+	// 撤销到未绑定：停用
+	mark := c.Mark()
+	if err := BindBelief(c, b); err != nil {
+		t.Fatal(err)
+	}
+	if !booster.Active() {
+		t.Fatal("rebind must keep active (neutral)")
+	}
+	_ = c.UnwindTo(mark)
+	if !booster.Active() {
+		t.Fatal("restore-to-present must keep active")
+	}
+	_ = c.UnwindTo(0)
+	if booster.Active() {
+		t.Fatal("unbind must deactivate the booster")
+	}
+}

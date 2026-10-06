@@ -40,7 +40,7 @@ web/                     前端（契约稳定后才动，令牌单一来源）
 |---|---|
 | 一切共享状态绑 key，经过 context | `context.Context` 是唯一可变状态入口；`Set/Get` 之外没有后门 |
 | 注册必有逆，卸载 = 逆按 LIFO 回放 | `context.Registration.Release` 非空才收；`Unwind()` 统一反卷 |
-| 依赖显式，不可用即停用可见 | stage 的 `Reads()` 即声明；读未绑定的 key 返回类型化错误并进 status 面 |
+| 依赖显式，不可用即停用可见 | `context.Activator` 分类器：每次绑定/解绑后按 Requires 把组件分为激活/停用/中性并驱动转换；`Components()` 进 status 面 |
 | 每次迁移记提交视图 | `flow.Runner` 跑完写 `CommittedView`（语料/配置/策略/信念四版本） |
 | 出界数据管不了 | 答案与上游调用走 `emission` 记录点；回滚不覆盖，文档明示 |
 | 便宜信号优先 | 路由/升级/早停只用 `RouteSignal`（置信度、接地、struggle），贵模型只做合成 |
@@ -87,7 +87,6 @@ scripts/gates.sh
 2. ~~evalfcore：把 cumulus 的评测工作台协议（冻结三指纹、隔离引擎、原子落盘）迁成 episode~~（已落地）；
 3. ~~learncore：受管变更五阶段~~（已落地）；
 4. retrieval 从 store 装语料（LoadFromStore），store 补 KV 与查询；
-5. 反应式依赖分类器：上下文变化时按声明把组件分类为激活/停用/中性——
-   这是 cumulus“vocab 桥接撤除、MCS 悄悄不触发”的直接对治；
+5. ~~反应式依赖分类器~~（已落地：`context.Activator` + `qaflow.BeliefBooster`，selftest 可见组件状态）；
 6. HTTP 面与契约生成（contract-gen 门）；
 7. web 按审计重建，第一个页面是“问答”。

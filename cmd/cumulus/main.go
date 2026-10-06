@@ -46,13 +46,14 @@ func runSelftest(args []string) error {
 
 	c := context.New(context.Realm(*realm))
 
-	// 可选组件显式上线：信念存在并声明——status 面因此能显示它可用；
-	// 哪天它没绑，这里显示不可用，而不是静默走另一套算法。
+	// 可选组件走分类器：组件登记后由 context 按依赖分类驱动启停。
+	// 先登记（此时不可用），再绑信念——随后应为激活。
+	booster := &qaflow.BeliefBooster{}
+	c.RegisterComponent(booster)
 	b := belief.New(nil, 0.5)
 	if err := qaflow.BindBelief(c, b); err != nil {
 		return err
 	}
-	c.DeclareDependency("belief", qaflow.KeyBelief.String(), true)
 
 	// 真语料、真检索：倒排索引 + BM25（cumulus 验证过的那套）。
 	// 语料此刻由 selftest 内联给出；接上 store LoadFromStore 后改从库里读。
@@ -85,8 +86,19 @@ func runSelftest(args []string) error {
 			fmt.Printf("window: %s score=%.2f span=%s text=%q\n", w.SourceID, w.Score, w.Span, text)
 		}
 	}
-	for _, d := range c.Dependencies() {
-		fmt.Printf("dep: %s -> %s available=%v\n", d.Component, d.Key, d.Available)
+	for _, s := range c.Components() {
+		state := "inactive"
+		if s.Active {
+			state = "active"
+		}
+		line := fmt.Sprintf("component: %-16s %s", s.Name, state)
+		if len(s.Missing) > 0 {
+			line += fmt.Sprintf(" missing=%v", s.Missing)
+		}
+		if s.LastError != "" {
+			line += fmt.Sprintf(" error=%s", s.LastError)
+		}
+		fmt.Println(line)
 	}
 	fmt.Println("selftest ok")
 	return nil

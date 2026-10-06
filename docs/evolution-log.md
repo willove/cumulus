@@ -69,6 +69,22 @@
 
 过程中抓到一个自己的 Patch 漏填（`CitedDocs` 字段加了没填，观测数为 0）——字段在、值不在，demo 一出就露馅。
 
+## 三·补二、隐疾：反应式依赖分类器（2026-10-07 深夜）
+
+复盘指出最大的隐疾：cumulus 的 vocab 桥接说撤就撤、MCS 采样悄悄不触发，
+根因是可选组件没有“依赖没了就该停”的运行时判定。本轮补上：
+
+- `context.Activator`：组件登记时声明 `Requires()`；每次绑定/解绑后
+  context 按当前状态把组件分类为激活/停用/中性，转换由分类驱动；
+  重入（激活回调里再 Set）用深度计数延到最外层一次收敛；
+  激活失败保持未激活且错误进状态，停用失败也照常停用（清理不讨价还价）；
+- 第一个真实用户 `qaflow.BeliefBooster`：只要 knowledge.belief 绑着；
+- selftest 的 status 行从手工声明换成分类器输出：
+  `component: belief-booster active`。
+
+顺带删掉上一版的 `DeclareDependency` 手工 API——声明变成了规格 +
+转换，不是一行注释。
+
 ## 四、现在的样子（2026-10-07）
 
 ```
