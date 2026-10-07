@@ -11,10 +11,10 @@ gate "vet" go vet ./...
 gate "test" go test ./...
 gate "grammar-conformance" go test ./internal/qaflow/ -run 'TestConfinement|TestUnwind|TestRegister|TestEvidenceVerify|TestRouteRefuses' -count=1
 gate "contract-gen" bash -c 'go run ./cmd/contract-gen -check'
+gate "doc-fresh" go run ./cmd/doc-fresh
+gate "file-size" bash scripts/check-file-size.sh
 
 
 # 待补：
-#   doc-fresh      docs 引用的符号路径存在；ADR 编号连续
-#   file-size      单文件行数上限（cumulus 的 deep.go 2212 行不再发生）
 
 if [ "$FAIL" -eq 0 ]; then echo "all gates green"; else echo "GATES RED"; exit 1; fi

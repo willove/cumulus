@@ -564,6 +564,24 @@ unclassified。**route-error 77 题是下一个明确的改进点**：escalate �
 reflect 看不到 doc 注释（go/doc 要解析源码，生成器不背这负担）——字段
 语义写在 Go 注释里，OpenAPI 只做形状。
 
+## 三·补二十、门禁七门齐：doc-fresh + file-size（2026-10-08）
+
+门禁欠账补完，共七门零容错：gofmt / vet / test / grammar-conformance /
+contract-gen / doc-fresh / file-size。
+
+**doc-fresh**（cmd/doc-fresh）：文档里反引号包裹的代码路径必须存在；
+docs/adr 编号从 001 连续。首跑就抓到一个真过期引用——architecture.md
+还在让人改 `internal/context/keys.go`（实际文件是 context.go），按图索骥
+扑空的那种。修复后绿。
+
+**file-size**（scripts/check-file-size.sh）：单文件上限 600 行（当前最大
+531：qa.go，留 13% 余量）。cumulus 的 deep.go 2212 行是教训本身——改动
+相互踩、review 不可能、测试覆盖不到。超线提示“按职责拆，不是按行数硬切”。
+
+两门都做过抓取实验才收工：file-size 注入 652 行 → 红，恢复 → 绿；
+doc-fresh 挖 ADR 断档（003 无 002）→ 红，恢复 → 绿。门禁的价值全在
+它真能抓，不在它在跑。
+
 ## 四、现在的样子（2026-10-08）
 
 ```
