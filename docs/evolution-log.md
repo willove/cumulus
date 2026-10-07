@@ -547,6 +547,23 @@ unclassified。**route-error 77 题是下一个明确的改进点**：escalate �
 引用+完整遥测；第二问同会话 reuse hit=true 同答案；无证据问句 → refused
 （200，答案空，路由 refuse 留痕）；坏 JSON/空问题 → 400 带 error。
 
+## 三·补十九、contract-gen 门：契约从代码反射生成（2026-10-08）
+
+补门禁欠账的第一门（治 cumulus 的 conf/confidence 字段漂移——文档会
+过期，代码不会撒谎）：
+
+- `cmd/contract-gen`：反射 Go 结构体 → OpenAPI 3（docs/contract/
+  openapi.json）+ TS 类型（types.ts）。请求/响应/嵌套体全部从代码收
+  集，omitempty → 非 required；
+- health/status 原来返回 map[string]any——**契约生成不了 map**，先改成
+  类型化响应（HealthResponse/StatusResponse）才是契约优先；
+- gates.sh 加 contract-gen 门：`contract-gen -check` 比对产物，陈旧即红；
+- 漂移实验证明门有效：往 QARequest 加一个字段不重新生成 → 门红；
+  恢复 → 绿。
+
+reflect 看不到 doc 注释（go/doc 要解析源码，生成器不背这负担）——字段
+语义写在 Go 注释里，OpenAPI 只做形状。
+
 ## 四、现在的样子（2026-10-08）
 
 ```

@@ -97,6 +97,23 @@ type WindowView struct {
 	Score    float64 `json:"score"`
 }
 
+// HealthResponse 是 GET /v1/health 的响应（类型化——契约从代码生成，
+// map[string]any 生成不出契约）。
+type HealthResponse struct {
+	Status     string `json:"status"`
+	CorpusDocs int    `json:"corpus_docs"`
+	Realm      string `json:"realm"`
+}
+
+// StatusResponse 是 GET /v1/status 的响应：可选组件的启停。cumulus 的
+// MCS 静默不触发，缺的就是这一面。
+type StatusResponse struct {
+	Synthesis bool `json:"synthesis"`
+	Embedder  bool `json:"embedder"`
+	Reuse     bool `json:"reuse"`
+	Escalate  bool `json:"escalate"`
+}
+
 // UsageView 是用量账。CostKnown=false 表示上游不报（成本未知不是 0）。
 type UsageView struct {
 	PromptTokens     int  `json:"prompt_tokens"`
@@ -192,21 +209,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.Index != nil {
 		docs = s.Index.N
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":      "ok",
-		"corpus_docs": docs,
-		"realm":       s.Realm,
-	})
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", CorpusDocs: docs, Realm: s.Realm})
 }
 
 // handleStatus 是分类器可见面：哪些可选组件活着、缺什么。cumulus 的
 // MCS 静默不触发，缺的就是这一面。
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"synthesis": s.Synth != nil,
-		"embedder":  s.Embedder != nil,
-		"reuse":     s.Reuse != nil,
-		"escalate":  s.Escalate != nil,
+	writeJSON(w, http.StatusOK, StatusResponse{
+		Synthesis: s.Synth != nil,
+		Embedder:  s.Embedder != nil,
+		Reuse:     s.Reuse != nil,
+		Escalate:  s.Escalate != nil,
 	})
 }
 

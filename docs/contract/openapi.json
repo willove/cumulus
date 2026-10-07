@@ -1,0 +1,389 @@
+{
+  "components": {
+    "schemas": {
+      "CoverageView": {
+        "properties": {
+          "out_of_corpus_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "value": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      },
+      "EscalationRecord": {
+        "properties": {
+          "after": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "executed": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "triggered": {
+            "type": "boolean"
+          },
+          "windows": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "after",
+          "before",
+          "executed",
+          "triggered",
+          "windows"
+        ],
+        "type": "object"
+      },
+      "EvictionView": {
+        "properties": {
+          "dropped": {
+            "type": "integer"
+          },
+          "merged": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dropped",
+          "merged"
+        ],
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "corpus_docs": {
+            "type": "integer"
+          },
+          "realm": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "corpus_docs",
+          "realm",
+          "status"
+        ],
+        "type": "object"
+      },
+      "QARequest": {
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "session"
+        ],
+        "type": "object"
+      },
+      "QAResponse": {
+        "properties": {
+          "answer": {
+            "type": "string"
+          },
+          "citations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/CoverageView"
+          },
+          "escalation": {
+            "$ref": "#/components/schemas/EscalationRecord"
+          },
+          "eviction": {
+            "$ref": "#/components/schemas/EvictionView"
+          },
+          "question": {
+            "type": "string"
+          },
+          "refusal_reason": {
+            "type": "string"
+          },
+          "refused": {
+            "type": "boolean"
+          },
+          "rerank": {
+            "$ref": "#/components/schemas/RerankState"
+          },
+          "reuse": {
+            "$ref": "#/components/schemas/ReuseState"
+          },
+          "route": {
+            "$ref": "#/components/schemas/RouteView"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/UsageView"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/WindowView"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "answer",
+          "citations",
+          "coverage",
+          "escalation",
+          "eviction",
+          "question",
+          "refused",
+          "rerank",
+          "reuse",
+          "route",
+          "usage",
+          "windows"
+        ],
+        "type": "object"
+      },
+      "RerankState": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied"
+        ],
+        "type": "object"
+      },
+      "ReuseState": {
+        "properties": {
+          "hit": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hit"
+        ],
+        "type": "object"
+      },
+      "RouteSignals": {
+        "properties": {
+          "confidence": {
+            "type": "number"
+          },
+          "coverage": {
+            "type": "number"
+          },
+          "dead_rate": {
+            "type": "number"
+          },
+          "margin": {
+            "type": "number"
+          },
+          "windows": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "confidence",
+          "coverage",
+          "dead_rate",
+          "margin",
+          "windows"
+        ],
+        "type": "object"
+      },
+      "RouteView": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "signals": {
+            "$ref": "#/components/schemas/RouteSignals"
+          }
+        },
+        "required": [
+          "action",
+          "reason",
+          "signals"
+        ],
+        "type": "object"
+      },
+      "StatusResponse": {
+        "properties": {
+          "embedder": {
+            "type": "boolean"
+          },
+          "escalate": {
+            "type": "boolean"
+          },
+          "reuse": {
+            "type": "boolean"
+          },
+          "synthesis": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "embedder",
+          "escalate",
+          "reuse",
+          "synthesis"
+        ],
+        "type": "object"
+      },
+      "UsageView": {
+        "properties": {
+          "completion_tokens": {
+            "type": "integer"
+          },
+          "cost_known": {
+            "type": "boolean"
+          },
+          "prompt_tokens": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "completion_tokens",
+          "cost_known",
+          "prompt_tokens"
+        ],
+        "type": "object"
+      },
+      "WindowView": {
+        "properties": {
+          "score": {
+            "type": "number"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "span": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "score",
+          "source_id",
+          "span",
+          "text"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "从 Go 结构体反射生成；契约的裁判是代码，不是本文档。改形状先改代码。",
+    "title": "cumulus qa api",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.3",
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "default": {
+            "description": "error"
+          }
+        },
+        "summary": "探活：语料量与 realm"
+      }
+    },
+    "/v1/qa": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QARequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QAResponse"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "400": {
+            "description": "请求不是合法 JSON 或 question 为空"
+          },
+          "500": {
+            "description": "流程失败"
+          },
+          "default": {
+            "description": "error"
+          }
+        },
+        "summary": "一次问答：返回完整 committed view（答案只是其中一个字段）"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "default": {
+            "description": "error"
+          }
+        },
+        "summary": "可选组件启停（分类器可见面）"
+      }
+    }
+  }
+}

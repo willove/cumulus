@@ -10,9 +10,10 @@ gate "gofmt" bash -c 'test -z "$(gofmt -l .)"'
 gate "vet" go vet ./...
 gate "test" go test ./...
 gate "grammar-conformance" go test ./internal/qaflow/ -run 'TestConfinement|TestUnwind|TestRegister|TestEvidenceVerify|TestRouteRefuses' -count=1
+gate "contract-gen" bash -c 'go run ./cmd/contract-gen -check'
+
 
 # 待补：
-#   contract-gen   Go 结构体 → OpenAPI + TS 类型，产物过期即红（修 conf/confidence 那类漂移）
 #   doc-fresh      docs 引用的符号路径存在；ADR 编号连续
 #   file-size      单文件行数上限（cumulus 的 deep.go 2212 行不再发生）
 
