@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 )
 
@@ -65,7 +66,44 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 // 里的扩展兜底，不让检索先卡死。
 func retrieveWeighted(c *context.Context, idx *retrieval.Index, q string, k, width int) []retrieval.Hit {
 	if a, ok := context.Get(c, KeyAnalysis); ok && len(a.Primary) > 0 {
-		return idx.SearchWeighted(a.Primary, k, width, nil)
+		hits := idx.SearchWeighted(a.Primary, k, width, nil)
+		if on, _ := context.Get(c, KeyPriorOn); on {
+			hits = priorRerank(c, idx, q, a, k, width, hits)
+		}
+		return hits
 	}
 	return idx.SearchWith(q, k, width, nil)
+}
+
+// priorRerank：BM25 候选池上做多信号重排（cumulus prior 移植：lexical
+// 不做长度归一 + 标题 + 条文结构）。池取 BM25 前 k*3，prior 归一分作
+// 为 boost 乘回 BM25——BM25 管词面命中，prior 管文档级置信（长文深命
+// 中不被短文碰巧提到压住：真跑教训问"专利期限多少年"，置顶的是最高法
+// 的专利代理短解释，答案在专利法第四十二条）。
+func priorRerank(c *context.Context, idx *retrieval.Index, q string, a query.Analysis, k, width int, bm25Hits []retrieval.Hit) []retrieval.Hit {
+	if len(bm25Hits) == 0 {
+		return bm25Hits
+	}
+	words := make([]string, 0, len(a.Primary))
+	for w := range a.Primary {
+		words = append(words, w)
+	}
+	pool := idx.SearchWith(q, k*3, width, nil)
+	if len(pool) == 0 {
+		return bm25Hits
+	}
+	poolIDs := make([]string, 0, len(pool))
+	for _, h := range pool {
+		poolIDs = append(poolIDs, h.DocID)
+	}
+	boostMap := idx.BoostMap(words, poolIDs)
+	// prior 信号落 context：响应里逐文档逐信号可查（取舍要看得见），
+	// 也是"prior 到底跑没跑"的判据
+	_ = context.Set(c, KeyPrior, idx.PriorRank(words, poolIDs, k))
+	return idx.SearchWith(q, k, width, func(id string) float64 {
+		if s, ok := boostMap[id]; ok {
+			return s
+		}
+		return 1.0 // 池外文档（不该出现）保底 1，不误伤
+	})
 }

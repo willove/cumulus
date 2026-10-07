@@ -17,6 +17,7 @@ import (
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/prior"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -27,10 +28,14 @@ var (
 	// KeyAnalysis 是查询分析的挂点：意图 + IDF 加权主关键词级 + 语料外
 	// 词（词汇鸿沟信号）。覆盖度、加权检索、鸿沟扩展共用这一份事实。
 	KeyAnalysis = context.NewKey[query.Analysis]("qa.query.analysis")
-	KeyWindows  = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
-	KeyRoute    = context.NewKey[RouteDecision]("qa.route")
-	KeyAnswer   = context.NewKey[Answer]("qa.answer")
-	KeyUsage    = context.NewKey[Usage]("qa.usage")
+	// KeyPriorOn 是文档级多信号重排的开关（Options.Prior 的传播）。
+	KeyPriorOn = context.NewKey[bool]("qa.prior.on")
+	// KeyPrior 是 prior 的逐文档信号（开了才有；响应露出，取舍可查）。
+	KeyPrior   = context.NewKey[[]prior.FileScore]("qa.prior.signals")
+	KeyWindows = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
+	KeyRoute   = context.NewKey[RouteDecision]("qa.route")
+	KeyAnswer  = context.NewKey[Answer]("qa.answer")
+	KeyUsage   = context.NewKey[Usage]("qa.usage")
 	// KeySynthUsage 是合成步记下的用量。记账步只读它——账目和发生额
 	// 是同一个来源，不许两处各写一份。
 	KeySynthUsage = context.NewKey[Usage]("qa.synthesis.usage")
@@ -101,15 +106,19 @@ type RewriteStage struct {
 	Hypothetical string           // 注入的改写（HyDE 式）；空 = 不改写
 	Idx          *retrieval.Index // 漂移闸判语料内/外用；nil = 闸不启动
 	Analyze      func(q string) query.Analysis
+	Prior        bool // 开文档级多信号重排（开关在此落到 context）
 }
 
 func (RewriteStage) Name() string    { return "intent-clarify" }
 func (RewriteStage) Reads() []string { return []string{"session"} }
 func (RewriteStage) Writes() []string {
-	return []string{KeyRewrite.String(), KeyAnalysis.String()}
+	// KeyPriorOn 必须申报：禁闭纪律下，写了不申报的键在 stage 结束就不可
+	// 见（本轮真跑踩过——prior 开了却全程静默，就是漏申报）
+	return []string{KeyRewrite.String(), KeyAnalysis.String(), KeyPriorOn.String()}
 }
 func (s RewriteStage) Run(c *context.Context) error {
 	rw := Rewrite{Original: s.Query, Hypothetical: s.Hypothetical}
+	_ = context.Set(c, KeyPriorOn, s.Prior)
 	if s.Analyze != nil {
 		if err := context.Set(c, KeyAnalysis, s.Analyze(s.Query)); err != nil {
 			return err
@@ -158,7 +167,7 @@ type EvidenceStage struct {
 func (EvidenceStage) Name() string    { return "evidence-supply" }
 func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String()} }
 func (EvidenceStage) Writes() []string {
-	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String(), KeyCoverage.String()}
+	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String(), KeyCoverage.String(), KeyPrior.String()}
 }
 func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
@@ -483,7 +492,7 @@ func (LearnStage) Verify(c *context.Context) error { return nil }
 // 不留空壳注册（可选组件的启用必须是显式的）。
 func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error), synth SynthFunc, opts Options) *flow.Runner {
 	stages := []flow.Stage{
-		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx, Analyze: opts.Analyzer},
+		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx, Analyze: opts.Analyzer, Prior: opts.Prior},
 		EvidenceStage{Retrieve: retrieve},
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
@@ -551,6 +560,11 @@ type Options struct {
 	// WeightedRetrieve 按词权取数（鸿沟扩展后的加权重取）；nil = 扩展
 	// 无执行处，退化普通贵路。
 	WeightedRetrieve func(weights map[string]float64) ([]EvidenceWindow, error)
+	// Prior 开文档级多信号重排（cumulus prior 移植：lexical 无长度归一
+	// + 标题 + 条文结构）。治 BM25 的短文档偏爱——答案在长法律里被短
+	// 解释压住的那类。cumulus 同款 opt-in（UsePrior），默认关，验完再
+	// 定去留。
+	Prior bool
 	// Escalate 是升级（FAST→DEEP）的贵路取数函数：路由判 escalate 时
 	// 跑它再判一次（BioHarness 级联）。nil = 升级无执行处（死标签，
 	// 遥测里可见）。

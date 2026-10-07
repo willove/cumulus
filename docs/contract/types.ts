@@ -13,6 +13,7 @@ export interface QAResponse {
   refusal_reason?: string;
   citations: string[];
   analysis: AnalysisView;
+  prior?: PriorView[];
   route: RouteView;
   escalation: EscalationRecord;
   reuse: ReuseState;
@@ -28,6 +29,13 @@ export interface AnalysisView {
   primary: Record<string, unknown>;
   out_of_corpus_terms?: string[];
   score: number;
+}
+
+export interface PriorView {
+  doc_id: string;
+  score: number;
+  signals: Record<string, unknown>;
+  title?: string;
 }
 
 export interface RouteView {

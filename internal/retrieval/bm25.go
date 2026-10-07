@@ -375,7 +375,8 @@ func (idx *Index) TitleOf(docID string) string {
 	if !ok {
 		return ""
 	}
-	line := d.Body
+	// 跳过前导空行（laws-full 有些文件首行是空行——不跳就取到空标题）
+	line := strings.TrimLeft(d.Body, "\n\r\t ")
 	if i := strings.IndexByte(line, '\n'); i > 0 {
 		line = line[:i]
 	}

@@ -97,6 +97,7 @@ type QAResponse struct {
 	Reason    string                  `json:"refusal_reason,omitempty"`
 	Citations []string                `json:"citations"`
 	Analysis  AnalysisView            `json:"analysis"`
+	Prior     []PriorView             `json:"prior,omitempty"` // 空 = 未开多信号重排
 	Route     RouteView               `json:"route"`
 	Escalate  qaflow.EscalationRecord `json:"escalation"`
 	Reuse     qaflow.ReuseState       `json:"reuse"`
@@ -137,6 +138,15 @@ type EvictionView struct {
 }
 
 // WindowView 是一个证据窗口。
+// PriorView 是一篇文档的多信号置信（cumulus prior 移植的可视化：
+// lexical 无长度归一 / 标题 / 条文结构，融合后置顶归一）。
+type PriorView struct {
+	DocID   string             `json:"doc_id"`
+	Score   float64            `json:"score"`
+	Signals map[string]float64 `json:"signals"`
+	Title   string             `json:"title,omitempty"`
+}
+
 type WindowView struct {
 	SourceID string  `json:"source_id"`
 	Title    string  `json:"title"` // 文档身份（法律名）——前端要显示"这是哪份文档的第几条"
@@ -228,6 +238,11 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	}
 	if an, ok := context.Get(c, qaflow.KeyAnalysis); ok {
 		resp.Analysis = AnalysisView{Intent: an.Intent, Primary: an.Primary, OOV: an.OOV, Score: an.Score}
+	}
+	if ps, ok := context.Get(c, qaflow.KeyPrior); ok {
+		for _, p := range ps {
+			resp.Prior = append(resp.Prior, PriorView{DocID: p.DocID, Score: p.Score, Signals: p.Signals})
+		}
 	}
 	if rd, ok := context.Get(c, qaflow.KeyRoute); ok {
 		resp.Route = RouteView{Action: rd.Action, Reason: rd.Reason, Signals: rd.Signals}

@@ -259,6 +259,7 @@ func runServe(args []string) error {
 	synthFlag := fs.String("synth", "offline", "synthesis backend: offline | llm")
 	embedFlag := fs.String("embed", "off", "embedding backend: off | minilm")
 	watchDir := fs.String("watch", "", "directory to watch for new files (txt/md/jsonl)")
+	priorOn := fs.Bool("prior", false, "document-level multi-signal rerank (cumulus prior: lexical without length norm + title + article struct)")
 	topk := fs.Int("topk", 3, "retrieval top-k")
 	width := fs.Int("width", 160, "evidence window width (runes)")
 	if err := fs.Parse(args); err != nil {
@@ -304,6 +305,7 @@ func runServe(args []string) error {
 	// 时桥缺席——鸿沟时退化普通贵路（ 遥测可见）。
 	idx := srv.Index()
 	srv.Options.Analyzer = func(q string) query.Analysis { return query.Analyze(q, idx, idx.N) }
+	srv.Options.Prior = *priorOn
 	if *synthFlag == "llm" {
 		client, err := llm.FromEnv(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_CHAT_MODEL"))
 		if err != nil {

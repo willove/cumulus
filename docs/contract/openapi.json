@@ -164,6 +164,28 @@
         ],
         "type": "object"
       },
+      "PriorView": {
+        "properties": {
+          "doc_id": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "signals": {
+            "type": "object"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "doc_id",
+          "score",
+          "signals"
+        ],
+        "type": "object"
+      },
       "QARequest": {
         "properties": {
           "question": {
@@ -201,6 +223,12 @@
           },
           "eviction": {
             "$ref": "#/components/schemas/EvictionView"
+          },
+          "prior": {
+            "items": {
+              "$ref": "#/components/schemas/PriorView"
+            },
+            "type": "array"
           },
           "question": {
             "type": "string"
