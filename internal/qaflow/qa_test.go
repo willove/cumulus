@@ -199,11 +199,10 @@ func TestBM25NoHitRefuses(t *testing.T) {
 	}
 }
 
-// 复用按会话记录 + 命中：同一问题再问，直接取上轮窗口，本轮不再检索。
-// 判据是检索调用次数（冷过一次），不是"答案对不对"——复用管的是
-// 不走回头路（belief 全局声望版已被真实语料证伪退役，原设计按查询/
-// 按会话的正确形态从这里开始）。
-func TestReuseShortCircuitsSecondAsk(t *testing.T) {
+// 再问加深：同一会话原样再问 = 用户说"上次不够"。本轮必须再检索
+// （加宽）并强制升级——不是把上轮同一套窗重放（重放同一个不够好的答
+// 案对个人工具是伪需求：一次 BM25 毫秒级，省机器时间赔用户答案）。
+func TestReAskDeepensSecondAsk(t *testing.T) {
 	// 复用测试不需要干扰语料（复用的是上轮窗口本身），单文档语料即可
 	idx := retrieval.Build([]retrieval.Document{
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
@@ -227,27 +226,26 @@ func TestReuseShortCircuitsSecondAsk(t *testing.T) {
 		return c
 	}
 
-	c1 := run("成本结构怎么样")
+	run("成本结构怎么样")
 	if calls != 1 {
 		t.Fatalf("first ask must retrieve, calls=%d", calls)
 	}
-	ws1, _ := context.Get(c1, KeyWindows)
 
 	c2 := run("成本结构怎么样")
-	if calls != 1 {
-		t.Fatalf("second ask must NOT retrieve, calls=%d", calls)
+	if calls != 2 {
+		t.Fatalf("再问必须再检索（加深），calls=%d", calls)
 	}
-	rs, _ := context.Get(c2, KeyReuseState)
-	if !rs.Hit {
-		t.Fatalf("second ask must be a reuse hit: %+v", rs)
+	deepen, _ := context.Get(c2, KeyDeepen)
+	if !deepen {
+		t.Fatal("再问必须置 KeyDeepen")
 	}
-	ws2, _ := context.Get(c2, KeyWindows)
-	if len(ws2) != len(ws1) {
-		t.Fatalf("reused windows must match, got %v vs %v", ws2, ws1)
+	d, _ := context.Get(c2, KeyRoute)
+	if d.Action != "escalate" {
+		t.Fatalf("再问必须强制升级，got %s", d.Action)
 	}
 
 	run("连接池最大连接数是多少")
-	if calls != 2 {
+	if calls != 3 { // 首问 + 再问 + 换问
 		t.Fatalf("different question must retrieve, calls=%d", calls)
 	}
 }

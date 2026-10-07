@@ -31,7 +31,7 @@ flowchart TB
     subgraph 基础层["基础层（不依赖流程）"]
         CORPUS["corpus 语料<br/>Prepare：解码→规范化→血缘→入库<br/>charset UTF8/GB18030 三纪律"]
         STORE["store 持久化<br/>Port：Doc 带血缘（Encoding/SrcDigest）"]
-        KNOW["knowledge 知识<br/>ReuseStore（按会话复用）<br/>SignalStore（使用信号）· belief"]
+        KNOW["knowledge 知识<br/>ReuseStore（再问检测）<br/>SignalStore（使用信号）· belief"]
         LLM["llm 上游<br/>MiniMax-M3.1-Flash ·严格 JSON 契约"]
         EMB["embed/minilm<br/>本地 MiniLM 384 维（vendor 权重）"]
     end
@@ -69,13 +69,14 @@ flowchart LR
 1. **合成面是 LLM 的**：流水线保证"证据取对、取全、摆对结构"，最终措辞
    与数值提取的稳定性由 MiniMax 决定（Noesis 判定：7B 以下瓶颈在上下
    文利用）。破局链已把可控部分做到头，残余方差是模型固有。
-2. **信号面只观测不改行为**：reask 族/cite 族落盘可聚合，但"用信号做
-   重排"必须是 learncore 的受管变更（白名单旋钮+冻结评测对照），不在
-   这里自动接。
+2. **再问即加深（唯一由使用直接驱动的行为）**：同一会话原样再问 =
+   用户说"上次不够"——本轮 topk×2、窗宽×1.5、强制升级（词汇桥+贵路
+   重取）。复用库从"重放器"退成"再问检测器"：个人工具重放同一个不够
+   好的答案是伪需求（一次检索毫秒级，省机器时间赔用户答案）。
 3. **停车三件**（小时级、有界收益，未做）：冲突门子情形分流（醉酒
    "五年vs十年"是不同子情形非真冲突）、fact 视图进前端、GBK 语料
    清洗。
-4. **无 session 不问复用**：一次性问答（不带 session）不记信号不复用
+4. **无 session 不问复用**：一次性问答（不带 session）不记信号、不进再问
    ——这是选择不是遗漏：没有"再问"的上下文就没有那一族信号。
 5. **词面判据的边界**：覆盖判据是内容词占比+3 字核心，认不出深度改写
    （"期限是多少年"vs"期限为二十年"已用内容词齐聚锚绕过）；彻底解法

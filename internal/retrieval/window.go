@@ -3,6 +3,7 @@ package retrieval
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -19,63 +20,59 @@ func (idx *Index) Window(docID string, terms []string, width int) string {
 		return ""
 	}
 	runes := []rune(d.Body)
-	// 收集全部查询词的命中位置（字符坐标）
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	// 密度定心：窗口 [bestStart, bestStart+width) 内查询词命中数最多
+	// 的起点。命中计数用窗口内异词数（不是总命中数——一个词命中 10 次
+	// 的窗不应该赢过一个 3 个词各中 1 次的窗）。
+	type windowPos struct {
+		at        int
+		term      string
+		termRunes int
+	}
 	var positions []windowPos
-	for ti, term := range terms {
-		if term == "" {
-			continue
-		}
+	for _, term := range terms {
+		tr := []rune(term)
 		from := 0
-		body := d.Body
 		for {
-			at := strings.Index(body[from:], term)
-			if at < 0 {
+			loc := byteIndexRune(runes, tr, from)
+			if loc < 0 {
 				break
 			}
-			byteOff := from + at
-			positions = append(positions, windowPos{at: len([]rune(body[:byteOff])), term: ti, termRunes: len([]rune(term))})
-			from = byteOff + len(term)
+			positions = append(positions, windowPos{at: loc, term: term, termRunes: len(tr)})
+			from = loc + len(tr)
 		}
 	}
 	if len(positions) == 0 {
-		return ""
+		return "" // 一个词都不中：没有窗口可开
 	}
-	// 窗口中心 = 命中密度最高处：滑动 width 宽的位置，取覆盖词数最多的
-	// 起点。**不是最早命中处**——法律名里就带"交通"二字，取最早命中的
-	// 话窗口永远停在文档开头（真跑教训：问"交通信号灯"返回法律序言）。
-	// 每个命中位置的稀有度 = 其词的 idf 代理（N/df）。**密度按稀有度加
-	// 权**，不数命中个数：高频词（"专利"在一部法里出现几十次）会假装
-	// 密集，把窗口吸到错误的条文，而事实的真内容在稀缺席（"期限"只在
-	// 第四十二条）。真跑教训：专利期限两连问，窗口停在保密审查条。
-	posRarity := make([]float64, len(positions))
-	for i, q := range positions {
-		if df := len(idx.Postings[terms[q.term]]); df > 0 && idx.N > 0 {
-			posRarity[i] = float64(idx.N) / float64(df)
-		} else {
-			posRarity[i] = 1.0
-		}
-	}
-	half := width / 2
-	bestStart, bestCover := 0, -1.0
+	bestStart, bestHits := -1, -1
 	for _, p := range positions {
-		start := p.at - half
-		if start < 0 {
-			start = 0
+		lo := p.at - width/2
+		if lo < 0 {
+			lo = 0
 		}
-		end := start + width
-		cover := 0.0
-		for j, q := range positions {
-			if q.at >= start && q.at < end {
-				cover += posRarity[j]
+		hi := lo + width
+		if hi > n {
+			hi = n
+			lo = hi - width
+			if lo < 0 {
+				lo = 0
 			}
 		}
-		if cover > bestCover {
-			bestCover, bestStart = cover, start
+		seen := map[string]bool{}
+		for _, q := range positions {
+			if q.at >= lo && q.at < hi {
+				seen[q.term] = true
+			}
+		}
+		if len(seen) > bestHits {
+			bestHits, bestStart = len(seen), lo
 		}
 	}
-	// 命中簇：密度窗 [bestStart, bestStart+width) 内的全部命中——不是单个
-	// 位置（单位置的簇会把隔壁条目的命中漏掉，真跑教训：问"红灯表示
-	// 什么"命中簇停在第二十五条，答案在第二十六条）
+	// 命中簇：密度窗内的全部命中
 	from, to := -1, -1
 	for _, p := range positions {
 		if p.at >= bestStart && p.at < bestStart+width {
@@ -90,22 +87,30 @@ func (idx *Index) Window(docID string, terms []string, width int) string {
 	if from < 0 { // 理论上不发生（bestStart 由某个命中推出）
 		from, to = bestStart, bestStart+width
 	}
-	// 条文吸附围着**命中簇**扩（不是围着窗口扩——围着窗口扩会把命中
-	// 所在的那一条整条吃掉，真跑踩过）：起点回到命中前的最后一个"第X条"
-	// 标记，终点推到命中后的第一个标记。窗内至少一条完整条目，且命中必
-	// 在窗内。无标记的文档（非法条）保持密度心窗口。
+	// 条文吸附围着命中簇扩（不是围着窗口扩——围着窗口扩会把命中
+	// 所在条文之外的噪声条文拖进来）
 	start, end := snapToArticles(runes, from, to, bestStart, bestStart+width)
-	if end > len(runes) {
-		end = len(runes)
+	if end > n {
+		end = n
 	}
 	return fmt.Sprintf("rune[%d:%d]", start, end)
 }
 
-// windowPos 是一个词的一个命中位置。
-type windowPos struct {
-	at        int
-	term      int // 命中它的查询词下标（稀有度加权用）
-	termRunes int
+// byteIndexRune 子串在 rune 序列里从 from 起首次出现的 rune 偏移（-1 = 不在）。
+func byteIndexRune(runes []rune, sub []rune, from int) int {
+	for i := from; i+len(sub) <= len(runes); i++ {
+		match := true
+		for j := range sub {
+			if runes[i+j] != sub[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
 }
 
 // articleMark 匹配"第X条"（中文数字）。吸附只认这个形态——法律的条目
@@ -150,32 +155,156 @@ func snapToArticles(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (int, 
 	return start, end
 }
 
-// factsCovers 一条事实（以文本给出）是否被这段窗口覆盖（与 facts 包同
-// 口径：内容词占比过半 + 事实的 3 字核心在窗内）。
-func factsCovers(anchor, text string) bool {
-	kws := contentCores(anchor)
-	if len(kws) == 0 {
+// WindowAnchored 与 Window 同逻辑，但吸附锚点是**事实自己在文档里的落
+// 点**（fan-out 用：每条事实的窗口收在事实答案所在条文）。找不到锚时
+// 退化成 Window（密度定心）。
+//
+// 锚的三级递进（全部在"一次预计算的出现位置小列表"上判定）：
+//  1. 事实的 3 字核心（锚短语的每个三字滑窗）：按出现次数升序、每次
+//     出现都试——同一个"专利权"在第一条和第四十三条都有，答案往往在
+//     靠后的那次，只试第一次会把锚点扔错条文；
+//  2. 用**覆盖判定**选哪个核心：哪个核心吸附出来的窗能让事实的内容
+//     词过半命中 + 有 3 字核心在窗内，就用哪个；
+//  3. 二级锚：事实的 3 字核心一个都不在文档里（法条换了说法——"期限
+//     是多少年" vs "发明专利权的期限为二十年"，3 字连续断了）时，锚
+//     在**内容词落点最密处**（半径内内容词全部命中的位置）。这是
+//     corePresent 的耐改写版——不要求 3 字连续，要求内容词齐聚。
+//
+// 性能纪律（真跑教训钉在这）：早期实现对每个候选都在全文档里反复找
+// 子串（runeIndex 每调一次扫一遍全文、countInRange 再扫一遍），加深
+// 路径 k×2 后，专利法这种长文档直接烧成分钟级 CPU（再问 240s 不返
+// 回，goroutine 栈 runnable 停在 fanout）。现在：**一次 O(n·候选数)
+// 预计算全部出现位置，之后所有判定只在这些小列表上做**。
+func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor string) string {
+	if anchor == "" {
+		return idx.Window(docID, terms, width)
+	}
+	d, ok := idx.byID[docID]
+	if !ok || width <= 0 {
+		return ""
+	}
+	runes := []rune(d.Body)
+	n := len(runes)
+	if n == 0 {
+		return ""
+	}
+	ar := []rune(anchor)
+	if len(ar) < 3 {
+		return idx.Window(docID, terms, width)
+	}
+	content := contentCores(anchor)
+	if len(content) == 0 {
+		return idx.Window(docID, terms, width)
+	}
+
+	// ---- 一次预计算：候选串（全部 3 字核心 + 全部内容词）的所有出现
+	// 位置（rune 偏移，升序）。同串去重。
+	seen := map[string][]int{}
+	pos := func(s string) []int {
+		if at, ok := seen[s]; ok {
+			return at
+		}
+		sr := []rune(s)
+		var at []int
+		for i := 0; i+len(sr) <= n; i++ {
+			match := true
+			for j := range sr {
+				if runes[i+j] != sr[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				at = append(at, i)
+			}
+		}
+		seen[s] = at
+		return at
+	}
+	has := func(s string, lo, hi int) bool { // s 在 [lo,hi] 出现过
+		for _, p := range pos(s) {
+			if p >= lo && p <= hi {
+				return true
+			}
+		}
 		return false
 	}
-	hits := 0
-	for _, k := range kws {
-		if countSub(text, k) > 0 {
-			hits++
+	hitsIn := func(lo, hi int) int { // 内容词在 [lo,hi] 的命中数
+		hits := 0
+		for _, k := range content {
+			if has(k, lo, hi) {
+				hits++
+			}
 		}
+		return hits
 	}
-	if float64(hits)/float64(len(kws)) < 0.5 {
+	// 覆盖判定：内容词过半 + 任意 3 字核心在窗内（与 facts.Evaluate 同口径）
+	covered := func(lo, hi int) bool {
+		if float64(hitsIn(lo, hi))/float64(len(content)) < 0.5 {
+			return false
+		}
+		for i := 0; i+2 < len(ar); i++ {
+			if has(string(ar[i:i+3]), lo, hi) {
+				return true
+			}
+		}
 		return false
 	}
-	r := []rune(anchor)
-	if len(r) < 3 {
-		return true
+	snap := func(at int) (int, int) {
+		start, end := snapToArticles(runes, at, at+3, at-width/2, at+width/2)
+		if end > n {
+			end = n
+		}
+		return start, end
 	}
-	for i := 0; i+2 < len(r); i++ {
-		if countSub(text, string(r[i:i+3])) > 0 {
-			return true
+
+	// 一级锚：3 字核心，稀有度升序 × 每次出现。覆盖判定选窗。
+	type occ struct {
+		at    int
+		count int
+	}
+	var coreOcc []occ
+	for i := 0; i+2 < len(ar); i++ {
+		core := string(ar[i : i+3])
+		at := pos(core)
+		for _, p := range at {
+			coreOcc = append(coreOcc, occ{at: p, count: len(at)})
 		}
 	}
-	return false
+	sort.SliceStable(coreOcc, func(i, j int) bool { return coreOcc[i].count < coreOcc[j].count })
+	var fallback string
+	for _, o := range coreOcc {
+		lo, hi := snap(o.at)
+		coord := fmt.Sprintf("rune[%d:%d]", lo, hi)
+		if fallback == "" {
+			fallback = coord
+		}
+		if covered(lo, hi) {
+			return coord
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+
+	// 二级锚：内容词齐聚处（耐改写）。每个内容词位置的半径 12 内，数
+	// 有多少不同内容词命中——答案就在齐聚处。
+	radius := 12
+	var allPos []int
+	for _, k := range content {
+		allPos = append(allPos, pos(k)...)
+	}
+	if len(allPos) == 0 {
+		return idx.Window(docID, terms, width) // 锚词一个都不在：密度定心
+	}
+	bestAt, bestHits := allPos[0], -1
+	for _, p := range allPos {
+		if h := hitsIn(p-radius, p+radius); h > bestHits {
+			bestHits, bestAt = h, p
+		}
+	}
+	lo, hi := snap(bestAt)
+	return fmt.Sprintf("rune[%d:%d]", lo, hi)
 }
 
 // contentCores 事实的内容词（二元组，去胶水——与 query.IsGlue 同口径的
@@ -195,31 +324,31 @@ func contentCores(q string) []string {
 		}
 		han = nil
 	}
+	flushLat := func() {
+		if len(lat) > 0 {
+			out = append(out, string(lat))
+			lat = nil
+		}
+	}
 	for _, r := range q {
 		switch {
 		case r >= 0x4E00 && r <= 0x9FFF:
-			emit()
-			if len(lat) > 0 {
-				out = append(out, string(lat))
-				lat = nil
-			}
+			// 类切换才冲刷：Han 字符前只冲拉丁，**不许冲 Han**（每次
+			// Han 前都 emit 会把连续汉字切成单字，"专利期限"退化成
+			// 专/利/期/限——单字随便命中（"社会公德"的公就能凑覆
+			// 盖率），真跑教训：锚点被假覆盖钉在第五条）
+			flushLat()
 			han = append(han, r)
 		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
 			emit()
 			lat = append(lat, r)
 		default:
 			emit()
-			if len(lat) > 0 {
-				out = append(out, string(lat))
-				lat = nil
-			}
+			flushLat()
 		}
 	}
 	emit()
-	if len(lat) > 0 {
-		out = append(out, string(lat))
-	}
-	// 去胶水
+	flushLat()
 	kept := out[:0]
 	for _, w := range out {
 		if w == "" {
@@ -227,7 +356,7 @@ func contentCores(q string) []string {
 		}
 		glued := false
 		for _, ch := range w {
-			if indexRune(glue, ch) {
+			if strings.ContainsRune(glue, ch) {
 				glued = true
 				break
 			}
@@ -237,37 +366,6 @@ func contentCores(q string) []string {
 		}
 	}
 	return kept
-}
-
-func indexRune(s string, r rune) bool {
-	for _, c := range s {
-		if c == r {
-			return true
-		}
-	}
-	return false
-}
-
-// countSub 子串出现次数。
-func countSub(body, sub string) int {
-	n := 0
-	for i := 0; i+len(sub) <= len(body); i++ {
-		if body[i:i+len(sub)] == sub {
-			n++
-			i += len(sub) - 1
-		}
-	}
-	return n
-}
-
-// runeIndex 子串的字符偏移（-1 = 不在）。
-func runeIndex(body, sub string) int {
-	for i := range body {
-		if i+len(sub) <= len(body) && body[i:i+len(sub)] == sub {
-			return len([]rune(body[:i]))
-		}
-	}
-	return -1
 }
 
 // SearchFactWeighted 与 SearchWeighted 同排序，但每个命中文档的窗口用

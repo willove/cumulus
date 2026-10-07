@@ -101,13 +101,20 @@ func TestQARefusesWithoutEvidence(t *testing.T) {
 }
 
 // 契约：同会话同问题 → 第二次复用命中（不重新检索）。
-func TestQAReuseWithinSession(t *testing.T) {
+func TestQASecondAskDeepens(t *testing.T) {
 	s := testServer()
 	post(t, s, `{"question":"连接池最大连接数是多少","session":"s1"}`)
 	_, out := post(t, s, `{"question":"连接池最大连接数是多少","session":"s1"}`)
 	reuse, _ := out["reuse"].(map[string]any)
-	if reuse["hit"] != true {
-		t.Fatalf("second ask must reuse: %v", reuse)
+	if reuse["hit"] != false {
+		t.Fatalf("再问不重放（hit 恒 false），该加深：%v", reuse)
+	}
+	if reason, _ := reuse["reason"].(string); reason == "" || !strings.Contains(reason, "deepen") {
+		t.Fatalf("reason 该说明加深：%v", reuse)
+	}
+	route, _ := out["route"].(map[string]any)
+	if route["action"] != "escalate" {
+		t.Fatalf("再问该升级：%v", route)
 	}
 }
 

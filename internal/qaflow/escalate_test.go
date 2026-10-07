@@ -60,8 +60,10 @@ func TestEscalateResolvesWithDeepBackend(t *testing.T) {
 		t.Fatalf("final route must record the resolution: %s (%s)", route.Action, route.Reason)
 	}
 	ws, _ := context.Get(c, KeyWindows)
-	if len(ws) != 1 || ws[0].SourceID != "ops-1" {
-		t.Fatalf("synthesis must see the escalated windows: %v", ws)
+	// 升级是**合并**不是替换：贵路窗必须进最终窗集（首程窗不丢——再问
+	// 加深时首程刚逐事实取回的证据，一替换就白取了）
+	if !hasWindow(ws, "ops-1") {
+		t.Fatalf("synthesis must see the escalated window: %v", ws)
 	}
 }
 
@@ -177,8 +179,8 @@ func TestEscalateExpandsVocabularyGap(t *testing.T) {
 		t.Fatalf("扩展应拿到原问，got %v", expandedWith)
 	}
 	ws, _ := context.Get(c, KeyWindows)
-	if len(ws) != 1 || ws[0].SourceID != "ops-1" {
-		t.Fatalf("桥的窗口必须进 context，got %v", ws)
+	if !hasWindow(ws, "ops-1") {
+		t.Fatalf("桥的窗口必须进 context（合并），got %v", ws)
 	}
 }
 
@@ -205,4 +207,14 @@ func TestEscalateBridgeFailureFallsBack(t *testing.T) {
 	if len(ws) != 1 {
 		t.Fatalf("贵路窗口必须在场，got %v", ws)
 	}
+}
+
+// hasWindow 窗集里有没有这个源的窗。
+func hasWindow(ws []EvidenceWindow, sourceID string) bool {
+	for _, w := range ws {
+		if w.SourceID == sourceID {
+			return true
+		}
+	}
+	return false
 }

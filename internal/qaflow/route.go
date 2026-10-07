@@ -11,7 +11,7 @@ import (
 
 func (RouteStage) Name() string { return "sufficiency-route" }
 func (RouteStage) Reads() []string {
-	return []string{KeyWindows.String(), KeyCoverage.String(), KeyDeep.String(), KeyFactReport.String(), KeyConflicts.String()}
+	return []string{KeyWindows.String(), KeyCoverage.String(), KeyDeep.String(), KeyFactReport.String(), KeyConflicts.String(), KeyDeepen.String()}
 }
 func (RouteStage) Writes() []string { return []string{KeyRoute.String()} }
 
@@ -44,6 +44,17 @@ func (s RouteStage) Run(c *context.Context) error {
 	sig := gatherSignals(c, ws)
 
 	d := RouteDecision{Grounded: grounded, Signals: sig}
+	// 再问加深（KeyDeepen）：用户原样再问是比任何内部信号都硬的"上次
+	// 不够"——本轮不走快路，强制升级（词汇桥+贵路重取）。这是用户说了
+	// 算的开关，不是旋钮。
+	if deepen, _ := context.Get(c, KeyDeepen); deepen {
+		d.Action = "escalate"
+		d.Reason = "re-ask in session: user says the last answer was not enough; escalating"
+		if err := context.Set(c, KeyRoute, d); err != nil {
+			return err
+		}
+		return nil
+	}
 	base := s.MinConfidence
 	if base <= 0 {
 		base = 0.5

@@ -177,7 +177,7 @@ type EvidenceStage struct {
 }
 
 func (EvidenceStage) Name() string    { return "evidence-supply" }
-func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String()} }
+func (EvidenceStage) Reads() []string { return []string{KeyRewrite.String(), KeyDeepen.String()} }
 func (EvidenceStage) Writes() []string {
 	return []string{KeyWindows.String(), KeyRerank.String(), KeyDeep.String(), KeyCoverage.String(), KeyPrior.String()}
 }
@@ -185,11 +185,6 @@ func (s EvidenceStage) Run(c *context.Context) error {
 	r, ok := context.Get(c, KeyRewrite)
 	if !ok {
 		return errors.New("rewrite missing; stage 1 must run first")
-	}
-	// 复用短路：ReuseStage 命中时窗口已在 context 里，本 stage 直接让路——
-	// 不调检索后端、不覆盖窗口（复用不是"再查一遍取平均"）
-	if rs, hit := context.Get(c, KeyReuseState); hit && rs.Hit {
-		return nil
 	}
 	if s.Retrieve == nil {
 		return errors.New("no retrieval backend wired")

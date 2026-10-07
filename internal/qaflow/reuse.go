@@ -1,24 +1,34 @@
 package qaflow
 
 import (
-	"errors"
-
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/knowledge"
 )
 
-// KeyReuse 是复用命中记录：命中/未命中及原因，和 KeyRerank 同一纪律——
-// 可选组件的每个决定都要可审计（不留静默决定）。
+// KeyReuseState 是复用库的查询结果：命中/未命中及原因，和 KeyRerank 同
+// 一纪律——每个决定都要可审计（不留静默决定）。
 var KeyReuseState = context.NewKey[ReuseState]("knowledge.reuse.state")
 
-// ReuseState 是复用查的结果。
+// KeyDeepen 是再问加深旗。ReuseStage 发现本会话原样再问时置位：
+// 检索加宽（topk×2、窗宽×1.5）+ 路由强制升级（词汇桥/贵路重取）。
+//
+// 语义只有一条：**用户原样再问 = "上次的答案不够"**。此时正确反应是
+// 设法取更多证据，不是把上轮同一套窗重放一遍。重放同一个不够好的答
+// 案（旧行为）对个人工具是伪需求——一次 BM25 检索本来就是毫秒级，
+// “越问越快”省下的是机器的时间，赔上的是用户的答案。
+// （本旗由 ReuseStage 写，EvidenceStage/BM25Evidence 与 RouteStage 读。）
+var KeyDeepen = context.NewKey[bool]("qa.deepen")
+
+// ReuseState 是复用库查的结果。
 type ReuseState struct {
 	Hit    bool   `json:"hit"`
 	Reason string `json:"reason,omitempty"` // 未命中的原因
 }
 
-// ReuseStage 在 evidence 前查会话复用：命中就直接用上轮窗口，本问不再
-// 检索。未命中什么都不做——evidence 照常跑，复用不是旁路，是短路。
+// ReuseStage 在 evidence 前查会话复用库，只做一件事：**识别原样再问**。
+// 命中不改行为路径（不再短路窗口）——原样再问时置 KeyDeepen，让本轮
+// 检索加深；未命中什么都不做。复用库因此从"重放器"退成"再问检测器"
+// （记录仍在 ReuseRecordStage 落，只是不再被当答案用）。
 type ReuseStage struct {
 	Session string
 	Store   *knowledge.ReuseStore
@@ -27,61 +37,31 @@ type ReuseStage struct {
 
 func (ReuseStage) Name() string { return "reuse" }
 
-// 本 stage 只写窗口（短路检索），不读 context 中的检索数据
+// 本 stage 只写状态旗，不碰窗口（短路已废——见 KeyDeepen 的语义）。
 func (ReuseStage) Reads() []string { return nil }
 func (ReuseStage) Writes() []string {
-	return []string{KeyWindows.String(), KeyReuseState.String(), KeyCoverage.String()}
+	return []string{KeyReuseState.String(), KeyDeepen.String()}
 }
 
 func (s ReuseStage) Run(c *context.Context) error {
 	if s.Store == nil {
 		return nil
 	}
-	e, ok := s.Store.Lookup(s.Session, s.Query)
-	if !ok {
+	_, seen := s.Store.Lookup(s.Session, s.Query)
+	if !seen {
 		return context.Set(c, KeyReuseState, ReuseState{Hit: false, Reason: "no record for this question in session"})
 	}
-	windows := make([]EvidenceWindow, 0, len(e.Windows))
-	for _, w := range e.Windows {
-		windows = append(windows, EvidenceWindow{
-			SourceID: w.SourceID,
-			Title:    w.Title,
-			Span:     w.Span,
-			Text:     w.Text,
-			Score:    w.Score,
-		})
-	}
-	// 上轮窗口没引用的就不复用（空记录等同未命中）
-	if len(windows) == 0 {
-		return context.Set(c, KeyReuseState, ReuseState{Hit: false, Reason: "record has no windows"})
-	}
-	if err := context.Set(c, KeyWindows, windows); err != nil {
+	// 原样再问：不重放（重放=同一个答案再收一次钱），置加深旗让本轮
+	// 设法。回答过又原样问，只有一种解释——上次不够。
+	if err := context.Set(c, KeyDeepen, true); err != nil {
 		return err
 	}
-	// 覆盖度随窗口回放：复用命中时路由看到的是上轮同一口径的事实，
-	// 不是缺省 0
-	if err := context.Set(c, KeyCoverage, CoverageInfo{Value: e.Coverage.Value, Terms: e.Coverage.Terms, OOV: e.Coverage.OOV}); err != nil {
-		return err
-	}
-	return context.Set(c, KeyReuseState, ReuseState{Hit: true})
-}
-
-// Verify 复用窗口同样要过契约：每条引用可回溯（同一把尺子）
-func (ReuseStage) Verify(c *context.Context) error {
-	if rs, ok := context.Get(c, KeyReuseState); !ok || !rs.Hit {
-		return nil
-	}
-	ws, _ := context.Get(c, KeyWindows)
-	for _, w := range ws {
-		if w.SourceID == "" || w.Span == "" {
-			return errors.New("reuse: window missing source id or span — reuse must satisfy the same citation contract as retrieval")
-		}
-	}
-	return nil
+	return context.Set(c, KeyReuseState, ReuseState{Hit: false, Reason: "re-ask: deepening instead of replaying"})
 }
 
 // ReuseRecordStage 在 account 后记录：窗口 + 本轮是否真答上。route 是
-// refuse 时不记（拒答的经验没有复用价值）。
+// refuse 时不记（拒答的经验没有复用价值）。记录的存在意义从"重放答案"
+// 变成"标记这个问题问过了"——ReuseStage 靠它识别再问。
 type ReuseRecordStage struct {
 	Session string
 	Store   *knowledge.ReuseStore
@@ -116,3 +96,6 @@ func (s ReuseRecordStage) Run(c *context.Context) error {
 }
 
 func (ReuseRecordStage) Verify(c *context.Context) error { return nil }
+
+// Verify：本 stage 只写状态旗，不产数据，没有可验的契约。
+func (ReuseStage) Verify(c *context.Context) error { return nil }

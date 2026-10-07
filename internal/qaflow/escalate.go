@@ -70,7 +70,14 @@ func (s EscalateStage) Run(c *context.Context) error {
 	if err != nil {
 		return fmt.Errorf("escalate: retrieve: %w", err)
 	}
-	if err := context.Set(c, KeyWindows, ws); err != nil {
+	// **合并**而不是替换：首程窗（再问时已加宽）与贵路窗合起来才够判。
+	// 替换是自相矛盾的——首程刚逐事实取回的证据，一替换就把事实的支撑
+	// 窗丢了（真跑教训：再问后 f1 的覆盖反而从"盖"变"缺"，模型答"该事
+	// 实无支撑证据"）。合并后按 (源,span) 去重、按分降序、封顶 12——
+	// 再多对合成面就是噪声（提示词预算）。
+	prev, _ := context.Get(c, KeyWindows)
+	merged := mergeWindows(prev, ws)
+	if err := context.Set(c, KeyWindows, merged); err != nil {
 		return err
 	}
 	rec.Executed = true
@@ -144,4 +151,30 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 		}
 	}
 	return s.Weighted(weights)
+}
+
+// mergeWindows 合并两个窗集：按 (SourceID,Span) 去重，按分降序，封顶
+// 12（合成提示词的预算上限）。
+func mergeWindows(a, b []EvidenceWindow) []EvidenceWindow {
+	seen := map[string]bool{}
+	out := make([]EvidenceWindow, 0, len(a)+len(b))
+	for _, ws := range [][]EvidenceWindow{a, b} {
+		for _, w := range ws {
+			key := w.SourceID + "#" + w.Span
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, w)
+		}
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].Score > out[j-1].Score; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	if len(out) > 12 {
+		out = out[:12]
+	}
+	return out
 }

@@ -28,6 +28,14 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 		if idx == nil {
 			return nil, errors.New("bm25 evidence: nil index")
 		}
+		// 再问加深（KeyDeepen）：同一会话原样再问 = 用户说上次不够。
+		// 加宽取数：topk×2、窗宽×1.5——上轮没取到的那条（如专利期限
+		// 两连问里的"期限为二十年"）更可能落在加宽后的窗集里。这一
+		// 次多花的检索是毫秒级的，答案是用户真拿到的。
+		if deepen, _ := context.Get(c, KeyDeepen); deepen {
+			k *= 2
+			width = width + width/2
+		}
 		hits := retrieveWeighted(c, idx, r.Effective(), k, width)
 		// 多事实问句：逐事实取证据后并入（fan-out）。K=1 不进（整句即
 		// 事实，旧路径逐字节不变）
