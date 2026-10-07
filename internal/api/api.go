@@ -371,6 +371,11 @@ type DocResponse struct {
 	// 否则前端 span_end > span_start 的判断直接废掉（真跑踩过）
 	SpanStart int `json:"span_start"`
 	SpanEnd   int `json:"span_end"`
+	// 血缘（摄入面的审计面）：原生 UTF-8 还是转码来的、原始字节的摘要
+	// ——产物文本证明不了它来自哪份文件，输入摘要可以
+	Encoding  string `json:"encoding,omitempty"`
+	SrcDigest string `json:"src_digest,omitempty"`
+	SrcBytes  int    `json:"src_bytes,omitempty"`
 }
 
 func (s *Server) handleDoc(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +393,7 @@ func (s *Server) handleDoc(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "doc not found: "+id)
 		return
 	}
-	resp := DocResponse{ID: id, Body: d.Body}
+	resp := DocResponse{ID: id, Body: d.Body, Encoding: d.Encoding, SrcDigest: d.SrcDigest, SrcBytes: d.SrcBytes}
 	if span := r.URL.Query().Get("span"); span != "" {
 		if start, end, ok := parseSpan(span); ok {
 			resp.SpanStart, resp.SpanEnd = start, end

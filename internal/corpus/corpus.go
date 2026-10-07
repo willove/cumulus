@@ -24,8 +24,11 @@ const Collection = "documents"
 
 // Doc 是一篇语料文档（store 里的结构体形状）。
 type Doc struct {
-	ID   string `json:"id"`
-	Body string `json:"body"`
+	ID        string
+	Body      string
+	Encoding  string `json:"encoding,omitempty"`   // utf-8 / gb18030（摄入时的解码分层）
+	SrcDigest string `json:"src_digest,omitempty"` // 原始字节的 sha256（血缘：产物→原始字节）
+	SrcBytes  int    `json:"src_bytes,omitempty"`  // 原始字节数
 }
 
 // Port 是语料面依赖的 store 能力（窄接口，测试可替）。它就是
@@ -101,11 +104,14 @@ func ImportFile(ctx gocontext.Context, p Port, path string) (int, error) {
 		if body == "" {
 			continue
 		}
+		// jsonl 路径的正文也过规范化（文本自 JSON 已解码，只规范空白）；
+		// 内容寻址在规范化之后——同一份内容不同空白形态是同一篇
+		body = Normalize(body)
 		id := rec.ID
 		if id == "" {
 			id = hashID(body)
 		}
-		if err := p.PutStruct(ctx, Collection, id, Doc{ID: id, Body: body}); err != nil {
+		if err := p.PutStruct(ctx, Collection, id, Doc{ID: id, Body: body, Encoding: "utf-8", SrcDigest: DigestFull([]byte(body))}); err != nil {
 			return n, fmt.Errorf("corpus: put %s: %w", id, err)
 		}
 		n++
@@ -148,22 +154,23 @@ func ImportDir(ctx gocontext.Context, p Port, dir string) (int, error) {
 	return total, nil
 }
 
-// importTextFile 把一个 .txt/.md 文件整篇入库。
+// importTextFile 把一个 .txt/.md 文件整篇入库（过摄入管：GBK 转码 +
+// 规范化 + 血缘）。一文一文件的形态（laws-full）走这里。
 func importTextFile(ctx gocontext.Context, p Port, path string) (int, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("corpus: read %s: %w", path, err)
 	}
-	body := string(raw)
-	if strings.TrimSpace(body) == "" {
-		return 0, nil
+	pre, perr := Prepare(raw)
+	if perr != nil {
+		return 0, fmt.Errorf("corpus: prepare %s: %w", path, perr)
 	}
 	if err := p.EnsureCollection(ctx, Collection); err != nil {
 		return 0, err
 	}
-	id := hashID(body)
-	if err := p.PutStruct(ctx, Collection, id, Doc{ID: id, Body: body}); err != nil {
-		return 0, fmt.Errorf("corpus: put %s: %w", id, err)
+	doc := Doc{ID: pre.ID, Body: pre.Body, Encoding: pre.Encoding, SrcDigest: pre.SrcDigest, SrcBytes: pre.SrcBytes}
+	if err := p.PutStruct(ctx, Collection, pre.ID, doc); err != nil {
+		return 0, fmt.Errorf("corpus: put %s: %w", pre.ID, err)
 	}
 	return 1, nil
 }

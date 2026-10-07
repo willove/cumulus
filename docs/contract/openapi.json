@@ -48,6 +48,9 @@
           "body": {
             "type": "string"
           },
+          "encoding": {
+            "type": "string"
+          },
           "id": {
             "type": "string"
           },
@@ -56,6 +59,12 @@
           },
           "span_start": {
             "type": "integer"
+          },
+          "src_bytes": {
+            "type": "integer"
+          },
+          "src_digest": {
+            "type": "string"
           }
         },
         "required": [

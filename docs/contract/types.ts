@@ -125,6 +125,9 @@ export interface DocResponse {
   body: string;
   span_start: number;
   span_end: number;
+  encoding?: string;
+  src_digest?: string;
+  src_bytes?: number;
 }
 
 

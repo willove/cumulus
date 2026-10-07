@@ -15,8 +15,6 @@
 package ingest
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,33 +28,31 @@ import (
 	"github.com/willove/cumulus/internal/corpus"
 )
 
-// ContentID 是内容寻址的 id：正文的 sha256 前 16 位。同内容同 id——
-// 重复摄入是 upsert，不是重复行。
-func ContentID(body string) string {
-	sum := sha256.Sum256([]byte(body))
-	return hex.EncodeToString(sum[:])[:16]
-}
-
-// Text 存一段文本，返回内容 id。source 记来源（url/文件名/paste），
-// 不进 id（同内容不同来源仍是同一篇）。
+// Text 存一段文本（粘贴/链接/看目录的单件入口）：过摄入管
+// （corpus.Prepare：解码→规范化→内容寻址），血缘随文档落库。
 func Text(ctx gocontext.Context, p corpus.Port, body, source string) (string, error) {
 	if strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf("ingest: empty body")
 	}
-	id := ContentID(body)
+	pre, err := corpus.Prepare([]byte(body))
+	if err != nil {
+		return "", fmt.Errorf("ingest: prepare: %w", err)
+	}
 	if err := p.EnsureCollection(ctx, corpus.Collection); err != nil {
 		return "", err
 	}
-	doc := corpus.Doc{ID: id, Body: body}
-	if source != "" {
-		// 来源记在 id 前缀不可行（id 是内容哈希）；扩展字段留给 store 的
-		// map 形状——这里保持最小：正文进库，来源进调用方日志。
-		_ = source
+	doc := corpus.Doc{
+		ID:        pre.ID,
+		Body:      pre.Body,
+		Encoding:  pre.Encoding,
+		SrcDigest: pre.SrcDigest,
+		SrcBytes:  pre.SrcBytes,
 	}
-	if err := p.PutStruct(ctx, corpus.Collection, id, doc); err != nil {
-		return "", fmt.Errorf("ingest: put %s: %w", id, err)
+	_ = source // 来源留给调用方日志（id 是内容哈希，前缀不可行）
+	if err := p.PutStruct(ctx, corpus.Collection, pre.ID, doc); err != nil {
+		return "", fmt.Errorf("ingest: put %s: %w", pre.ID, err)
 	}
-	return id, nil
+	return pre.ID, nil
 }
 
 // FetchURL 取一个 URL 的正文。做法：GET，剥 script/style，去标签，
@@ -183,7 +179,7 @@ func scanOnce(ctx gocontext.Context, p corpus.Port, dir string, seen map[string]
 		if err != nil {
 			continue
 		}
-		sum := ContentID(string(raw))
+		sum := corpus.DigestHex(raw) // 内容寻址同口径（规范化前，仅用于"变没变"判定）
 		if seen[path] == sum {
 			continue // 见过且没变
 		}

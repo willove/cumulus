@@ -7,6 +7,8 @@ import (
 
 	gocontext "context"
 	"testing"
+
+	"github.com/willove/cumulus/internal/corpus"
 )
 
 func writeFileRaw(path, content string) error {
@@ -43,9 +45,9 @@ func (m *memPort) GetValue(gocontext.Context, string) ([]byte, error) { return n
 func (m *memPort) Health(gocontext.Context) error                     { return nil }
 
 func TestContentIDStable(t *testing.T) {
-	a := ContentID("同一内容")
-	b := ContentID("同一内容")
-	c := ContentID("别的内容")
+	a := corpus.DigestHex([]byte("同一内容"))
+	b := corpus.DigestHex([]byte("同一内容"))
+	c := corpus.DigestHex([]byte("别的内容"))
 	if a != b {
 		t.Fatal("same content must give same id")
 	}
