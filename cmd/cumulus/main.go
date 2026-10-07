@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/willove/cumulus/internal/api"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/ctxmgmt"
+	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -254,6 +256,7 @@ func runServe(args []string) error {
 	corpusDir := fs.String("corpus", "", "directory with .jsonl files to import when the store is empty")
 	synthFlag := fs.String("synth", "offline", "synthesis backend: offline | llm")
 	embedFlag := fs.String("embed", "off", "embedding backend: off | minilm")
+	watchDir := fs.String("watch", "", "directory to watch for new files (txt/md/jsonl)")
 	topk := fs.Int("topk", 3, "retrieval top-k")
 	width := fs.Int("width", 160, "evidence window width (runes)")
 	if err := fs.Parse(args); err != nil {
@@ -279,21 +282,39 @@ func runServe(args []string) error {
 			return err
 		}
 	}
+	if len(docs) == 0 && *corpusDir == "" && *watchDir == "" {
+		return fmt.Errorf("serve: store is empty and neither -corpus nor -watch given; nothing to answer from")
+	}
 	if len(docs) == 0 {
-		return fmt.Errorf("serve: store is empty and no -corpus given; nothing to answer from")
+		fmt.Println("serve: starting with an empty store (watch/ingest will fill it)")
 	}
 	synthFn, synthLabel, err := pickSynth(*synthFlag)
 	if err != nil {
 		return err
 	}
-	srv := api.New(retrieval.Build(docs), synthFn, *topk, *width)
+	// 摄入面装配：store 是语料的家，索引是它的投影（摄入后热重建）
+	srv := api.NewWithStore(st, synthFn, *topk, *width)
+	if _, err := srv.Rebuild(ctx); err != nil {
+		return err
+	}
 	if *embedFlag == "minilm" {
 		embFn, _, err := pickEmbed(*embedFlag)
 		if err != nil {
 			return err
 		}
 		srv.Embedder = embFn()
-		srv.Escalate = qaflow.BM25DeepEvidence(srv.Index, *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+		srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+	}
+	// 看目录：文件落进去即入库（零摩擦摄入的第三条路）
+	if *watchDir != "" {
+		go func() {
+			_ = ingest.WatchDir(ctx, st, *watchDir, 2*time.Second, func(n int) {
+				if _, err := srv.Rebuild(gocontext.Background()); err == nil {
+					fmt.Printf("watch: +%d docs, index rebuilt\n", n)
+				}
+			})
+		}()
+		fmt.Printf("serve: watching %s for .txt/.md/.jsonl\n", *watchDir)
 	}
 	fmt.Printf("serve: corpus=%d docs synth=%s embed=%s listen=%s\n", len(docs), synthLabel, *embedFlag, *listen)
 	fmt.Printf("serve: POST /v1/qa {question, session?} · GET /v1/health · GET /v1/status\n")

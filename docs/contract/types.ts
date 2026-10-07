@@ -91,4 +91,22 @@ export interface StatusResponse {
   escalate: boolean;
 }
 
+export interface IngestRequest {
+  body: string;
+  url: string;
+}
+
+export interface IngestResponse {
+  id: string;
+  corpus_docs: number;
+  bytes: number;
+}
+
+export interface DocResponse {
+  id: string;
+  body: string;
+  span_start?: number;
+  span_end?: number;
+}
+
 

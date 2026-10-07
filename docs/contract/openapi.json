@@ -18,6 +18,27 @@
         ],
         "type": "object"
       },
+      "DocResponse": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "span_end": {
+            "type": "integer"
+          },
+          "span_start": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "body",
+          "id"
+        ],
+        "type": "object"
+      },
       "EscalationRecord": {
         "properties": {
           "after": {
@@ -79,6 +100,40 @@
           "corpus_docs",
           "realm",
           "status"
+        ],
+        "type": "object"
+      },
+      "IngestRequest": {
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "url"
+        ],
+        "type": "object"
+      },
+      "IngestResponse": {
+        "properties": {
+          "bytes": {
+            "type": "integer"
+          },
+          "corpus_docs": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bytes",
+          "corpus_docs",
+          "id"
         ],
         "type": "object"
       },
@@ -309,6 +364,47 @@
   },
   "openapi": "3.0.3",
   "paths": {
+    "/v1/doc/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "span",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocResponse"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "404": {
+            "description": "文档不存在"
+          },
+          "default": {
+            "description": "error"
+          }
+        },
+        "summary": "文档全文（点击引用看原文；span 参数带出高亮区间）"
+      }
+    },
     "/v1/health": {
       "get": {
         "responses": {
@@ -327,6 +423,42 @@
           }
         },
         "summary": "探活：语料量与 realm"
+      }
+    },
+    "/v1/ingest": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            },
+            "description": "ok"
+          },
+          "400": {
+            "description": "空内容或坏 JSON"
+          },
+          "502": {
+            "description": "链接取回失败"
+          },
+          "default": {
+            "description": "error"
+          }
+        },
+        "summary": "摄入：粘贴文本或给链接，入库后索引热重建"
       }
     },
     "/v1/qa": {

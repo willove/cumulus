@@ -118,6 +118,28 @@ func genOpenAPI() string {
 					"responses": map[string]any{"200": resp("StatusResponse"), "default": errResp("")},
 				},
 			},
+			"/v1/ingest": map[string]any{
+				"post": map[string]any{
+					"summary":     "摄入：粘贴文本或给链接，入库后索引热重建",
+					"requestBody": map[string]any{"required": true, "content": map[string]any{"application/json": map[string]any{"schema": ref("IngestRequest")}}},
+					"responses": map[string]any{
+						"200":     resp("IngestResponse"),
+						"400":     errResp("空内容或坏 JSON"),
+						"502":     errResp("链接取回失败"),
+						"default": errResp(""),
+					},
+				},
+			},
+			"/v1/doc/{id}": map[string]any{
+				"get": map[string]any{
+					"summary": "文档全文（点击引用看原文；span 参数带出高亮区间）",
+					"parameters": []map[string]any{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+						{"name": "span", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					},
+					"responses": map[string]any{"200": resp("DocResponse"), "404": errResp("文档不存在"), "default": errResp("")},
+				},
+			},
 		},
 	}
 	// 收全体型：请求/响应引用的全部结构体（含嵌套）
@@ -126,6 +148,9 @@ func genOpenAPI() string {
 	collect(reflect.TypeOf(api.QAResponse{}), schemas)
 	collect(reflect.TypeOf(api.HealthResponse{}), schemas)
 	collect(reflect.TypeOf(api.StatusResponse{}), schemas)
+	collect(reflect.TypeOf(api.IngestRequest{}), schemas)
+	collect(reflect.TypeOf(api.IngestResponse{}), schemas)
+	collect(reflect.TypeOf(api.DocResponse{}), schemas)
 	doc["components"] = map[string]any{"schemas": schemas}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	must(err)
@@ -254,6 +279,9 @@ func genTS() string {
 		reflect.TypeOf(api.QAResponse{}),
 		reflect.TypeOf(api.HealthResponse{}),
 		reflect.TypeOf(api.StatusResponse{}),
+		reflect.TypeOf(api.IngestRequest{}),
+		reflect.TypeOf(api.IngestResponse{}),
+		reflect.TypeOf(api.DocResponse{}),
 	}
 	// 连带嵌套：把响应里引用的 qaflow 体也收进来
 	for _, t := range []reflect.Type{

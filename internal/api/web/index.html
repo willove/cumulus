@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cumulus</title>
+<style>
+  :root { --line:#e2e2e2; --dim:#666; --bg:#fafafa; }
+  * { box-sizing:border-box; }
+  body { font:15px/1.6 -apple-system,"PingFang SC",sans-serif; margin:0; background:var(--bg); }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:18px; font-weight:600; }
+  .box { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px; margin:12px 0; }
+  input[type=text],textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  button { border:1px solid var(--line); background:#fff; border-radius:6px; padding:6px 14px; cursor:pointer; }
+  button:hover { background:#f0f0f0; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:0 0 auto; } .row > input { flex:1; }
+  .meta { color:var(--dim); font-size:13px; }
+  .cite { color:#0b5fff; cursor:pointer; text-decoration:underline; }
+  .sig { display:inline-block; background:#f2f2f2; border-radius:4px; padding:1px 6px; margin:1px 2px; font-size:12px; color:#333; }
+  .win { border-left:3px solid var(--line); padding:2px 8px; margin:4px 0; font-size:13px; }
+  .refused { color:#a33; }
+  #docview { white-space:pre-wrap; font-size:14px; }
+  mark { background:#fff3a3; }
+  details { margin-top:8px; } summary { cursor:pointer; color:var(--dim); font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>cumulus</h1>
+  <div class="box">
+    <div class="row">
+      <input id="q" type="text" placeholder="问点什么（回车即问）">
+      <button onclick="ask()">问</button>
+    </div>
+  </div>
+  <div id="answer"></div>
+  <div class="box">
+    <div class="row">
+      <input id="url" type="text" placeholder="贴一个链接，或下面粘文本">
+      <button onclick="ingestUrl()">存链接</button>
+    </div>
+    <textarea id="body" placeholder="或粘贴一段文本"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button onclick="ingestText()">存文本</button>
+      <span id="ingestmsg" class="meta"></span>
+    </div>
+  </div>
+  <div id="docview" class="box" style="display:none"></div>
+  <div class="meta" style="margin-top:24px">答案带引用；点引用看原文高亮。上面的信号是“当时为什么这么答”。</div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+async function ask() {
+  const q = $('q').value.trim(); if (!q) return;
+  const r = await fetch('/v1/qa', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({question:q, session:'web'})});
+  const d = await r.json();
+  render(d);
+}
+
+function render(d) {
+  const a = $('answer');
+  if (d.refused) {
+    a.innerHTML = '<div class="box refused">不知道：' + esc(d.refusal_reason || '证据不足') + '</div>' + meta(d);
+  } else {
+    const cites = (d.citations||[]).map(c => '<span class="cite" onclick="showDoc(\'' + c + '\')">' + esc(c) + '</span>').join(' ');
+    a.innerHTML = '<div class="box"><div>' + esc(d.answer) + '</div><div class="meta" style="margin-top:6px">引用：' + cites + '</div></div>' + meta(d);
+  }
+  window.scrollTo(0,0);
+}
+
+function meta(d) {
+  const r = d.route || {}, s = r.signals || {};
+  const chips = [
+    '路由:' + r.action,
+    '覆盖:' + (s.coverage??0).toFixed(2),
+    '区分:' + (s.margin??0).toFixed(2),
+    '置信:' + (s.confidence??0).toFixed(2),
+  ];
+  if (d.escalation && d.escalation.executed) chips.push('已升级');
+  if (d.reuse && d.reuse.hit) chips.push('复用命中');
+  if (d.eviction && (d.eviction.merged + d.eviction.dropped) > 0)
+    chips.push('驱逐:合' + d.eviction.merged + '/丢' + d.eviction.dropped);
+  const wins = (d.windows||[]).map(w =>
+    '<div class="win">' + esc(w.source_id) + ' ' + esc(w.span) + ' · ' + w.score.toFixed(2) +
+    '<br><span class="meta">' + esc((w.text||'').slice(0,80)) + '</span></div>').join('');
+  return '<div class="box"><div>' + chips.map(c=>'<span class="sig">'+esc(c)+'</span>').join('') +
+    '<div class="meta" style="margin-top:4px">' + esc(r.reason||'') + '</div>' +
+    '<details><summary>证据窗口 ' + (d.windows||[]).length + ' 个</summary>' + wins + '</details></div>';
+}
+
+async function showDoc(cite) {
+  const [id, span] = cite.split('#');
+  const r = await fetch('/v1/doc/' + encodeURIComponent(id) + '?span=' + encodeURIComponent(span||''));
+  const d = await r.json();
+  const box = $('docview');
+  if (d.error) { box.style.display='block'; box.textContent = d.error; return; }
+  const body = d.body || '';
+  let html;
+  if (d.span_end > d.span_start) {
+    html = esc(body.slice(0, d.span_start)) + '<mark>' + esc(body.slice(d.span_start, d.span_end)) + '</mark>' + esc(body.slice(d.span_end));
+  } else { html = esc(body); }
+  box.style.display = 'block';
+  box.innerHTML = '<div class="meta">' + esc(id) + (span?' · '+esc(span):'') + '</div>' + html;
+  box.scrollIntoView({behavior:'smooth'});
+}
+
+async function ingestText() {
+  const body = $('body').value.trim(); if (!body) return;
+  await doIngest({body});
+}
+async function ingestUrl() {
+  const url = $('url').value.trim(); if (!url) return;
+  await doIngest({url});
+}
+async function doIngest(payload) {
+  const r = await fetch('/v1/ingest', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  const d = await r.json();
+  $('ingestmsg').textContent = d.error ? ('失败：' + d.error) : ('已存 · 库内 ' + d.corpus_docs + ' 篇 · ' + d.bytes + ' 字');
+  if (!d.error) { $('body').value=''; $('url').value=''; }
+}
+
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+</script>
+</body>
+</html>

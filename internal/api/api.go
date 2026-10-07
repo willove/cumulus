@@ -10,41 +10,77 @@
 package api
 
 import (
+	goembed "embed"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
+
+	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
-	"github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/corpus"
+	embedPkg "github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
 
-// Server 是一次装配的服务。零件（索引/合成/向量/复用/升级）装配时定死，
+// Server 是一次装配的服务。零件（合成/向量/复用/升级）装配时定死，
 // 运行中不热换——热插拔是注册面的事，HTTP 面只把装配结果暴露出去。
+// 语料与索引例外：摄入是运行时事件，索引跟着重建（个人库规模，毫秒级）。
 type Server struct {
-	Index    *retrieval.Index
+	Store    corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
 	Synth    qaflow.SynthFunc
-	Embedder embed.Embedder // 可空：nil = 语义重排/语义尺缺席
+	Embedder embedPkg.Embedder // 可空：nil = 语义重排/语义尺缺席
 	Reuse    *knowledge.ReuseStore
 	Escalate func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error)
 	TopK     int
 	Width    int
 	Realm    string
 	Options  qaflow.Options
+
+	mu    sync.RWMutex
+	index *retrieval.Index
 }
 
-// New 装配一台服务。topk/width 是检索旋钮（语料不同要重测，见
-// evolution-log 的宽度实验）。
+// Index 读当前索引（摄入与问答之间只有这一把锁）。
+func (s *Server) Index() *retrieval.Index {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.index
+}
+
+// Rebuild 从 store 重建索引。摄入（粘贴/链接/看目录）后调用。
+func (s *Server) Rebuild(ctx gocontext.Context) (int, error) {
+	docs, err := corpus.Load(ctx, s.Store)
+	if err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.index = retrieval.Build(docs)
+	return len(docs), nil
+}
+
+// New 装配一台服务（索引由调用方给；摄入面用 NewWithStore）。
 func New(idx *retrieval.Index, synth qaflow.SynthFunc, topk, width int) *Server {
+	s := NewWithStore(nil, synth, topk, width)
+	s.index = idx
+	return s
+}
+
+// NewWithStore 从 store 装配：索引从 store 建，摄入后热重建。
+func NewWithStore(st corpus.Port, synth qaflow.SynthFunc, topk, width int) *Server {
 	if topk <= 0 {
 		topk = 3
 	}
 	if width <= 0 {
 		width = 160
 	}
-	return &Server{Index: idx, Synth: synth, TopK: topk, Width: width, Realm: "default", Reuse: knowledge.NewReuseStore()}
+	return &Server{Store: st, Synth: synth, TopK: topk, Width: width, Realm: "default", Reuse: knowledge.NewReuseStore()}
 }
 
 // QARequest 是 POST /v1/qa 的请求。
@@ -127,6 +163,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/qa", s.handleQA)
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.HandleFunc("/v1/ingest", s.handleIngest)
+	mux.HandleFunc("/v1/doc/", s.handleDoc)
+	mux.HandleFunc("/", s.handlePage)
 	return mux
 }
 
@@ -157,7 +196,7 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 	if s.Escalate != nil {
 		opts.Escalate = s.Escalate
 	}
-	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index, s.TopK, s.Width), s.Synth, opts)
+	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index(), s.TopK, s.Width), s.Synth, opts)
 	if err := runner.Run(c); err != nil {
 		writeErr(w, http.StatusInternalServerError, "flow: "+err.Error())
 		return
@@ -206,8 +245,8 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	docs := 0
-	if s.Index != nil {
-		docs = s.Index.N
+	if idx := s.Index(); idx != nil {
+		docs = idx.N
 	}
 	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", CorpusDocs: docs, Realm: s.Realm})
 }
@@ -229,6 +268,130 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+//go:embed web/index.html
+var webPage []byte
+
+var _ goembed.FS
+
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+// ---------- 摄入（进） ----------
+
+// IngestRequest 是 POST /v1/ingest 的请求：body 直接存；给了 url 就取了
+// 再存。零摩擦：粘贴或链接，一步入库。
+type IngestRequest struct {
+	Body string `json:"body"`
+	URL  string `json:"url"`
+}
+
+// IngestResponse 回报内容 id（内容寻址：同内容再来是 upsert）与库容量。
+type IngestResponse struct {
+	ID         string `json:"id"`
+	CorpusDocs int    `json:"corpus_docs"`
+	Bytes      int    `json:"bytes"`
+}
+
+func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	if s.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "ingest not wired: server started without a store")
+		return
+	}
+	var req IngestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	ctx := gocontext.Background()
+	body := req.Body
+	if req.URL != "" {
+		fetched, err := ingest.FetchURL(ctx, req.URL)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "fetch: "+err.Error())
+			return
+		}
+		body = fetched
+	}
+	id, err := ingest.Text(ctx, s.Store, body, req.URL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "ingest: "+err.Error())
+		return
+	}
+	n, err := s.Rebuild(ctx)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "rebuild: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, IngestResponse{ID: id, CorpusDocs: n, Bytes: len(body)})
+}
+
+// ---------- 文档（引用可核） ----------
+
+// DocResponse 是一篇文档的全文（点击引用看原文）。Span 把引用的 rune
+// 坐标带回来，前端据此高亮——“字符级可核”在界面上兑现。
+type DocResponse struct {
+	ID        string `json:"id"`
+	Body      string `json:"body"`
+	SpanStart int    `json:"span_start,omitempty"`
+	SpanEnd   int    `json:"span_end,omitempty"`
+}
+
+func (s *Server) handleDoc(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/v1/doc/")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "doc id required")
+		return
+	}
+	if s.Store == nil {
+		writeErr(w, http.StatusServiceUnavailable, "store not wired")
+		return
+	}
+	var d corpus.Doc
+	if err := s.Store.GetStruct(gocontext.Background(), corpus.Collection, id, &d); err != nil {
+		writeErr(w, http.StatusNotFound, "doc not found: "+id)
+		return
+	}
+	resp := DocResponse{ID: id, Body: d.Body}
+	if span := r.URL.Query().Get("span"); span != "" {
+		if start, end, ok := parseSpan(span); ok {
+			resp.SpanStart, resp.SpanEnd = start, end
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// parseSpan 解析 "rune[起:止]"。
+func parseSpan(s string) (int, int, bool) {
+	if !strings.HasPrefix(s, "rune[") || !strings.HasSuffix(s, "]") {
+		return 0, 0, false
+	}
+	inner := s[5 : len(s)-1]
+	i := strings.IndexByte(inner, ':')
+	if i < 0 {
+		return 0, 0, false
+	}
+	start, err1 := strconv.Atoi(inner[:i])
+	end, err2 := strconv.Atoi(inner[i+1:])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+// ---------- 页面（看） ----------
+
+// handlePage 服务唯一的页面：一张问题框 + 一个摄入框 + 记录的渲染。
+// 页面不含业务逻辑——所有判断在 API 侧做过，这里只画。契约门守着形状。
+func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(webPage)
 }

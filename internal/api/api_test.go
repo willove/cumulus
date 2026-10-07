@@ -4,9 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+
+	gocontext "context"
 	"strings"
 	"testing"
 
+	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -168,4 +172,117 @@ func keysOf(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// 摄入契约：粘贴入库（内容寻址）、可核（文档端点）、页面可服务。
+func TestIngestAndDocAndPage(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{{ID: "seed", Body: "种子文档"}})
+	s := NewWithStore(newFakeStore(), nil, 3, 160)
+	s.Synth = offlineQA()
+	s.index = idx
+	h := s.Handler()
+
+	// 摄入文本
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, jsonReq("POST", "/v1/ingest", `{"body":"连接池最大连接数默认为 100。"}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("ingest must be 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var ing IngestResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &ing)
+	if ing.ID == "" || ing.CorpusDocs != 1 {
+		t.Fatalf("ingest must report id and corpus size: %+v", ing)
+	}
+
+	// 摄入后问答能命中新文档（索引热重建）
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, jsonReq("POST", "/v1/qa", `{"question":"连接池最大连接数是多少"}`))
+	var qa QAResponse
+	_ = json.Unmarshal(rec2.Body.Bytes(), &qa)
+	if qa.Answer == "" {
+		t.Fatalf("freshly ingested doc must be answerable: %+v", qa)
+	}
+
+	// 同内容再摄入：upsert 不加量
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, jsonReq("POST", "/v1/ingest", `{"body":"连接池最大连接数默认为 100。"}`))
+	var ing2 IngestResponse
+	_ = json.Unmarshal(rec3.Body.Bytes(), &ing2)
+	if ing2.CorpusDocs != 1 || ing2.ID != ing.ID {
+		t.Fatalf("same content must dedupe: %+v vs %+v", ing, ing2)
+	}
+
+	// 文档端点：引用可核（span 解析出来）
+	rec4 := httptest.NewRecorder()
+	h.ServeHTTP(rec4, httptest.NewRequest("GET", "/v1/doc/"+ing.ID+"?span=rune[0:3]", nil))
+	var doc DocResponse
+	_ = json.Unmarshal(rec4.Body.Bytes(), &doc)
+	if doc.Body == "" || doc.SpanStart != 0 || doc.SpanEnd != 3 {
+		t.Fatalf("doc endpoint must return body and parsed span: %+v", doc)
+	}
+
+	// 页面
+	rec5 := httptest.NewRecorder()
+	h.ServeHTTP(rec5, httptest.NewRequest("GET", "/", nil))
+	if rec5.Code != http.StatusOK || !strings.Contains(rec5.Body.String(), "cumulus") {
+		t.Fatalf("page must be served, got %d", rec5.Code)
+	}
+}
+
+// fakeStore 是最小可用 store（ingest 路径用）。
+type fakeStore struct{ docs map[string]corpusDocShape }
+
+func newFakeStore() *fakeStore { return &fakeStore{docs: map[string]corpusDocShape{}} }
+
+type corpusDocShape struct {
+	ID   string
+	Body string
+}
+
+func (f *fakeStore) EnsureCollection(gocontext.Context, string) error { return nil }
+func (f *fakeStore) PutStruct(_ gocontext.Context, coll, id string, v any) error {
+	if d, ok := v.(corpus.Doc); ok {
+		f.docs[id] = corpusDocShape{ID: d.ID, Body: d.Body}
+	}
+	return nil
+}
+func (f *fakeStore) GetStruct(_ gocontext.Context, coll, id string, out any) error {
+	d, ok := f.docs[id]
+	if !ok {
+		return os.ErrNotExist
+	}
+	if o, ok := out.(*corpus.Doc); ok {
+		o.ID, o.Body = d.ID, d.Body
+	}
+	return nil
+}
+func (f *fakeStore) ListIDs(_ gocontext.Context, coll string, _ int) ([]string, error) {
+	ids := make([]string, 0, len(f.docs))
+	for id := range f.docs {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+func (f *fakeStore) Delete(gocontext.Context, string, string) error     { return nil }
+func (f *fakeStore) PutValue(gocontext.Context, string, []byte) error   { return nil }
+func (f *fakeStore) GetValue(gocontext.Context, string) ([]byte, error) { return nil, os.ErrNotExist }
+func (f *fakeStore) Health(gocontext.Context) error                     { return nil }
+
+func offlineQA() qaflow.SynthFunc {
+	return func(_ string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+		if len(ws) == 0 {
+			return qaflow.Answer{}, qaflow.Usage{}, errNoWindows
+		}
+		ans := qaflow.Answer{Text: ws[0].Text}
+		for _, w := range ws {
+			ans.Citations = append(ans.Citations, w.SourceID+"#"+w.Span)
+		}
+		return ans, qaflow.Usage{CostKnown: false}, nil
+	}
+}
+
+func jsonReq(method, path, body string) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
 }
