@@ -173,8 +173,14 @@ func (a Analysis) SortedTerms() []Term {
 	return out
 }
 
-// Thin 判定主关键词级是否稀薄（鸿沟信号）：库里能用的强化词少于
-// minTerms 个，或总权重低于 floor。稀薄 → 触发 LLM 扩展兜底。
+// Thin 判定是否该出词汇桥。三个判据，任一成立：
+//   - 主关键词级不足（minTerms/floor）；
+//   - 语料外词占比过半（口语对书面语全党外）；
+//   - **有任何一个语料外内容词**——语料没命名用户说的实体，一次就够。
+//     第三条是真跑教训：问"闯红灯怎么处罚"，闯红 语料外、红灯在库内，
+//     OOV 占比只 20% 过不了 60% 线，桥不出场，模型就着"红灯=禁止通行"
+//     答而不给处罚框架——占比是错判据，实体的 unnamed 才是鸿沟本身
+//     （typo 同理：用户打错的词就是语料没命名的实体）。
 func (a Analysis) Thin(minTerms int, floor float64) bool {
-	return len(a.Primary) < minTerms || a.Score < floor || a.OOVShare() >= 0.6
+	return len(a.Primary) < minTerms || a.Score < floor || a.OOVShare() >= 0.6 || len(a.OOV) > 0
 }

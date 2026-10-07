@@ -57,9 +57,11 @@ func TestThinDetectsVocabularyGap(t *testing.T) {
 	if !a.Thin(2, 2.0) {
 		t.Fatalf("几乎全是库外/泛词时必须判稀薄: %+v", a)
 	}
-	rich := Analyze("驾驶机动车信号灯", fakeCorpus{df: map[string]int{"驾驶": 3, "机动": 3, "信号": 40}}, 1000)
+	// 夹具要含全部二元组才对（真实索引里全库有这些词）
+	full := map[string]int{"驾驶": 3, "机动": 3, "信号": 40, "驶机": 3, "动车": 3, "车信": 40, "号灯": 2}
+	rich := Analyze("驾驶机动车信号灯", fakeCorpus{df: full}, 1000)
 	if rich.Thin(2, 2.0) {
-		t.Fatalf("稀有权词充足时不该判稀薄: %+v", rich)
+		t.Fatalf("稀有权词充足且无仓外词时不该判稀薄: %+v", rich)
 	}
 }
 
@@ -112,5 +114,24 @@ func TestGlueBigramsDemoted(t *testing.T) {
 	}
 	if _, ok := a.Primary["利期"]; !ok {
 		t.Fatal("利期是真内容词，该在主级")
+	}
+}
+
+// 一个语料外内容词就该出桥（闯红的教训：占比 20% 过不了 60% 线，但
+// 实体没被语料命名就是鸿沟本身）
+func TestThinOnAnyOOV(t *testing.T) {
+	// 夹具：除闯红外全在库（模拟真实索引——只有实体词没被命名）
+	c := fakeCorpus{df: map[string]int{"红灯": 5, "处罚": 900, "灯怎": 40, "么处": 60, "怎么": 800}}
+	a := Analyze("闯红灯怎么处罚", c, 1000)
+	if a.OOVShare() >= 0.6 {
+		t.Fatalf("夹具应只有一个语料外词，share=%.2f", a.OOVShare())
+	}
+	if !a.Thin(2, 2.0) {
+		t.Fatal("有语料外实体词（闯红）就必须判稀薄")
+	}
+	// 对照：全库内词不该判稀薄（夹具含全部二元组）
+	rich := Analyze("红灯表示什么", fakeCorpus{df: map[string]int{"红灯": 5, "表示": 60, "灯表": 30, "示什": 30, "什么": 900}}, 1000)
+	if rich.Thin(2, 2.0) {
+		t.Fatalf("全库内词不该判稀薄，oov=%v", rich.OOV)
 	}
 }

@@ -274,12 +274,16 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(docs) == 0 && *corpusDir != "" {
+	// -corpus 给了就导，**不看出不出空**：导入是幂等的（内容寻址 + 规范
+	// 化后同内容同 id，重导即去重 upsert）。曾经"仅空库才导"的守卫造的
+	// 孽：库里躺一篇残留文档，整个语料导入被静默跳过，服务拿一篇文档
+	// 回答"证据不足"（真跑踩过，用户当场抓住退化）。
+	if *corpusDir != "" {
 		n, err := corpus.ImportDir(ctx, st, *corpusDir)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("corpus: imported %d docs from %s\n", n, *corpusDir)
+		fmt.Printf("corpus: imported %d docs from %s (idempotent re-scan)\n", n, *corpusDir)
 		docs, err = corpus.Load(ctx, st)
 		if err != nil {
 			return err
