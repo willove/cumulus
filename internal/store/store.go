@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/willove/cumulite"
+	"github.com/willove/cumulite/contract"
 )
 
 // Port 是 cumulus 用到的那部分存储能力。刻意保持小：
@@ -31,6 +32,10 @@ type Port interface {
 	GetValue(ctx context.Context, key string) ([]byte, error)
 	// Health 探活。
 	Health(ctx context.Context) error
+	// ListIDs 枚举集合内全部文档 id（分页）。语料面需要它：索引是语料
+	// 的投影，进程重启后从 store 重建，没有枚举语料就只能在导入进程的
+	// 内存里活着。limit<=0 用引擎默认上限。
+	ListIDs(ctx context.Context, coll string, limit int) ([]string, error)
 }
 
 // Open 打开存储。dir 为空且 inMemory 为真时用内存引擎（测试与 selftest 用）。
@@ -129,4 +134,24 @@ func (a *adapter) GetValue(ctx context.Context, key string) ([]byte, error) {
 		return nil, fmt.Errorf("store: get value %s: %w", key, err)
 	}
 	return v, nil
+}
+
+// ListIDs 枚举集合内全部文档 id（分页）。语料面需要它：索引是语料的
+// 投影，进程重启后从 store 重建——没有枚举，语料就只能在导入进程的
+// 内存里活着。实现走引擎 Query 的 match-all（Filter 空 = 全量扫）。
+func (a *adapter) ListIDs(ctx context.Context, coll string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100000
+	}
+	res, err := a.engine.Query(ctx, coll, contract.Query{Limit: limit})
+	if err != nil {
+		return nil, fmt.Errorf("store: query %s: %w", coll, err)
+	}
+	ids := make([]string, 0, len(res.Documents))
+	for _, d := range res.Documents {
+		if id, ok := d["_id"].(string); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }

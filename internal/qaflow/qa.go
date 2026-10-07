@@ -229,11 +229,11 @@ func (s RouteStage) Run(c *context.Context) error {
 // 覆盖度（evidence.coverage）、区分度（窗口打分的头部分差）、死路率
 // （deep 遥测）。没有调用方手填的数——手填置信度正是要修掉的旧形态。
 type RouteSignals struct {
-	Coverage   float64 // 查询词覆盖度（语料内可达词口径）
-	Margin     float64 // (top1-top2)/top1：候选区分度代理，0..1
-	DeadRate   float64 // 死路/取样：翻过多少空文档
-	Windows    int     // 最终窗口数
-	Confidence float64 // 上三项的加权组合（DraftConfidence）
+	Coverage   float64 `json:"coverage"`   // 查询词覆盖度（语料内可达词口径）
+	Margin     float64 `json:"margin"`     // (top1-top2)/top1：候选区分度代理，0..1
+	DeadRate   float64 `json:"dead_rate"`  // 死路/取样：翻过多少空文档
+	Windows    int     `json:"windows"`    // 最终窗口数
+	Confidence float64 `json:"confidence"` // 上三项的加权组合（DraftConfidence）
 }
 
 // gatherSignals 从 context 采集路由信号。
@@ -470,15 +470,19 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	}
 	if opts.Reuse != nil {
 		// 复用查（evidence 前）与复用记（account 后）成对出现：
-		// 只查不记，第二次永远冷；只记不查，记了白记
-		stages = []flow.Stage{
-			stages[0],
-			ReuseStage{Session: opts.Session, Store: opts.Reuse, Query: query},
-			stages[1],
-			stages[2],
-			stages[3],
-			stages[4],
+		// 只查不记，第二次永远冷；只记不查，记了白记。
+		// **按名字定位插入，不用下标**：这个列表吃过下标硬编码的亏——
+		// Evict/Escalate 插入后按旧下标重建，合成与记账两个 stage 被
+		// 静默丢掉（配了复用的流程全在无声跳过合成），HTTP 面首测才
+		// 暴露。按名字插，以后再加 stage 也不会错位。
+		expanded := make([]flow.Stage, 0, len(stages)+1)
+		for _, st := range stages {
+			if st.Name() == (EvidenceStage{}).Name() {
+				expanded = append(expanded, ReuseStage{Session: opts.Session, Store: opts.Reuse, Query: query})
+			}
+			expanded = append(expanded, st)
 		}
+		stages = expanded
 	}
 	if opts.LearnEnabled {
 		stages = append(stages, LearnStage{Enabled: true})

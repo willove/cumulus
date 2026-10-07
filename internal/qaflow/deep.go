@@ -19,9 +19,9 @@ var KeyCoverage = context.NewKey[CoverageInfo]("evidence.coverage")
 // CoverageInfo 是词面覆盖的完整记录：值 + 语料外词（任何窗口都覆盖不了
 // 的词——单独上报，它是查询与语料错配的信号，不是覆盖度的扣分项）。
 type CoverageInfo struct {
-	Value float64
-	Terms []string // 可达词表（语料内出现过的查询词）——驱逐后重算覆盖度用
-	OOV   []string
+	Value float64  `json:"value"`
+	Terms []string `json:"terms,omitempty"` // 可达词表（语料内出现过的查询词）
+	OOV   []string `json:"out_of_corpus_terms,omitempty"`
 }
 
 // KeyDeep 是深循环遥测的挂点：跑了几轮、取过多少文档、几条死路、

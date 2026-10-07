@@ -26,8 +26,8 @@ var KeyRerank = context.NewKey[RerankState]("evidence.rerank")
 
 // RerankState 是重排审计记录。
 type RerankState struct {
-	Applied bool
-	Reason  string // skipped 的原因；applied 时为空
+	Applied bool   `json:"applied"`
+	Reason  string `json:"reason,omitempty"` // skipped 的原因；applied 时为空
 }
 
 // SemanticRerank 是语义重排组件：只要求 embed.embedder 绑着。绑了，

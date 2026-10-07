@@ -12,12 +12,12 @@ var KeyEscalation = context.NewKey[EscalationRecord]("route.escalation")
 
 // EscalationRecord 记录一次升级执行。
 type EscalationRecord struct {
-	Triggered bool   // 路由是否判了 escalate
-	Executed  bool   // 是否真跑了贵路（有执行处且判了 escalate）
-	Before    string // 升级前动作
-	After     string // 升级后重判的动作（未执行则同 Before）
-	Windows   int    // 升级后的窗口数
-	Reason    string // 没执行的原因（无执行处配装等）
+	Triggered bool   `json:"triggered"` // 路由是否判了 escalate
+	Executed  bool   `json:"executed"`  // 是否真跑了贵路（有执行处且判了 escalate）
+	Before    string `json:"before"`    // 升级前动作
+	After     string `json:"after"`     // 升级后重判的动作（未执行则同 Before）
+	Windows   int    `json:"windows"`   // 升级后的窗口数
+	Reason    string `json:"reason,omitempty"`
 }
 
 // EscalateStage 是升级的执行处（BioHarness 级联：便宜快路 → 充足性

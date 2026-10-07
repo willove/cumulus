@@ -521,6 +521,32 @@ unclassified。**route-error 77 题是下一个明确的改进点**：escalate �
 重判 fast → 合成拿升级窗口）+ 4 个测试（触发执行/低疑作答/空手拒答/
 未触发空过）+ 文法 §2.3。
 
+## 三·补十八、HTTP 面落地 + 一个被它抓出来的真 bug（2026-10-08）
+
+**语料进 store**（补上“检索从 store 装语料”的欠账）：`internal/corpus`
+——Save/Load/ImportFile/ImportDir，索引是语料的投影，重启后从 store
+重建，不需要重新导入。store.Port 加 ListIDs（窄接口新方法有流程需求：
+语料枚举；没有它语料只能活在导入进程的内存里）。
+
+**HTTP 面**（`internal/api` + `cumulus serve`）：三个端点，
+/v1/qa 一次问答返回**完整 committed view**——答案只是其中一个字段，
+路由判定（含信号）、升级执行、复用决定、覆盖度（含语料外词）、驱逐账、
+重排决定、窗口、用量全部回传。契约由 7 个 httptest 测试钉死（全字段在
+场/拒答是 200/同会话复用/坏请求 4xx/health 报语料量/status 组件面/
+方法 405）。
+
+**HTTP 面首测就抓出一个真 bug，后果严重**：qaflow 的复用分支按**硬编码
+下标**重建 stage 列表（stages[0..4]）——Evict/Escalate 插入后列表已是
+7 项，stages[5]（合成）与 stages[6]（记账）被**静默丢掉**。凡配了复用的
+流程全部在无声跳过合成和记账（HTTP 响应里答案空、usage 全零才暴露）。
+修法：按 stage 名字定位插入（EvidenceStage 前插 ReuseStage），与未来插
+入无关；回归测试 TestReuseConfigDoesNotDropStages 钉死“复用配置不许改
+变 stage 集合其余部分”。
+
+真服务验收（127.0.0.1:8485）：health 报语料 3 篇；第一问 cold → 答案+
+引用+完整遥测；第二问同会话 reuse hit=true 同答案；无证据问句 → refused
+（200，答案空，路由 refuse 留痕）；坏 JSON/空问题 → 400 带 error。
+
 ## 四、现在的样子（2026-10-08）
 
 ```

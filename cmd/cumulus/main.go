@@ -6,13 +6,17 @@ import (
 	gocontext "context"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 
+	"github.com/willove/cumulus/internal/api"
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
+	"github.com/willove/cumulus/internal/store"
 )
 
 func main() {
@@ -34,6 +38,8 @@ func run(args []string) error {
 		return runEval(gocontext.Background())
 	case "learn":
 		return runLearn(gocontext.Background())
+	case "serve":
+		return runServe(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q; usage: cumulus selftest | cumulus eval | cumulus learn", args[0])
 	}
@@ -237,4 +243,59 @@ func idxDoc(id string) (string, error) {
 		return "", fmt.Errorf("unknown doc %s", id)
 	}
 	return d.Body, nil
+}
+
+// runServe 起 HTTP 面：语料从 store 装（空了就从 -corpus 导入），零件
+// 按 flag 装配，/v1/qa 一次问答返回完整 committed view。
+func runServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	listen := fs.String("listen", "127.0.0.1:8485", "listen address")
+	data := fs.String("data", "", "store directory (empty = in-memory)")
+	corpusDir := fs.String("corpus", "", "directory with .jsonl files to import when the store is empty")
+	synthFlag := fs.String("synth", "offline", "synthesis backend: offline | llm")
+	embedFlag := fs.String("embed", "off", "embedding backend: off | minilm")
+	topk := fs.Int("topk", 3, "retrieval top-k")
+	width := fs.Int("width", 160, "evidence window width (runes)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	st, err := store.Open(*data, *data == "")
+	if err != nil {
+		return err
+	}
+	ctx := gocontext.Background()
+	docs, err := corpus.Load(ctx, st)
+	if err != nil {
+		return err
+	}
+	if len(docs) == 0 && *corpusDir != "" {
+		n, err := corpus.ImportDir(ctx, st, *corpusDir)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("corpus: imported %d docs from %s\n", n, *corpusDir)
+		docs, err = corpus.Load(ctx, st)
+		if err != nil {
+			return err
+		}
+	}
+	if len(docs) == 0 {
+		return fmt.Errorf("serve: store is empty and no -corpus given; nothing to answer from")
+	}
+	synthFn, synthLabel, err := pickSynth(*synthFlag)
+	if err != nil {
+		return err
+	}
+	srv := api.New(retrieval.Build(docs), synthFn, *topk, *width)
+	if *embedFlag == "minilm" {
+		embFn, _, err := pickEmbed(*embedFlag)
+		if err != nil {
+			return err
+		}
+		srv.Embedder = embFn()
+		srv.Escalate = qaflow.BM25DeepEvidence(srv.Index, *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+	}
+	fmt.Printf("serve: corpus=%d docs synth=%s embed=%s listen=%s\n", len(docs), synthLabel, *embedFlag, *listen)
+	fmt.Printf("serve: POST /v1/qa {question, session?} · GET /v1/health · GET /v1/status\n")
+	return http.ListenAndServe(*listen, srv.Handler())
 }

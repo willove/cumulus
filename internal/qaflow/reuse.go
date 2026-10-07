@@ -13,8 +13,8 @@ var KeyReuseState = context.NewKey[ReuseState]("knowledge.reuse.state")
 
 // ReuseState 是复用查的结果。
 type ReuseState struct {
-	Hit    bool
-	Reason string // 未命中的原因
+	Hit    bool   `json:"hit"`
+	Reason string `json:"reason,omitempty"` // 未命中的原因
 }
 
 // ReuseStage 在 evidence 前查会话复用：命中就直接用上轮窗口，本问不再
