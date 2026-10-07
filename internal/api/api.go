@@ -97,7 +97,10 @@ type QAResponse struct {
 	Reason    string                  `json:"refusal_reason,omitempty"`
 	Citations []string                `json:"citations"`
 	Analysis  AnalysisView            `json:"analysis"`
-	Prior     []PriorView             `json:"prior,omitempty"` // 空 = 未开多信号重排
+	Prior     []PriorView             `json:"prior,omitempty"`     // 空 = 未开多信号重排
+	Facts     []FactView              `json:"facts,omitempty"`     // 事实分解与逐条覆盖
+	Conflicts []ConflictView          `json:"conflicts,omitempty"` // 证据一致性门：同事实不同值
+	Abstain   *AbstainView            `json:"abstain,omitempty"`   // 零 LLM 失败预测头裁决
 	Route     RouteView               `json:"route"`
 	Escalate  qaflow.EscalationRecord `json:"escalation"`
 	Reuse     qaflow.ReuseState       `json:"reuse"`
@@ -145,6 +148,30 @@ type PriorView struct {
 	Score   float64            `json:"score"`
 	Signals map[string]float64 `json:"signals"`
 	Title   string             `json:"title,omitempty"`
+}
+
+// FactView 是一条事实的覆盖判定（答案全不全，逐条可查）。
+type FactView struct {
+	ID       string  `json:"id"`
+	Query    string  `json:"query"`
+	Covered  bool    `json:"covered"`
+	NearMiss float64 `json:"near_miss,omitempty"`
+	SourceID string  `json:"source_id,omitempty"`
+	Span     string  `json:"span,omitempty"`
+}
+
+// ConflictView 是同事实两窗给不同的数的冲突（证据一致性门产出）。
+type ConflictView struct {
+	FactID    string   `json:"fact_id"`
+	Values    []string `json:"values"`
+	SourceIDs []string `json:"source_ids"`
+}
+
+// AbstainView 是失败预测头的裁决（p_fail 与动作）。
+type AbstainView struct {
+	PFail  float64 `json:"p_fail"`
+	Action string  `json:"action"`
+	Reason string  `json:"reason,omitempty"`
 }
 
 type WindowView struct {
@@ -238,6 +265,19 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	}
 	if an, ok := context.Get(c, qaflow.KeyAnalysis); ok {
 		resp.Analysis = AnalysisView{Intent: an.Intent, Primary: an.Primary, OOV: an.OOV, Score: an.Score}
+	}
+	if fx, ok := context.Get(c, qaflow.KeyFactReport); ok {
+		for _, f := range fx.Facts {
+			resp.Facts = append(resp.Facts, FactView{ID: f.ID, Query: f.Query, Covered: f.Covered, NearMiss: f.NearMiss, SourceID: f.SourceID, Span: f.Span})
+		}
+	}
+	if cs, ok := context.Get(c, qaflow.KeyConflicts); ok {
+		for _, x := range cs {
+			resp.Conflicts = append(resp.Conflicts, ConflictView{FactID: x.FactID, Values: x.Values, SourceIDs: x.SourceIDs})
+		}
+	}
+	if v, ok := context.Get(c, qaflow.KeyAbstain); ok {
+		resp.Abstain = &AbstainView{PFail: v.PFail, Action: v.Action, Reason: v.Reason}
 	}
 	if ps, ok := context.Get(c, qaflow.KeyPrior); ok {
 		for _, p := range ps {

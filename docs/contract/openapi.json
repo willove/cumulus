@@ -1,6 +1,24 @@
 {
   "components": {
     "schemas": {
+      "AbstainView": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "p_fail": {
+            "type": "number"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "p_fail"
+        ],
+        "type": "object"
+      },
       "AnalysisView": {
         "properties": {
           "intent": {
@@ -23,6 +41,31 @@
           "intent",
           "primary",
           "score"
+        ],
+        "type": "object"
+      },
+      "ConflictView": {
+        "properties": {
+          "fact_id": {
+            "type": "string"
+          },
+          "source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "fact_id",
+          "source_ids",
+          "values"
         ],
         "type": "object"
       },
@@ -120,6 +163,34 @@
         ],
         "type": "object"
       },
+      "FactView": {
+        "properties": {
+          "covered": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "near_miss": {
+            "type": "number"
+          },
+          "query": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "span": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "covered",
+          "id",
+          "query"
+        ],
+        "type": "object"
+      },
       "HealthResponse": {
         "properties": {
           "corpus_docs": {
@@ -212,6 +283,9 @@
       },
       "QAResponse": {
         "properties": {
+          "abstain": {
+            "$ref": "#/components/schemas/AbstainView"
+          },
           "analysis": {
             "$ref": "#/components/schemas/AnalysisView"
           },
@@ -224,6 +298,12 @@
             },
             "type": "array"
           },
+          "conflicts": {
+            "items": {
+              "$ref": "#/components/schemas/ConflictView"
+            },
+            "type": "array"
+          },
           "coverage": {
             "$ref": "#/components/schemas/CoverageView"
           },
@@ -232,6 +312,12 @@
           },
           "eviction": {
             "$ref": "#/components/schemas/EvictionView"
+          },
+          "facts": {
+            "items": {
+              "$ref": "#/components/schemas/FactView"
+            },
+            "type": "array"
           },
           "prior": {
             "items": {
@@ -317,11 +403,23 @@
           "confidence": {
             "type": "number"
           },
+          "conflicts": {
+            "type": "integer"
+          },
           "coverage": {
             "type": "number"
           },
           "dead_rate": {
             "type": "number"
+          },
+          "facts_covered": {
+            "type": "integer"
+          },
+          "facts_k": {
+            "type": "integer"
+          },
+          "facts_missing": {
+            "type": "integer"
           },
           "gap_thin": {
             "type": "boolean"
@@ -335,8 +433,12 @@
         },
         "required": [
           "confidence",
+          "conflicts",
           "coverage",
           "dead_rate",
+          "facts_covered",
+          "facts_k",
+          "facts_missing",
           "gap_thin",
           "margin",
           "windows"

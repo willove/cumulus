@@ -14,6 +14,9 @@ export interface QAResponse {
   citations: string[];
   analysis: AnalysisView;
   prior?: PriorView[];
+  facts?: FactView[];
+  conflicts?: ConflictView[];
+  abstain?: AbstainView;
   route: RouteView;
   escalation: EscalationRecord;
   reuse: ReuseState;
@@ -38,6 +41,27 @@ export interface PriorView {
   title?: string;
 }
 
+export interface FactView {
+  id: string;
+  query: string;
+  covered: boolean;
+  near_miss?: number;
+  source_id?: string;
+  span?: string;
+}
+
+export interface ConflictView {
+  fact_id: string;
+  values: string[];
+  source_ids: string[];
+}
+
+export interface AbstainView {
+  p_fail: number;
+  action: string;
+  reason?: string;
+}
+
 export interface RouteView {
   action: string;
   reason: string;
@@ -51,6 +75,10 @@ export interface RouteSignals {
   windows: number;
   confidence: number;
   gap_thin: boolean;
+  facts_k: number;
+  facts_covered: number;
+  facts_missing: number;
+  conflicts: number;
 }
 
 export interface EscalationRecord {

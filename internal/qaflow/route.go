@@ -1,0 +1,153 @@
+package qaflow
+
+import (
+	"fmt"
+
+	"github.com/willove/cumulus/internal/context"
+)
+
+// 路由判定（sufficiency-route stage）从 qa.go 拆出：路由是"要不要升级、
+// 要不要拒答"的专职判定，输入族（覆盖/事实/冲突/置信）各自可观测。
+
+func (RouteStage) Name() string { return "sufficiency-route" }
+func (RouteStage) Reads() []string {
+	return []string{KeyWindows.String(), KeyCoverage.String(), KeyDeep.String(), KeyFactReport.String(), KeyConflicts.String()}
+}
+func (RouteStage) Writes() []string { return []string{KeyRoute.String()} }
+
+// gammaStep 每多一条事实，升级线抬高的一格（cumulus B10 同值）：多事实
+// 问句要 proportionally 更多的信心才许停在快路。上限相对基线（+3 格、
+// 0.95 封顶）——绝对上限在抬高后的基线下会静默把线拉低。
+const gammaStep = 0.05
+
+// thresholdFor 按意图形状调升级线（fact 数量）。
+func thresholdFor(base float64, factsK int) float64 {
+	thr := base
+	cap := thr + 3*gammaStep
+	if cap > 0.95 {
+		cap = 0.95
+	}
+	extra := factsK - 1
+	if extra > 3 {
+		extra = 3
+	}
+	thr += gammaStep * float64(extra)
+	if thr > cap {
+		thr = cap
+	}
+	return thr
+}
+
+func (s RouteStage) Run(c *context.Context) error {
+	ws, _ := context.Get(c, KeyWindows)
+	grounded := len(ws) > 0
+	sig := gatherSignals(c, ws)
+
+	d := RouteDecision{Grounded: grounded, Signals: sig}
+	base := s.MinConfidence
+	if base <= 0 {
+		base = 0.5
+	}
+	threshold := thresholdFor(base, max(1, sig.FactsK))
+	switch {
+	case !grounded:
+		d.Action = "refuse" // 没有证据：诚实的不知道，不许硬答
+		d.Reason = "no evidence window; refuse by grammar"
+	case sig.Conflicts > 0:
+		// 证据一致性门（cumulus：contested 的先验必须重搜，不许当普通
+		// 答案服务）——同事实两窗给不同的数，升级让贵路再来
+		d.Action = "escalate"
+		d.Reason = fmt.Sprintf("%d evidence conflicts on the same fact (same fact, different values); re-search mandated",
+			sig.Conflicts)
+	case sig.FactsMissing > 0 && sig.FactsK > 1:
+		// 多事实问句有事实缺口（cumulus：!Complete && len(fx)>1 才升级；
+		// 单事实的缺口已被覆盖度信号管着，不重复升级）
+		d.Action = "escalate"
+		d.Reason = fmt.Sprintf("%d/%d facts uncovered (missing %d); escalate",
+			sig.FactsMissing, sig.FactsK, sig.FactsMissing)
+	case sig.Confidence < threshold:
+		d.Action = "escalate"
+		d.Reason = fmt.Sprintf("draft confidence %.3f below %.3f (coverage=%.3f margin=%.3f dead-rate=%.3f, facts %d/%d); escalate",
+			sig.Confidence, threshold, sig.Coverage, sig.Margin, sig.DeadRate, sig.FactsCovered, sig.FactsK)
+	default:
+		d.Action = "fast"
+		d.Reason = fmt.Sprintf("draft confidence %.3f (coverage=%.3f margin=%.3f, facts %d/%d)",
+			sig.Confidence, sig.Coverage, sig.Margin, sig.FactsCovered, sig.FactsK)
+	}
+	return context.Set(c, KeyRoute, d)
+}
+
+// RouteSignals 是充足性路由的全部输入事实。全部来自流程内的可观测状态：
+// 覆盖度（evidence.coverage）、区分度（窗口打分的头部分差）、死路率
+// （deep 遥测）。没有调用方手填的数——手填置信度正是要修掉的旧形态。
+type RouteSignals struct {
+	Coverage   float64 `json:"coverage"`   // 查询词覆盖度（语料内可达词口径）
+	Margin     float64 `json:"margin"`     // (top1-top2)/top1：候选区分度代理，0..1
+	DeadRate   float64 `json:"dead_rate"`  // 死路/取样：翻过多少空文档
+	Windows    int     `json:"windows"`    // 最终窗口数
+	Confidence float64 `json:"confidence"` // 上三项的加权组合（DraftConfidence）
+	GapThin    bool    `json:"gap_thin"`   // 词汇鸿沟折扣是否生效（审计用）
+	// 事实族（cumulus 的准确定义：事实点全盖）
+	FactsK       int `json:"facts_k"`       // 拆出几条事实
+	FactsCovered int `json:"facts_covered"` // 盖到几条
+	FactsMissing int `json:"facts_missing"` // 没盖几条
+	Conflicts    int `json:"conflicts"`     // 证据冲突数（同事实不同值）
+}
+
+// gatherSignals 从 context 采集路由信号。
+func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
+	sig := RouteSignals{Windows: len(ws)}
+	if ci, ok := context.Get(c, KeyCoverage); ok {
+		sig.Coverage = ci.Value
+	}
+	if len(ws) >= 2 && ws[0].Score > 0 {
+		sig.Margin = (ws[0].Score - ws[1].Score) / ws[0].Score
+		if sig.Margin < 0 {
+			sig.Margin = 0
+		}
+		if sig.Margin > 1 {
+			sig.Margin = 1
+		}
+	}
+	if tel, ok := context.Get(c, KeyDeep); ok && tel.SampledDocs > 0 {
+		sig.DeadRate = float64(tel.DeadEnds) / float64(tel.SampledDocs)
+	}
+	// 词汇鸿沟折扣：内容词几乎全党外时覆盖度再高也是假象——垃圾二元组
+	// 总能凑出"有据可查"（真跑教训：问"养狗叫得太吵"，得太/谁管两个
+	// 垃圾二元组匹配到垃圾文档，路由判 fast，词汇桥永远不出场）。稀薄
+	// → 置信度减半，逼升级走桥。
+	if rep, ok := context.Get(c, KeyFactReport); ok {
+		sig.FactsK = rep.K
+		sig.FactsCovered = rep.K - len(rep.Missing)
+		sig.FactsMissing = len(rep.Missing)
+	}
+	if cs, ok := context.Get(c, KeyConflicts); ok {
+		sig.Conflicts = len(cs)
+	}
+	// 词汇鸿沟折扣：内容词几乎全党外时覆盖度再高也是假象——垃圾二元组
+	// 总能凑出"有据可查"（真跑教训：问"养狗叫得太吵"，得太/谁管两个
+	// 垃圾二元组匹配到垃圾文档，路由判 fast，词汇桥永远不出场）。稀薄
+	// → 置信度减半，逼升级走桥。**注意：事实族必须先填再走这个早退
+	// （曾经的 bug：早退在事实填充之前，稀薄查询的信号族全是 0）**
+	if an, ok := context.Get(c, KeyAnalysis); ok && an.Thin(2, 2.0) {
+		sig.Confidence = DraftConfidence(sig) * 0.5
+		sig.GapThin = true
+		return sig
+	}
+	sig.Confidence = DraftConfidence(sig)
+	return sig
+}
+
+// DraftConfidence 权重公开可审：覆盖度 0.5（证据到没到位的直接度量）、
+// 区分度 0.3（top 与次席分不开 = 没把握）、死路率 0.2（翻过多少空文档，
+// 取负）。权重不是魔数，是默认值——改它要走评测对照，不靠感觉。
+func DraftConfidence(sig RouteSignals) float64 {
+	conf := 0.5*sig.Coverage + 0.3*sig.Margin + 0.2*(1-sig.DeadRate)
+	if conf < 0 {
+		return 0
+	}
+	if conf > 1 {
+		return 1
+	}
+	return conf
+}

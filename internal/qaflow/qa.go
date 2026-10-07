@@ -12,9 +12,11 @@ import (
 
 	gocontext "context"
 
+	"github.com/willove/cumulus/internal/abstain"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/prior"
@@ -31,11 +33,19 @@ var (
 	// KeyPriorOn 是文档级多信号重排的开关（Options.Prior 的传播）。
 	KeyPriorOn = context.NewKey[bool]("qa.prior.on")
 	// KeyPrior 是 prior 的逐文档信号（开了才有；响应露出，取舍可查）。
-	KeyPrior   = context.NewKey[[]prior.FileScore]("qa.prior.signals")
-	KeyWindows = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
-	KeyRoute   = context.NewKey[RouteDecision]("qa.route")
-	KeyAnswer  = context.NewKey[Answer]("qa.answer")
-	KeyUsage   = context.NewKey[Usage]("qa.usage")
+	KeyPrior = context.NewKey[[]prior.FileScore]("qa.prior.signals")
+	// KeyFacts / KeyFactReport 是事实分解与事实覆盖（cumulus 的准确定
+	// 义：事实点全盖）。查询侧拆事实，证据侧逐条判盖到没有。
+	KeyFacts      = context.NewKey[[]facts.Fact]("qa.facts")
+	KeyFactReport = context.NewKey[facts.Report]("qa.fact.report")
+	// KeyAbstain 是零 LLM 失败预测头的裁决。
+	KeyAbstain = context.NewKey[abstain.Verdict]("qa.abstain")
+	// KeyConflicts 是证据一致性门的冲突列表（同事实两窗给不同的数）。
+	KeyConflicts = context.NewKey[[]facts.Conflict]("qa.evidence.conflicts")
+	KeyWindows   = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
+	KeyRoute     = context.NewKey[RouteDecision]("qa.route")
+	KeyAnswer    = context.NewKey[Answer]("qa.answer")
+	KeyUsage     = context.NewKey[Usage]("qa.usage")
 	// KeySynthUsage 是合成步记下的用量。记账步只读它——账目和发生额
 	// 是同一个来源，不许两处各写一份。
 	KeySynthUsage = context.NewKey[Usage]("qa.synthesis.usage")
@@ -114,11 +124,13 @@ func (RewriteStage) Reads() []string { return []string{"session"} }
 func (RewriteStage) Writes() []string {
 	// KeyPriorOn 必须申报：禁闭纪律下，写了不申报的键在 stage 结束就不可
 	// 见（本轮真跑踩过——prior 开了却全程静默，就是漏申报）
-	return []string{KeyRewrite.String(), KeyAnalysis.String(), KeyPriorOn.String()}
+	return []string{KeyRewrite.String(), KeyAnalysis.String(), KeyPriorOn.String(), KeyFacts.String()}
 }
 func (s RewriteStage) Run(c *context.Context) error {
 	rw := Rewrite{Original: s.Query, Hypothetical: s.Hypothetical}
 	_ = context.Set(c, KeyPriorOn, s.Prior)
+	// 事实分解（规则版）：查询没声明清单就 K=1——宁漏勿切
+	_ = context.Set(c, KeyFacts, facts.Decompose(s.Query))
 	if s.Analyze != nil {
 		if err := context.Set(c, KeyAnalysis, s.Analyze(s.Query)); err != nil {
 			return err
@@ -215,94 +227,6 @@ type RouteStage struct {
 	MinConfidence float64
 }
 
-func (RouteStage) Name() string { return "sufficiency-route" }
-func (RouteStage) Reads() []string {
-	return []string{KeyWindows.String(), KeyCoverage.String(), KeyDeep.String()}
-}
-func (RouteStage) Writes() []string { return []string{KeyRoute.String()} }
-
-func (s RouteStage) Run(c *context.Context) error {
-	ws, _ := context.Get(c, KeyWindows)
-	grounded := len(ws) > 0
-	sig := gatherSignals(c, ws)
-
-	d := RouteDecision{Grounded: grounded, Signals: sig}
-	threshold := s.MinConfidence
-	if threshold <= 0 {
-		threshold = 0.5
-	}
-	switch {
-	case !grounded:
-		d.Action = "refuse" // 没有证据：诚实的不知道，不许硬答
-		d.Reason = "no evidence window; refuse by grammar"
-	case sig.Confidence < threshold:
-		d.Action = "escalate"
-		d.Reason = fmt.Sprintf("draft confidence %.3f below %.3f (coverage=%.3f margin=%.3f dead-rate=%.3f); escalate",
-			sig.Confidence, threshold, sig.Coverage, sig.Margin, sig.DeadRate)
-	default:
-		d.Action = "fast"
-		d.Reason = fmt.Sprintf("draft confidence %.3f (coverage=%.3f margin=%.3f)",
-			sig.Confidence, sig.Coverage, sig.Margin)
-	}
-	return context.Set(c, KeyRoute, d)
-}
-
-// RouteSignals 是充足性路由的全部输入事实。全部来自流程内的可观测状态：
-// 覆盖度（evidence.coverage）、区分度（窗口打分的头部分差）、死路率
-// （deep 遥测）。没有调用方手填的数——手填置信度正是要修掉的旧形态。
-type RouteSignals struct {
-	Coverage   float64 `json:"coverage"`   // 查询词覆盖度（语料内可达词口径）
-	Margin     float64 `json:"margin"`     // (top1-top2)/top1：候选区分度代理，0..1
-	DeadRate   float64 `json:"dead_rate"`  // 死路/取样：翻过多少空文档
-	Windows    int     `json:"windows"`    // 最终窗口数
-	Confidence float64 `json:"confidence"` // 上三项的加权组合（DraftConfidence）
-	GapThin    bool    `json:"gap_thin"`   // 词汇鸿沟折扣是否生效（审计用）
-}
-
-// gatherSignals 从 context 采集路由信号。
-func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
-	sig := RouteSignals{Windows: len(ws)}
-	if ci, ok := context.Get(c, KeyCoverage); ok {
-		sig.Coverage = ci.Value
-	}
-	if len(ws) >= 2 && ws[0].Score > 0 {
-		sig.Margin = (ws[0].Score - ws[1].Score) / ws[0].Score
-		if sig.Margin < 0 {
-			sig.Margin = 0
-		}
-		if sig.Margin > 1 {
-			sig.Margin = 1
-		}
-	}
-	if tel, ok := context.Get(c, KeyDeep); ok && tel.SampledDocs > 0 {
-		sig.DeadRate = float64(tel.DeadEnds) / float64(tel.SampledDocs)
-	}
-	// 词汇鸿沟折扣：内容词几乎全党外时覆盖度再高也是假象——垃圾二元组
-	// 总能凑出"有据可查"（真跑教训：问"养狗叫得太吵"，得太/谁管两个
-	// 垃圾二元组匹配到垃圾文档，路由判 fast，词汇桥永远不出场）。稀薄
-	// → 置信度减半，逼升级走桥。
-	if an, ok := context.Get(c, KeyAnalysis); ok && an.Thin(2, 2.0) {
-		sig.Confidence = DraftConfidence(sig) * 0.5
-		sig.GapThin = true
-		return sig
-	}
-	sig.Confidence = DraftConfidence(sig)
-	return sig
-}
-
-// DraftConfidence 权重公开可审：覆盖度 0.5（证据到没到位的直接度量）、
-// 区分度 0.3（top 与次席分不开 = 没把握）、死路率 0.2（翻过多少空文档，
-// 取负）。权重不是魔数，是默认值——改它要走评测对照，不靠感觉。
-func DraftConfidence(sig RouteSignals) float64 {
-	conf := 0.5*sig.Coverage + 0.3*sig.Margin + 0.2*(1-sig.DeadRate)
-	if conf < 0 {
-		return 0
-	}
-	if conf > 1 {
-		return 1
-	}
-	return conf
-}
 func (RouteStage) Verify(c *context.Context) error {
 	d, ok := context.Get(c, KeyRoute)
 	if !ok {
@@ -339,8 +263,10 @@ type SynthesizeStage struct {
 	GroundingFloor float64 // 0 = 不启用语义尺（缺 embedder 时的默认）
 }
 
-func (SynthesizeStage) Name() string     { return "synthesize" }
-func (SynthesizeStage) Reads() []string  { return []string{KeyWindows.String(), KeyRoute.String()} }
+func (SynthesizeStage) Name() string { return "synthesize" }
+func (SynthesizeStage) Reads() []string {
+	return []string{KeyWindows.String(), KeyRoute.String(), KeyAbstain.String()}
+}
 func (SynthesizeStage) Writes() []string { return []string{KeyAnswer.String(), KeySynthUsage.String()} }
 func (s SynthesizeStage) Run(c *context.Context) error {
 	d, ok := context.Get(c, KeyRoute)
@@ -349,6 +275,11 @@ func (s SynthesizeStage) Run(c *context.Context) error {
 	}
 	if d.Action == "refuse" {
 		return context.Set(c, KeyAnswer, Answer{Refused: true, Text: ""})
+	}
+	// abstain 早弃权：预测头说这题答不了（无样本 + 高 p_fail）——不烧
+	// DEEP，直接拒（cumulus：这类题升级是纯燃烧）。理由带出来可查。
+	if v, ok := context.Get(c, KeyAbstain); ok && v.Action == "refuse" && d.Action != "refuse" {
+		return context.Set(c, KeyAnswer, Answer{Refused: true, Text: "", RefusalReason: v.Reason})
 	}
 	if s.Synth == nil {
 		return errors.New("no synthesizer wired: refusing to emit an uncited answer (misconfiguration fails loud)")
@@ -494,11 +425,23 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	stages := []flow.Stage{
 		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx, Analyze: opts.Analyzer, Prior: opts.Prior},
 		EvidenceStage{Retrieve: retrieve},
+		FactsStage{}, // 事实覆盖 + 一致性门（恒注册：这是"答得全不全"的
+		// 判据，不是可选件；注不注册由上面的 list 说话，不设空壳）
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
 		EscalateStage{Retrieve: opts.Escalate, Expand: opts.Expander, Analyze: opts.Analyzer, Weighted: opts.WeightedRetrieve},
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
+	}
+	if opts.Abstain != nil {
+		withAbstain := make([]flow.Stage, 0, len(stages)+1)
+		for _, st := range stages {
+			withAbstain = append(withAbstain, st)
+			if st.Name() == (RouteStage{}).Name() {
+				withAbstain = append(withAbstain, AbstainStage{Head: opts.Abstain})
+			}
+		}
+		stages = withAbstain
 	}
 	if opts.Reuse != nil {
 		// 复用查（evidence 前）与复用记（account 后）成对出现：
@@ -518,6 +461,16 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	}
 	if opts.LearnEnabled {
 		stages = append(stages, LearnStage{Enabled: true})
+	}
+	if opts.Abstain != nil {
+		withAbstain := make([]flow.Stage, 0, len(stages)+1)
+		for _, st := range stages {
+			withAbstain = append(withAbstain, st)
+			if st.Name() == (RouteStage{}).Name() {
+				withAbstain = append(withAbstain, AbstainStage{Head: opts.Abstain})
+			}
+		}
+		stages = withAbstain
 	}
 	if opts.Reuse != nil {
 		stages = append(stages, ReuseRecordStage{Session: opts.Session, Store: opts.Reuse, Query: query})
@@ -560,6 +513,8 @@ type Options struct {
 	// WeightedRetrieve 按词权取数（鸿沟扩展后的加权重取）；nil = 扩展
 	// 无执行处，退化普通贵路。
 	WeightedRetrieve func(weights map[string]float64) ([]EvidenceWindow, error)
+	// Abstain 零 LLM 失败预测头（早弃权/强升级）；nil = 不启用。
+	Abstain *abstain.Head
 	// Prior 开文档级多信号重排（cumulus prior 移植：lexical 无长度归一
 	// + 标题 + 条文结构）。治 BM25 的短文档偏爱——答案在长法律里被短
 	// 解释压住的那类。cumulus 同款 opt-in（UsePrior），默认关，验完再

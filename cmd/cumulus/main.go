@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/willove/cumulus/internal/abstain"
 	"github.com/willove/cumulus/internal/api"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
@@ -260,6 +261,7 @@ func runServe(args []string) error {
 	embedFlag := fs.String("embed", "off", "embedding backend: off | minilm")
 	watchDir := fs.String("watch", "", "directory to watch for new files (txt/md/jsonl)")
 	priorOn := fs.Bool("prior", false, "document-level multi-signal rerank (cumulus prior: lexical without length norm + title + article struct)")
+	abstainOn := fs.Bool("abstain", false, "zero-LLM fail-prediction head (cumulus abstain: early refusal / forced escalation)")
 	topk := fs.Int("topk", 3, "retrieval top-k")
 	width := fs.Int("width", 160, "evidence window width (runes)")
 	if err := fs.Parse(args); err != nil {
@@ -310,6 +312,9 @@ func runServe(args []string) error {
 	idx := srv.Index()
 	srv.Options.Analyzer = func(q string) query.Analysis { return query.Analyze(q, idx, idx.N) }
 	srv.Options.Prior = *priorOn
+	if *abstainOn {
+		srv.Options.Abstain = abstain.Default() // 保守启发式权重（cumulus 同款取值）
+	}
 	if *synthFlag == "llm" {
 		client, err := llm.FromEnv(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_CHAT_MODEL"))
 		if err != nil {
