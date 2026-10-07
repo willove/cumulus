@@ -242,10 +242,13 @@ func (RouteStage) Verify(c *context.Context) error {
 
 // ---------- stage 4: 合成 ----------
 
-// SynthFunc 是合成面契约：问题 + 证据窗口 → 带引用的答案 + 用量。
+// SynthFunc 是合成面契约：问题 + 证据窗口 + **事实报告** → 带引用的
+// 答案 + 用量。事实报告进来，合成面才能按事实分组作答（Noesis：7B
+// 以下模型的瓶颈是上下文利用不是检索质量——平铺窗口列表让小模型丢失
+// "哪条事实有证据"，按事实分组是把结构喂到它嘴边）。
 // 离线确定性合成与 LLM 合成都实现它（internal/synth）；区别只在文本
 // 从哪来，契约不变：每个断言挂窗口，挂不上的不许存在。
-type SynthFunc func(question string, windows []EvidenceWindow) (Answer, Usage, error)
+type SynthFunc func(question string, windows []EvidenceWindow, fx facts.Report) (Answer, Usage, error)
 
 // SynthesizeStage 只读窗口与改写。路由是 refuse 时标记拒答、不调合成面；
 // 非拒答而没有合成面是配置错误，直接失败——不许悄悄产无证据文本。
@@ -285,7 +288,8 @@ func (s SynthesizeStage) Run(c *context.Context) error {
 		return errors.New("no synthesizer wired: refusing to emit an uncited answer (misconfiguration fails loud)")
 	}
 	ws, _ := context.Get(c, KeyWindows)
-	ans, usage, err := s.Synth(s.Query, ws)
+	fx, _ := context.Get(c, KeyFactReport)
+	ans, usage, err := s.Synth(s.Query, ws, fx)
 	if err != nil {
 		return err
 	}
@@ -433,6 +437,18 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
 	}
+	// 第二次事实判定：escalate 在驱逐**之后**又换过一轮窗，第一次判定
+	// （驱逐前）的 supports 指向的窗可能已被替换。合成前按**最终窗集**再
+	// 判一次——报告与合成面看到的事实一致（否则响应里"盖"了，合成看到
+	// 的窗集里却没有那个窗）。
+	rerun := make([]flow.Stage, 0, len(stages)+1)
+	for _, st := range stages {
+		rerun = append(rerun, st)
+		if st.Name() == (EscalateStage{}).Name() {
+			rerun = append(rerun, FactsStage{})
+		}
+	}
+	stages = rerun
 	if opts.Abstain != nil {
 		withAbstain := make([]flow.Stage, 0, len(stages)+1)
 		for _, st := range stages {

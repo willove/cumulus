@@ -12,6 +12,7 @@ import (
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
@@ -65,7 +66,7 @@ func (e *bm25Executor) grounding() float64 {
 }
 
 func (e *bm25Executor) synth() qaflow.SynthFunc {
-	return func(_ string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+	return func(_ string, ws []qaflow.EvidenceWindow, _ facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 		if len(ws) == 0 {
 			return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("extractive synth: no windows")
 		}

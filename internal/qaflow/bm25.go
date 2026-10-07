@@ -29,6 +29,11 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 			return nil, errors.New("bm25 evidence: nil index")
 		}
 		hits := retrieveWeighted(c, idx, r.Effective(), k, width)
+		// 多事实问句：逐事实取证据后并入（fan-out）。K=1 不进（整句即
+		// 事实，旧路径逐字节不变）
+		if fx, ok := context.Get(c, KeyFacts); ok && len(fx) >= 2 {
+			hits = mergeHits(hits, retrievePerFact(c, idx, fx, k, width))
+		}
 		// 语义重排（可选组件）：绑了 embedder 才走；没绑/失败都保序并留痕
 		hits, rerankState := rerankHits(c, hits, r.Effective(), maxRerankCompare)
 		if err := context.Set(c, KeyRerank, rerankState); err != nil {
@@ -106,4 +111,27 @@ func priorRerank(c *context.Context, idx *retrieval.Index, q string, a query.Ana
 		}
 		return 1.0 // 池外文档（不该出现）保底 1，不误伤
 	})
+}
+
+// mergeHits 合并两路窗口（按 docID+span 去重，原路在前）。fan-out 的
+// 窗可能与原路重复（同一条法条服务两条事实）——去重后由 facts 判定
+// 归属，一个窗可以同时支撑多条事实。
+func mergeHits(base, extra []retrieval.Hit) []retrieval.Hit {
+	if len(extra) == 0 {
+		return base
+	}
+	seen := map[string]bool{}
+	for _, h := range base {
+		seen[h.DocID+"#"+h.SpanCoord] = true
+	}
+	out := base
+	for _, h := range extra {
+		key := h.DocID + "#" + h.SpanCoord
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, h)
+	}
+	return out
 }

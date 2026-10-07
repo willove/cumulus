@@ -26,7 +26,7 @@ type EvictStage struct {
 
 func (EvictStage) Name() string { return "context-evict" }
 func (EvictStage) Reads() []string {
-	return []string{KeyWindows.String(), KeyRewrite.String()}
+	return []string{KeyWindows.String(), KeyRewrite.String(), KeyFactReport.String()}
 }
 func (EvictStage) Writes() []string {
 	return []string{KeyWindows.String(), KeyEviction.String(), KeyCoverage.String()}
@@ -57,6 +57,34 @@ func (s EvictStage) Run(c *context.Context) error {
 		in = append(in, ctxmgmt.Window{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
 	kept, log := ctxmgmt.Apply(in, vecs, s.Budget)
+	// 事实配额（驱逐按类配额——Volt 的驱逐策略在研究笔记里的位置）：每条
+	// 事实至少保底它的最优支撑窗。没有这条，fan-out 取来的证据会被通用
+	// 预算裁掉：事实报告（驱逐前算的）说"盖"，最终窗集里却没有那个窗，
+	// 合成面对着一盘没有答案的菜（真跑教训：专利期限两连问，两条事实都
+	// 判盖，答案窗被预算裁掉，模型答"未涉及年数"）。
+	if rep, ok := context.Get(c, KeyFactReport); ok {
+		keptKeys := map[string]bool{}
+		for _, w := range kept {
+			keptKeys[w.SourceID+"#"+w.Span] = true
+		}
+		for _, f := range rep.Facts {
+			if len(f.Supports) == 0 {
+				continue
+			}
+			best := f.Supports[0] // Supports 已按分降序
+			key := best.SourceID + "#" + best.Span
+			if keptKeys[key] {
+				continue
+			}
+			for _, w := range in { // 从驱逐前集合里找回来（保住原分数）
+				if w.SourceID+"#"+w.Span == key {
+					kept = append(kept, w)
+					keptKeys[key] = true
+					break
+				}
+			}
+		}
+	}
 	out := make([]EvidenceWindow, 0, len(kept))
 	for _, w := range kept {
 		out = append(out, EvidenceWindow{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score, Substrate: "text"})

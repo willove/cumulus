@@ -177,11 +177,11 @@
           "query": {
             "type": "string"
           },
-          "source_id": {
-            "type": "string"
-          },
-          "span": {
-            "type": "string"
+          "supports": {
+            "items": {
+              "$ref": "#/components/schemas/SupportView"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -484,6 +484,28 @@
           "escalate",
           "reuse",
           "synthesis"
+        ],
+        "type": "object"
+      },
+      "SupportView": {
+        "properties": {
+          "score": {
+            "type": "number"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "span": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "score",
+          "source_id",
+          "span"
         ],
         "type": "object"
       },

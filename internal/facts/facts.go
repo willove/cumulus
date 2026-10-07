@@ -18,19 +18,20 @@
 package facts
 
 import (
+	"github.com/willove/cumulus/internal/query"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 // Fact 是一条原子证据需求。
 type Fact struct {
-	ID       string  `json:"id"` // f1/f2…（覆盖按 id 报告）
-	Query    string  `json:"query"`
-	Covered  bool    `json:"covered"`
-	Score    float64 `json:"score,omitempty"`     // 支撑窗的分数（若有）
-	NearMiss float64 `json:"near_miss,omitempty"` // 未盖时的最好接进度
-	SourceID string  `json:"source_id,omitempty"`
-	Span     string  `json:"span,omitempty"`
+	ID       string   `json:"id"` // f1/f2…（覆盖按 id 报告）
+	Query    string   `json:"query"`
+	Covered  bool     `json:"covered"`
+	Score    float64  `json:"score,omitempty"`     // 最好支撑窗的分数
+	NearMiss float64  `json:"near_miss,omitempty"` // 未盖时的最好接进度
+	Supports []Window `json:"supports,omitempty"`  // 全部支撑窗（按分降序）
 }
 
 // Report 是事实覆盖状态。
@@ -167,8 +168,10 @@ func Evaluate(fx []Fact, ws []Window) Report {
 	weakest := 1.0
 	for i := range fx {
 		f := &fx[i]
-		kws := Fields(f.Query)
-		best, bestHit, near := -1, 0.0, 0.0
+		kws := contentFields(f.Query) // 内容词才算分母（胶水二元组不许
+		// 稀释占比——"是多少/多少"这类把 3/7 拖成 0.43 的真跑教训）
+		near := 0.0
+		var supports []Window
 		for j := range ws {
 			hit := hitRatio(kws, ws[j].Text)
 			if hit > near {
@@ -177,15 +180,13 @@ func Evaluate(fx []Fact, ws []Window) Report {
 			if hit < CoverHit || !corePresent(f.Query, ws[j].Text) {
 				continue
 			}
-			if best < 0 || hit > bestHit || (hit == bestHit && ws[j].Score > ws[best].Score) {
-				best, bestHit = j, hit
-			}
+			supports = append(supports, ws[j])
 		}
-		if best >= 0 {
+		sort.SliceStable(supports, func(a, b int) bool { return supports[a].Score > supports[b].Score })
+		f.Supports = supports
+		if len(supports) > 0 {
 			f.Covered = true
-			f.Score = ws[best].Score
-			f.SourceID = ws[best].SourceID
-			f.Span = ws[best].Span
+			f.Score = supports[0].Score
 		} else {
 			f.Covered = false
 			f.NearMiss = near
@@ -417,4 +418,35 @@ func intersects(a, b map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// contentFields 事实的内容词（ Fields 去掉沾胶水字符的二元组）。
+func contentFields(q string) []string {
+	raw := Fields(q)
+	out := make([]string, 0, len(raw))
+	for _, t := range raw {
+		if t == "" || query.IsGlue(t) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// SupportsOf 一条事实在给定窗集里的全部支撑（按分降序）。判定与
+// Evaluate 同口径（内容词占比 + 3 字核心）。合成面在**最终窗集**上现
+// 算分组，不信过期报告：报告里的 supports 可能指向被驱逐掉的窗，拿着
+// 过期归属喂模型，模型看到的就是"这条事实没有证据"（真跑踩过：分好组
+// 的窗全被裁剪，模型答"证据为空"还违了拒答契约）。
+func SupportsOf(f Fact, ws []Window) []Window {
+	kws := contentFields(f.Query)
+	var out []Window
+	for _, w := range ws {
+		if hitRatio(kws, w.Text) < CoverHit || !corePresent(f.Query, w.Text) {
+			continue
+		}
+		out = append(out, w)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
 }

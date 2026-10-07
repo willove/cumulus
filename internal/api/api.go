@@ -150,14 +150,22 @@ type PriorView struct {
 	Title   string             `json:"title,omitempty"`
 }
 
-// FactView 是一条事实的覆盖判定（答案全不全，逐条可查）。
+// FactView 是一条事实的覆盖判定与支撑证据（可溯证据路径：每个窗支撑
+// 哪条事实，逐窗可查——SUBQRAG 的 graph memory 在我们这里的露出）。
 type FactView struct {
-	ID       string  `json:"id"`
-	Query    string  `json:"query"`
-	Covered  bool    `json:"covered"`
-	NearMiss float64 `json:"near_miss,omitempty"`
-	SourceID string  `json:"source_id,omitempty"`
-	Span     string  `json:"span,omitempty"`
+	ID       string        `json:"id"`
+	Query    string        `json:"query"`
+	Covered  bool          `json:"covered"`
+	NearMiss float64       `json:"near_miss,omitempty"`
+	Supports []SupportView `json:"supports,omitempty"`
+}
+
+// SupportView 是支撑某条事实的一个窗口。
+type SupportView struct {
+	SourceID string  `json:"source_id"`
+	Title    string  `json:"title,omitempty"`
+	Span     string  `json:"span"`
+	Score    float64 `json:"score"`
 }
 
 // ConflictView 是同事实两窗给不同的数的冲突（证据一致性门产出）。
@@ -268,7 +276,11 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	}
 	if fx, ok := context.Get(c, qaflow.KeyFactReport); ok {
 		for _, f := range fx.Facts {
-			resp.Facts = append(resp.Facts, FactView{ID: f.ID, Query: f.Query, Covered: f.Covered, NearMiss: f.NearMiss, SourceID: f.SourceID, Span: f.Span})
+			fv := FactView{ID: f.ID, Query: f.Query, Covered: f.Covered, NearMiss: f.NearMiss}
+			for _, s := range f.Supports {
+				fv.Supports = append(fv.Supports, SupportView{SourceID: s.SourceID, Span: s.Span, Score: s.Score})
+			}
+			resp.Facts = append(resp.Facts, fv)
 		}
 	}
 	if cs, ok := context.Get(c, qaflow.KeyConflicts); ok {

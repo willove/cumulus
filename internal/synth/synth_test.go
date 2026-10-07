@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/qaflow"
 )
@@ -45,7 +46,7 @@ func TestLLMSynthesizeParsesContract(t *testing.T) {
 		text:  `{"answer":"100","assertions":[{"text":"默认为100","window":"w1"},{"text":"端口8484","window":"w2"}]}`,
 		usage: usage2{prompt: 100, completion: 20, costKnown: true},
 	}}
-	ans, usage, err := l.Synthesize("q", windows())
+	ans, usage, err := l.Synthesize("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,27 +61,38 @@ func TestLLMSynthesizeParsesContract(t *testing.T) {
 	}
 }
 
-// 引用不存在的窗口：整体失败，不许放一半答案出去。
-func TestLLMSynthesizeRejectsUnknownWindow(t *testing.T) {
+// 引用不存在的窗口（模型编凭据）：整份输出转拒答——不 500 给用户，
+// 也不放一半答案出去（契约是"要么全过要么不过"）。
+func TestLLMSynthesizeUnknownWindowBecomesRefusal(t *testing.T) {
 	l := &LLM{Client: &fakeCompleter{text: `{"answer":"100","assertions":[{"text":"x","window":"w9"}]}`}}
-	if _, _, err := l.Synthesize("q", windows()); err == nil || !strings.Contains(err.Error(), "unknown window") {
-		t.Fatalf("unknown window must fail the whole synthesis, got %v", err)
+	ans, _, err := l.Synthesize("q", windows(), facts.Report{})
+	if err != nil {
+		t.Fatalf("编凭据必须转拒答而不是报错：%v", err)
+	}
+	if !ans.Refused {
+		t.Fatalf("必须 refused：%+v", ans)
 	}
 }
 
 // 输出不是契约 JSON：结构化错误，调用方重试，不许当答案。
 func TestLLMSynthesizeRejectsMalformedOutput(t *testing.T) {
 	l := &LLM{Client: &fakeCompleter{text: "我觉得答案是100"}}
-	if _, _, err := l.Synthesize("q", windows()); err == nil || !strings.Contains(err.Error(), "JSON contract") {
+	if _, _, err := l.Synthesize("q", windows(), facts.Report{}); err == nil || !strings.Contains(err.Error(), "JSON contract") {
 		t.Fatalf("malformed output must fail, got %v", err)
 	}
 }
 
-// 没有窗口-backed 断言：宁可失败也不出无引用答案。
-func TestLLMSynthesizeRejectsUncitedAnswer(t *testing.T) {
-	l := &LLM{Client: &fakeCompleter{text: `{"answer":"100","assertions":[]}`}}
-	if _, _, err := l.Synthesize("q", windows()); err == nil {
-		t.Fatal("uncited answer must be rejected")
+// 有答案但零断言：不当错误抛（500 给用户），也不照发（无引用的话进答
+// 案）——转成正式拒答，模型原话进 RefusalReason（小模型在分组提示下
+// 偶发这个形态：对没把握的那条只写散文不挂引用）。
+func TestLLMSynthesizeUncitedAnswerBecomesRefusal(t *testing.T) {
+	l := &LLM{Client: &fakeCompleter{text: `{"answer":"现有证据未提供具体年限","assertions":[]}`}}
+	ans, _, err := l.Synthesize("q", windows(), facts.Report{})
+	if err != nil {
+		t.Fatalf("零断言答案必须转拒答而不是报错：%v", err)
+	}
+	if !ans.Refused || ans.RefusalReason != "现有证据未提供具体年限" {
+		t.Fatalf("必须 refused 且原话进理由：%+v", ans)
 	}
 }
 
@@ -90,7 +102,7 @@ func TestLLMSynthesizePropagatesCostUnknown(t *testing.T) {
 		text:  `{"answer":"100","assertions":[{"text":"x","window":"w1"}]}`,
 		usage: usage2{prompt: 10, completion: 5, costKnown: false},
 	}}
-	_, usage, err := l.Synthesize("q", windows())
+	_, usage, err := l.Synthesize("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +113,7 @@ func TestLLMSynthesizePropagatesCostUnknown(t *testing.T) {
 
 // 没配提供方：明说，不许静默换桩。
 func TestLLMWithoutClientErrors(t *testing.T) {
-	if _, _, err := (&LLM{}).Synthesize("q", windows()); !errors.Is(err, llm.ErrNotConfigured) {
+	if _, _, err := (&LLM{}).Synthesize("q", windows(), facts.Report{}); !errors.Is(err, llm.ErrNotConfigured) {
 		t.Fatalf("want ErrNotConfigured, got %v", err)
 	}
 }
@@ -109,7 +121,7 @@ func TestLLMWithoutClientErrors(t *testing.T) {
 // 容忍 ```json 围栏。
 func TestLLMSynthesizeToleratesFencedOutput(t *testing.T) {
 	l := &LLM{Client: &fakeCompleter{text: "```json\n{\"answer\":\"100\",\"assertions\":[{\"text\":\"x\",\"window\":\"w1\"}]}\n```"}}
-	ans, _, err := l.Synthesize("q", windows())
+	ans, _, err := l.Synthesize("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,14 +132,14 @@ func TestLLMSynthesizeToleratesFencedOutput(t *testing.T) {
 
 // 离线合成：确定性，无窗口即失败（和 LLM 版同一个门槛）。
 func TestOfflineSynthesize(t *testing.T) {
-	ans, _, err := Offline("q", windows())
+	ans, _, err := Offline("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ans.Citations) != 2 {
 		t.Fatalf("offline synthesis must cite every window, got %v", ans.Citations)
 	}
-	if _, _, err := Offline("q", nil); err == nil {
+	if _, _, err := Offline("q", nil, facts.Report{}); err == nil {
 		t.Fatal("no windows must fail")
 	}
 }
@@ -138,7 +150,7 @@ func TestLLMSynthesizeAcceptsRefusalProtocol(t *testing.T) {
 		text:  `{"answer":"","assertions":[],"refused":true}`,
 		usage: usage2{prompt: 10, completion: 2, costKnown: true},
 	}}
-	ans, usage, err := l.Synthesize("q", windows())
+	ans, usage, err := l.Synthesize("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +170,7 @@ func TestLLMSynthesizeRefusalReasonIsKeptSeparate(t *testing.T) {
 	// 模型拒答天然带解释（真运行学到的）：理由进 RefusalReason，
 	// 不进 Text、不许带断言
 	l := &LLM{Client: &fakeCompleter{text: `{"answer":"现有证据不足以确定","assertions":[],"refused":true}`}}
-	ans, _, err := l.Synthesize("q", windows())
+	ans, _, err := l.Synthesize("q", windows(), facts.Report{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +185,7 @@ func TestLLMSynthesizeRefusalReasonIsKeptSeparate(t *testing.T) {
 func TestLLMSynthesizeRejectsRefusalWithAssertions(t *testing.T) {
 	// 既说不知道又摆断言：自相矛盾，按错误处理
 	l := &LLM{Client: &fakeCompleter{text: `{"answer":"不知道","assertions":[{"text":"x","window":"w1"}],"refused":true}`}}
-	if _, _, err := l.Synthesize("q", windows()); err == nil {
+	if _, _, err := l.Synthesize("q", windows(), facts.Report{}); err == nil {
 		t.Fatal("refusal with assertions must be rejected")
 	}
 }

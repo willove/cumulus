@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/judge"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
@@ -65,8 +66,8 @@ func loadDotEnv(path string) {
 func pickSynth(which string) (qaflow.SynthFunc, string, error) {
 	switch which {
 	case "", "offline":
-		return func(q string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
-			return synth.Offline(q, ws)
+		return func(q string, ws []qaflow.EvidenceWindow, fx facts.Report) (qaflow.Answer, qaflow.Usage, error) {
+			return synth.Offline(q, ws, fx)
 		}, "offline", nil
 	case "llm":
 		c, err := llmFromEnvImpl()

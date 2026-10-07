@@ -3,10 +3,8 @@ package retrieval
 import (
 	"fmt"
 	"math"
-	"regexp"
 	"sort"
 	"strings"
-	"unicode/utf8"
 )
 
 // BM25 参数：Robertson-Sparck Jones 默认值，五十年文献的共识。
@@ -211,133 +209,6 @@ func (idx *Index) scoreTerms(unique []string) map[string]float64 {
 	return scores
 }
 
-// Window 在文档里定位证据窗口：找查询词项首次命中的 rune 偏移，
-// 向两侧各扩 width/2 个 rune。返回 "rune[起:止]" 坐标；找不到返回 ""。
-// 坐标而不是文本：引用可核的前提是坐标可回溯（ResolveSpan）。
-func (idx *Index) Window(docID string, terms []string, width int) string {
-	d, ok := idx.byID[docID]
-	if !ok || width <= 0 {
-		return ""
-	}
-	runes := []rune(d.Body)
-	// 收集全部查询词的命中位置（字符坐标）
-	var positions []windowPos
-	for _, term := range terms {
-		if term == "" {
-			continue
-		}
-		from := 0
-		body := d.Body
-		for {
-			at := strings.Index(body[from:], term)
-			if at < 0 {
-				break
-			}
-			byteOff := from + at
-			positions = append(positions, windowPos{at: len([]rune(body[:byteOff])), termRunes: len([]rune(term))})
-			from = byteOff + len(term)
-		}
-	}
-	if len(positions) == 0 {
-		return ""
-	}
-	// 窗口中心 = 命中密度最高处：滑动 width 宽的位置，取覆盖词数最多的
-	// 起点。**不是最早命中处**——法律名里就带"交通"二字，取最早命中的
-	// 话窗口永远停在文档开头（真跑教训：问"交通信号灯"返回法律序言）。
-	half := width / 2
-	bestStart, bestCover := 0, -1
-	for _, p := range positions {
-		start := p.at - half
-		if start < 0 {
-			start = 0
-		}
-		end := start + width
-		cover := 0
-		for _, q := range positions {
-			if q.at >= start && q.at < end {
-				cover++
-			}
-		}
-		if cover > bestCover {
-			bestCover, bestStart = cover, start
-		}
-	}
-	// 命中簇：密度窗 [bestStart, bestStart+width) 内的全部命中——不是单个
-	// 位置（单位置的簇会把隔壁条目的命中漏掉，真跑踩过：问"红灯表示
-	// 什么"命中簇停在第二十五条，答案在第二十六条）
-	from, to := -1, -1
-	for _, p := range positions {
-		if p.at >= bestStart && p.at < bestStart+width {
-			if from < 0 || p.at < from {
-				from = p.at
-			}
-			if end := p.at + p.termRunes; end > to {
-				to = end
-			}
-		}
-	}
-	if from < 0 { // 理论上不发生（bestStart 由某个命中推出）
-		from, to = bestStart, bestStart+width
-	}
-	// 条文吸附围着**命中簇**扩（不是围着窗口扩——围着窗口扩会把命中
-	// 所在的那一条整条吃掉，真跑踩过）：起点回到命中前的最后一个"第X条"
-	// 标记，终点推到命中后的第一个标记。窗内至少一条完整条目，且命中必
-	// 在窗内。无标记的文档（非法条）保持密度心窗口。
-	start, end := snapToArticles(runes, from, to, bestStart, bestStart+width)
-	if end > len(runes) {
-		end = len(runes)
-	}
-	return fmt.Sprintf("rune[%d:%d]", start, end)
-}
-
-// windowPos 是一个词的一个命中位置。
-type windowPos struct {
-	at        int
-	termRunes int
-}
-
-// articleMark 匹配"第X条"（中文数字）。吸附只认这个形态——法律的条目
-// 边界在中文语料里足够规整，司法解释/宪法同款。
-var articleMark = regexp.MustCompile(`第[一二三四五六七八九十百零零]+条`)
-
-// snapToArticles 把命中区间 [lo,hi) 扩展到条文边界：起点回到 lo 前最后
-// 一个"第X条"标记，终点推到 hi 后第一个标记。命中必在窗内。没有标记
-// 可用时退回原窗口 [fallbackStart, fallbackEnd)。
-func snapToArticles(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (int, int) {
-	body := string(runes)
-	runeAt := func(byteOff int) int { return utf8.RuneCountInString(body[:byteOff]) }
-	markBefore := func(runeOff int) (int, bool) {
-		locs := articleMark.FindAllStringIndex(body[:runeByteAt(body, runeOff)], -1)
-		if len(locs) == 0 {
-			return 0, false
-		}
-		return runeAt(locs[len(locs)-1][0]), true
-	}
-	markAtOrAfter := func(runeOff int) (int, bool) {
-		tail := body[runeByteAt(body, runeOff):]
-		loc := articleMark.FindStringIndex(tail)
-		if loc == nil {
-			return 0, false
-		}
-		return runeAt(runeByteAt(body, runeOff) + loc[0]), true
-	}
-	start, ok1 := markBefore(lo)
-	if !ok1 {
-		start = fallbackStart
-	}
-	end, ok2 := markAtOrAfter(hi)
-	if !ok2 {
-		end = fallbackEnd
-	}
-	if end <= lo { // 极端：标记极近，保命要紧
-		return fallbackStart, fallbackEnd
-	}
-	if start > lo {
-		start = lo
-	}
-	return start, end
-}
-
 // ResolveSpan 把 "rune[起:止]" 坐标还原成原文片段。解析失败返回 error——
 // 引用不可解析是硬错误，不许静默给空（qaflow 的 Verify 靠它）。
 func ResolveSpan(body, coord string) (string, error) {
@@ -478,3 +349,128 @@ func rankByScore(scores map[string]float64, docLens map[string]int) []string {
 // DFOf 词的文档频率（query.Analysis 的语料事实面）。索引自带 HasTerm+
 // DFOf 即满足 query.CorpusTerms——分析层不需要认索引。
 func (idx *Index) DFOf(term string) int { return len(idx.Postings[term]) }
+
+// WindowAnchored 与 Window 同逻辑，但吸附锚点是**给定的锚短语在文档
+// 里第一次出现处**（fan-out 用：每条事实的窗口收在事实自己的 3 字核
+// 心所在的那一条）。找不到锚短语时退化成 Window（密度定心）。
+//
+// 为什么要有：密度/稀有度都是语料相关的，会把窗口吸到错的条文（真跑
+// 教训：专利期限两连问，稀有度把锚点放在"授予专利权决定"那条，答案
+// "期限为二十年"在第四十二条）。事实自己的核心词组才是答案的位置。
+func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor string) string {
+	if anchor == "" {
+		return idx.Window(docID, terms, width)
+	}
+	d, ok := idx.byID[docID]
+	if !ok || width <= 0 {
+		return ""
+	}
+	runes := []rune(d.Body)
+	// 候选核心 = 锚短语的全部 3 字滑窗（在文档里出现的），按稀有度升序
+	// （少的优先——它更可能是答案所在的那条）。**用覆盖判定选**：哪个
+	// 核心吸附出来的窗能让这条事实的覆盖通过（内容词占比 + 3 字核心在
+	// 窗内），就用哪个。选不出通过的（事实的说法与法条没有共享 3 字核
+	// 心——改写场景），退回密度定心。
+	ar := []rune(anchor)
+	type cand struct {
+		at    int
+		count int
+	}
+	var cands []cand
+	for i := 0; i+2 < len(ar); i++ {
+		core := string(ar[i : i+3])
+		// 每一次出现都是一个候选：同一个"专利权"在第一条和第四十三条都
+		// 有，答案往往在靠后的那次——只试第一次会把锚点扔错条文
+		from := 0
+		for {
+			loc := runeIndex(d.Body[from:], core)
+			if loc < 0 {
+				break
+			}
+			cands = append(cands, cand{at: runeIndex(d.Body, d.Body[from:][loc:]), count: countSub(d.Body, core)})
+			from = from + loc + len(core)
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].count < cands[j].count })
+	var fallback string
+	for _, c := range cands {
+		start, end := snapToArticles(runes, c.at, c.at+3, c.at-width/2, c.at+width/2)
+		if end > len(runes) {
+			end = len(runes)
+		}
+		coord := fmt.Sprintf("rune[%d:%d]", start, end)
+		if fallback == "" {
+			fallback = coord
+		}
+		text, err := ResolveSpan(d.Body, coord)
+		if err != nil {
+			continue
+		}
+		if factsCovers(anchor, text) {
+			return coord
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	// 二级锚：事实的 3 字核心一个都不在文档里（法条换了说法——问"期限
+	// 是多少年"，法条写"发明专利权的期限为二十年"，3 字连续断了）。这
+	// 时锚在**内容词落点最密处**：事实的内容二元组在哪个位置附近全部
+	// 命中，答案就在那（第四十二条几字内 专利/利权/期限 全中）。这是
+	// corePresent 的耐改写版——不要求 3 字连续，要求内容词齐聚。
+	kws := contentCores(anchor)
+	if len(kws) == 0 {
+		return idx.Window(docID, terms, width)
+	}
+	var hitAts []int
+	for _, k := range kws {
+		from := 0
+		for {
+			loc := runeIndex(d.Body[from:], k)
+			if loc < 0 {
+				break
+			}
+			hitAts = append(hitAts, from+loc)
+			from = from + loc + len(k)
+		}
+	}
+	if len(hitAts) == 0 {
+		return idx.Window(docID, terms, width)
+	}
+	radius := 12
+	bestAt, bestHits := hitAts[0], -1
+	for _, at := range hitAts {
+		seen := map[string]bool{}
+		for _, k := range kws {
+			if countInRange(d.Body, k, at-radius, at+radius) {
+				seen[k] = true
+			}
+		}
+		if len(seen) > bestHits {
+			bestHits, bestAt = len(seen), at
+		}
+	}
+	start, end := snapToArticles(runes, bestAt, bestAt+2, bestAt-width/2, bestAt+width/2)
+	if end > len(runes) {
+		end = len(runes)
+	}
+	return fmt.Sprintf("rune[%d:%d]", start, end)
+}
+
+// countInRange 子串在文档的字符区间 [lo,hi] 里是否出现（内容词齐聚判据
+// 用；区间是字符坐标）。
+func countInRange(body, sub string, lo, hi int) bool {
+	for i := range body {
+		if i+len(sub) > len(body) {
+			break
+		}
+		if body[i:i+len(sub)] != sub {
+			continue
+		}
+		at := len([]rune(body[:i]))
+		if at >= lo && at <= hi {
+			return true
+		}
+	}
+	return false
+}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/corpus"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -21,7 +22,7 @@ func testServer() *Server {
 		{ID: "ops-1", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484，变更需值班经理审批。"},
 		{ID: "noise-1", Body: "连接池巡检记录：连接池每季度检查一次，记录在案备查。"},
 	})
-	s := New(idx, func(q string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+	s := New(idx, func(q string, ws []qaflow.EvidenceWindow, _ facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 		if len(ws) == 0 {
 			return qaflow.Answer{}, qaflow.Usage{}, errNoWindows
 		}
@@ -269,7 +270,7 @@ func (f *fakeStore) GetValue(gocontext.Context, string) ([]byte, error) { return
 func (f *fakeStore) Health(gocontext.Context) error                     { return nil }
 
 func offlineQA() qaflow.SynthFunc {
-	return func(_ string, ws []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+	return func(_ string, ws []qaflow.EvidenceWindow, _ facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 		if len(ws) == 0 {
 			return qaflow.Answer{}, qaflow.Usage{}, errNoWindows
 		}

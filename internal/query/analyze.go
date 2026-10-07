@@ -79,7 +79,11 @@ var stopwords = map[string]bool{
 // 压过真正的"专利"——真跑踩过（问"专利期限多少年"返回少年相关法）。
 // 二元组层面的认真，靠字符集兜底；LLM 分析器是彻底解，那是 cumulus
 // 的生产路径，rule 版先把这个洞堵上。
-const glueChars = "的吗呢吧啊什怎多极少几谁和与或及于在被把就都还很"
+const glueChars = "的吗呢吧啊什怎多极少几谁何与或及于在被把就都还很"
+
+// IsGlue 二元组是否沾胶水字符（facts 的覆盖占比也用它——内容词才算
+// 分母：问"专利期限是多少年"，限是/是多/多少是胶水，不稀释占比）。
+func IsGlue(term string) bool { return isGlueTerm(term) }
 
 func isGlueTerm(term string) bool {
 	for _, r := range term {

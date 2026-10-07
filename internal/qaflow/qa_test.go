@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -14,7 +15,7 @@ import (
 // offlineStub 是测试用的确定性合成：断言 = 窗口坐标，答案取第一条。
 // 与 synth.Offline 同契约；测试里本地定义，免得测试依赖 synth 成环
 // （synth 依赖 qaflow，测试再依赖回去就成环）。
-func offlineStub(question string, windows []EvidenceWindow) (Answer, Usage, error) {
+func offlineStub(question string, windows []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
 	if len(windows) == 0 {
 		return Answer{}, Usage{}, errors.New("offlineStub: no windows")
 	}

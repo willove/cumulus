@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -75,7 +76,7 @@ func TestRunnerPlumbsPriorOption(t *testing.T) {
 		}
 		return out, nil
 	}
-	synth := func(_ string, ws []EvidenceWindow) (Answer, Usage, error) {
+	synth := func(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
 		if len(ws) == 0 {
 			return Answer{}, Usage{}, errors.New("no windows")
 		}

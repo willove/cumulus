@@ -46,8 +46,14 @@ export interface FactView {
   query: string;
   covered: boolean;
   near_miss?: number;
-  source_id?: string;
-  span?: string;
+  supports?: SupportView[];
+}
+
+export interface SupportView {
+  source_id: string;
+  title?: string;
+  span: string;
+  score: number;
 }
 
 export interface ConflictView {

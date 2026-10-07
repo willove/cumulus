@@ -16,13 +16,14 @@ import (
 
 	gocontext "context"
 
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/qaflow"
 )
 
 // Offline 是确定性合成：每个窗口一条断言，答案取第一条。
 // 用法与 LLM 版完全同构——调用方换实现不换契约。
-func Offline(question string, windows []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+func Offline(question string, windows []qaflow.EvidenceWindow, _ facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 	if len(windows) == 0 {
 		return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("synth offline: no evidence windows to synthesize from")
 	}
@@ -68,7 +69,7 @@ type llmAssertion struct {
 }
 
 // Synthesize 实现 qaflow.SynthFunc。
-func (l *LLM) Synthesize(question string, windows []qaflow.EvidenceWindow) (qaflow.Answer, qaflow.Usage, error) {
+func (l *LLM) Synthesize(question string, windows []qaflow.EvidenceWindow, fx facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 	if l.Client == nil {
 		return qaflow.Answer{}, qaflow.Usage{}, llm.ErrNotConfigured
 	}
@@ -76,21 +77,22 @@ func (l *LLM) Synthesize(question string, windows []qaflow.EvidenceWindow) (qafl
 		return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("synth llm: no evidence windows")
 	}
 
-	// 窗口编号化：模型只认 wN
-	labels := make([]string, len(windows))
-	for i := range windows {
-		labels[i] = fmt.Sprintf("w%d", i+1)
+	prompt, rendered := buildSynthesisPrompt(question, windows, fx)
+	// 标签按渲染序重新连续编号（分组视图 w1..wN）——跳号标签会把模型
+	// 搞晕（实测：引用空标签/不存在的标签）
+	renderLabels := make([]string, len(rendered))
+	for i := range renderLabels {
+		renderLabels[i] = fmt.Sprintf("w%d", i+1)
 	}
-
 	resp, err := l.Client.Complete(gocontext.Background(), llm.Request{
 		System:    synthesisSystemPrompt,
-		Prompt:    buildSynthesisPrompt(question, windows, labels),
+		Prompt:    prompt,
 		MaxTokens: 1024,
 	})
 	if err != nil {
 		return qaflow.Answer{}, qaflow.Usage{}, fmt.Errorf("synth llm: complete: %w", err)
 	}
-	ans, err := parseSynthesis(resp.Text, windows, labels)
+	ans, err := parseSynthesis(resp.Text, rendered, renderLabels)
 	if err != nil {
 		// 结构化错误回给调用方：契约不符就重试，不许把半成品当答案
 		return qaflow.Answer{}, qaflow.Usage{}, err
@@ -141,7 +143,10 @@ func parseSynthesis(raw string, windows []qaflow.EvidenceWindow, labels []string
 	for _, a := range parsed.Assertions {
 		w, ok := index[a.Window]
 		if !ok {
-			return qaflow.Answer{}, fmt.Errorf("synth llm: assertion %q cites unknown window %q", a.Text, a.Window)
+			// 引用了渲染集里不存在的标签 = 模型编了凭据（这条断言的话没有
+			// 依据）。整份输出按拒答处理：契约是"要么全过要么不过"——一条
+			// 编的标签意味着整套引用纪律失效，不能只挑好的信。
+			return qaflow.Answer{Refused: true, RefusalReason: "合成引用了不存在的证据窗口（模型编造引用），按契约拒答"}, nil
 		}
 		cit := w.SourceID + "#" + w.Span
 		if !seen[cit] {
@@ -150,7 +155,15 @@ func parseSynthesis(raw string, windows []qaflow.EvidenceWindow, labels []string
 		}
 	}
 	if len(ans.Citations) == 0 {
-		return qaflow.Answer{}, fmt.Errorf("synth llm: no window-backed assertion (assertions=%d, windows=%d); refusing to emit an uncited answer; raw=%q",
+		// 有答案但零断言 = 模型自己也不认为这话有据。两条路都不能走：
+		// 当错误抛（500 给用户）或照发（无引用的话进答案）。正路是转成
+		// **正式拒答**：它写的原话进 RefusalReason——用户看到的是诚实的
+		// "不确定"，且知道模型当时怎么说的（多事实分组提示下小模型偶
+		// 发这个形态：逐事实作答时对没把握的那条只写了散文没挂引用）。
+		if strings.TrimSpace(ans.Text) != "" {
+			return qaflow.Answer{Refused: true, RefusalReason: strings.TrimSpace(ans.Text)}, nil
+		}
+		return qaflow.Answer{}, fmt.Errorf("synth llm: no window-backed assertion (assertions=%d, windows=%d); raw=%q",
 			len(parsed.Assertions), len(windows), truncate(raw, 300))
 	}
 	return ans, nil
@@ -163,21 +176,12 @@ const synthesisSystemPrompt = `你是证据合成器。规则只有一条：每�
 证据与问题相关但不完整时，用已有证据回答能答的部分，并在答案里说明局限
 （如"证据未涉及具体分值"）——知识工作里"库里最接近的"胜过干巴巴的不知道；
 只有证据与问题完全无关时才输出 {"answer": "", "assertions": [], "refused": true}。
-无论答不答，不许用窗口外的话拼答案。`
+无论答不答，不许用窗口外的话拼答案。
 
-func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, labels []string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "问题：%s\n\n证据窗口：\n", question)
-	for i, w := range windows {
-		title := w.Title
-		if title == "" {
-			title = w.SourceID // 没身份的退化成 id（不该发生，但有兜底）
-		}
-		fmt.Fprintf(&b, "[%s] %s（%s）位置 %s 得分 %.2f\n原文：%s\n", labels[i], title, w.SourceID, w.Span, w.Score, w.Text)
-	}
-	b.WriteString("\n按系统提示的 JSON 契约作答。")
-	return b.String()
-}
+**多事实问题**：证据按事实分组给出（事实 fN + 它的支撑窗口），是为了
+你不丢事实——**输出仍是一段答案 + 断言数组**，每条断言挂它来自的窗
+口。某条事实没有支撑时，在答案里明说这条没有依据，不许用别条事实的
+窗口内容拼它的答案。`
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
