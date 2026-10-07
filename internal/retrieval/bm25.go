@@ -397,3 +397,83 @@ func runeByteAt(s string, runeOff int) int {
 	}
 	return len(s)
 }
+
+// SearchWeighted 按查询侧给出的词权检索（query.Analysis 的产物：主关键
+// 词级）。权乘在 idf 之上：着重词（2.0）与降权词（<1）区分开——这是
+// cumulus 的 IDF 加权关键词级（闯红灯 vs 处罚那组取舍）在本项目的落点。
+// weights 为空时返回空（调用方应退化到 SearchWith）。
+func (idx *Index) SearchWeighted(weights map[string]float64, k, width int, boost func(docID string) float64) []Hit {
+	if len(weights) == 0 {
+		return nil
+	}
+	scores := idx.scoreWeighted(weights)
+	if boost != nil {
+		for id, s := range scores {
+			scores[id] = s * boost(id)
+		}
+	}
+	ranked := rankByScore(scores, idx.DocLens)
+	if len(ranked) > k {
+		ranked = ranked[:k]
+	}
+	terms := make([]string, 0, len(weights))
+	for term := range weights {
+		terms = append(terms, term)
+	}
+	return idx.hitsFrom(ranked, terms, width, scores)
+}
+
+// scoreWeighted 按词权算分：idf × 权 × tf 分量（与 scoreTerms 同式，
+// 只多一个权因子）。
+func (idx *Index) scoreWeighted(weights map[string]float64) map[string]float64 {
+	scores := make(map[string]float64, 256)
+	for term, w := range weights {
+		postings := idx.Postings[term]
+		if len(postings) == 0 {
+			continue
+		}
+		df := float64(len(postings))
+		idf := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
+		for _, p := range postings {
+			dl := float64(idx.DocLens[p.DocID])
+			tf := float64(p.TF)
+			denom := tf + bm25K1*(1-bm25B+bm25B*dl/idx.AvgLen)
+			scores[p.DocID] += w * idf * tf * (bm25K1 + 1) / denom
+		}
+	}
+	return scores
+}
+
+// hitsFrom 与 SearchWith 的产物体一致（排序、窗口、坐标、Title）。
+func (idx *Index) hitsFrom(ranked []string, terms []string, width int, scores map[string]float64) []Hit {
+	hits := make([]Hit, 0, len(ranked))
+	for _, id := range ranked {
+		coord := idx.Window(id, terms, width)
+		text := ""
+		if coord != "" {
+			if d, ok := idx.byID[id]; ok {
+				text, _ = ResolveSpan(d.Body, coord)
+			}
+		}
+		hits = append(hits, Hit{DocID: id, Score: scores[id], SpanCoord: coord, SpanText: text, Title: idx.TitleOf(id)})
+	}
+	return hits
+}
+
+func rankByScore(scores map[string]float64, docLens map[string]int) []string {
+	ids := make([]string, 0, len(scores))
+	for id := range scores {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		if scores[ids[i]] != scores[ids[j]] {
+			return scores[ids[i]] > scores[ids[j]]
+		}
+		return docLens[ids[i]] < docLens[ids[j]] // 同分短文档在前：确定性
+	})
+	return ids
+}
+
+// DFOf 词的文档频率（query.Analysis 的语料事实面）。索引自带 HasTerm+
+// DFOf 即满足 query.CorpusTerms——分析层不需要认索引。
+func (idx *Index) DFOf(term string) int { return len(idx.Postings[term]) }

@@ -17,16 +17,20 @@ import (
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/flow"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 )
 
 // 本包登记的 key。命名规则 "<域>.<名>"，全进程唯一。
 var (
 	KeyRewrite = context.NewKey[Rewrite]("qa.rewrite")
-	KeyWindows = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
-	KeyRoute   = context.NewKey[RouteDecision]("qa.route")
-	KeyAnswer  = context.NewKey[Answer]("qa.answer")
-	KeyUsage   = context.NewKey[Usage]("qa.usage")
+	// KeyAnalysis 是查询分析的挂点：意图 + IDF 加权主关键词级 + 语料外
+	// 词（词汇鸿沟信号）。覆盖度、加权检索、鸿沟扩展共用这一份事实。
+	KeyAnalysis = context.NewKey[query.Analysis]("qa.query.analysis")
+	KeyWindows  = context.NewKey[[]EvidenceWindow]("qa.evidence.windows")
+	KeyRoute    = context.NewKey[RouteDecision]("qa.route")
+	KeyAnswer   = context.NewKey[Answer]("qa.answer")
+	KeyUsage    = context.NewKey[Usage]("qa.usage")
 	// KeySynthUsage 是合成步记下的用量。记账步只读它——账目和发生额
 	// 是同一个来源，不许两处各写一份。
 	KeySynthUsage = context.NewKey[Usage]("qa.synthesis.usage")
@@ -96,13 +100,21 @@ type RewriteStage struct {
 	Query        string
 	Hypothetical string           // 注入的改写（HyDE 式）；空 = 不改写
 	Idx          *retrieval.Index // 漂移闸判语料内/外用；nil = 闸不启动
+	Analyze      func(q string) query.Analysis
 }
 
-func (RewriteStage) Name() string     { return "intent-clarify" }
-func (RewriteStage) Reads() []string  { return []string{"session"} }
-func (RewriteStage) Writes() []string { return []string{KeyRewrite.String()} }
+func (RewriteStage) Name() string    { return "intent-clarify" }
+func (RewriteStage) Reads() []string { return []string{"session"} }
+func (RewriteStage) Writes() []string {
+	return []string{KeyRewrite.String(), KeyAnalysis.String()}
+}
 func (s RewriteStage) Run(c *context.Context) error {
 	rw := Rewrite{Original: s.Query, Hypothetical: s.Hypothetical}
+	if s.Analyze != nil {
+		if err := context.Set(c, KeyAnalysis, s.Analyze(s.Query)); err != nil {
+			return err
+		}
+	}
 	// 漂移闸（BioHarness：改写管召回，原问管接地）：注入的改写丢掉原问
 	// 的语料内内容词 → 拦下，检索回退原问，丢词清单入账
 	if s.Hypothetical != "" && s.Idx != nil {
@@ -235,6 +247,7 @@ type RouteSignals struct {
 	DeadRate   float64 `json:"dead_rate"`  // 死路/取样：翻过多少空文档
 	Windows    int     `json:"windows"`    // 最终窗口数
 	Confidence float64 `json:"confidence"` // 上三项的加权组合（DraftConfidence）
+	GapThin    bool    `json:"gap_thin"`   // 词汇鸿沟折扣是否生效（审计用）
 }
 
 // gatherSignals 从 context 采集路由信号。
@@ -254,6 +267,15 @@ func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
 	}
 	if tel, ok := context.Get(c, KeyDeep); ok && tel.SampledDocs > 0 {
 		sig.DeadRate = float64(tel.DeadEnds) / float64(tel.SampledDocs)
+	}
+	// 词汇鸿沟折扣：内容词几乎全党外时覆盖度再高也是假象——垃圾二元组
+	// 总能凑出"有据可查"（真跑教训：问"养狗叫得太吵"，得太/谁管两个
+	// 垃圾二元组匹配到垃圾文档，路由判 fast，词汇桥永远不出场）。稀薄
+	// → 置信度减半，逼升级走桥。
+	if an, ok := context.Get(c, KeyAnalysis); ok && an.Thin(2, 2.0) {
+		sig.Confidence = DraftConfidence(sig) * 0.5
+		sig.GapThin = true
+		return sig
 	}
 	sig.Confidence = DraftConfidence(sig)
 	return sig
@@ -461,11 +483,11 @@ func (LearnStage) Verify(c *context.Context) error { return nil }
 // 不留空壳注册（可选组件的启用必须是显式的）。
 func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error), synth SynthFunc, opts Options) *flow.Runner {
 	stages := []flow.Stage{
-		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx},
+		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx, Analyze: opts.Analyzer},
 		EvidenceStage{Retrieve: retrieve},
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
-		EscalateStage{Retrieve: opts.Escalate},
+		EscalateStage{Retrieve: opts.Escalate, Expand: opts.Expander, Analyze: opts.Analyzer, Weighted: opts.WeightedRetrieve},
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
 	}
@@ -521,6 +543,14 @@ type Options struct {
 	Hypothetical string
 	// RewriteIdx 漂移闸用的索引（判语料内/外词）；nil = 闸不启动。
 	RewriteIdx *retrieval.Index
+	// Analyzer 查询分析（IDF 加权关键词级）；nil = 全词等权（旧路径）。
+	Analyzer func(q string) query.Analysis
+	// Expander 词汇鸿沟桥（LLM 关键词扩展）；nil = 鸿沟时不扩展，照原
+	// 查询升级检索。
+	Expander query.Expander
+	// WeightedRetrieve 按词权取数（鸿沟扩展后的加权重取）；nil = 扩展
+	// 无执行处，退化普通贵路。
+	WeightedRetrieve func(weights map[string]float64) ([]EvidenceWindow, error)
 	// Escalate 是升级（FAST→DEEP）的贵路取数函数：路由判 escalate 时
 	// 跑它再判一次（BioHarness 级联）。nil = 升级无执行处（死标签，
 	// 遥测里可见）。

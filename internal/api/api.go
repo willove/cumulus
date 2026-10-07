@@ -96,6 +96,7 @@ type QAResponse struct {
 	Refused   bool                    `json:"refused"`
 	Reason    string                  `json:"refusal_reason,omitempty"`
 	Citations []string                `json:"citations"`
+	Analysis  AnalysisView            `json:"analysis"`
 	Route     RouteView               `json:"route"`
 	Escalate  qaflow.EscalationRecord `json:"escalation"`
 	Reuse     qaflow.ReuseState       `json:"reuse"`
@@ -104,6 +105,16 @@ type QAResponse struct {
 	Rerank    qaflow.RerankState      `json:"rerank"`
 	Windows   []WindowView            `json:"windows"`
 	Usage     UsageView               `json:"usage"`
+}
+
+// AnalysisView 是查询侧理解的快照：意图、IDF 加权主关键词级（着重/降权
+// 的取舍看得见）、语料外词（词汇鸿沟信号）。查询侧做了什么，答案旁边
+// 直接可查。
+type AnalysisView struct {
+	Intent  string             `json:"intent"`
+	Primary map[string]float64 `json:"primary"` // 语词 → 权重（2.0 着重/1.0 平权）
+	OOV     []string           `json:"out_of_corpus_terms,omitempty"`
+	Score   float64            `json:"score"` // 主级总权重（稀薄度代理）
 }
 
 // RouteView 是路由判定（含信号——可审计）。
@@ -214,6 +225,9 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 		resp.Refused = a.Refused
 		resp.Reason = a.RefusalReason
 		resp.Citations = append(resp.Citations, a.Citations...)
+	}
+	if an, ok := context.Get(c, qaflow.KeyAnalysis); ok {
+		resp.Analysis = AnalysisView{Intent: an.Intent, Primary: an.Primary, OOV: an.OOV, Score: an.Score}
 	}
 	if rd, ok := context.Get(c, qaflow.KeyRoute); ok {
 		resp.Route = RouteView{Action: rd.Action, Reason: rd.Reason, Signals: rd.Signals}

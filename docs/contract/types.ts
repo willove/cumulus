@@ -12,6 +12,7 @@ export interface QAResponse {
   refused: boolean;
   refusal_reason?: string;
   citations: string[];
+  analysis: AnalysisView;
   route: RouteView;
   escalation: EscalationRecord;
   reuse: ReuseState;
@@ -20,6 +21,13 @@ export interface QAResponse {
   rerank: RerankState;
   windows: WindowView[];
   usage: UsageView;
+}
+
+export interface AnalysisView {
+  intent: string;
+  primary: Record<string, unknown>;
+  out_of_corpus_terms?: string[];
+  score: number;
 }
 
 export interface RouteView {
@@ -34,6 +42,7 @@ export interface RouteSignals {
   dead_rate: number;
   windows: number;
   confidence: number;
+  gap_thin: boolean;
 }
 
 export interface EscalationRecord {

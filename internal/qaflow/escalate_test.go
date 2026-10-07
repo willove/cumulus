@@ -1,14 +1,23 @@
 package qaflow
 
 import (
+	"errors"
+
+	gocontext "context"
 	"strings"
 	"testing"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/query"
 )
 
 // 存根取数器：直接写覆盖度信号（被测的是级联逻辑，不是 BM25 排序——
 // 排序由 retrieval 的测试负责）。
+// fnExpander 把函数适配成 query.Expander（测试替身）。
+type fnExpander func(gocontext.Context, string) ([]string, error)
+
+func (f fnExpander) Expand(ctx gocontext.Context, q string) ([]string, error) { return f(ctx, q) }
+
 func coverageStub(ws []EvidenceWindow, coverage float64) func(*context.Context, Rewrite) ([]EvidenceWindow, error) {
 	return func(c *context.Context, _ Rewrite) ([]EvidenceWindow, error) {
 		if err := context.Set(c, KeyCoverage, CoverageInfo{Value: coverage, Terms: []string{"部署", "端口"}}); err != nil {
@@ -117,5 +126,83 @@ func TestEscalateTerminalWithoutBackend(t *testing.T) {
 	}
 	if !strings.Contains(esc.Reason, "no escalation backend") {
 		t.Fatalf("reason must say why terminal: %q", esc.Reason)
+	}
+}
+
+// 词汇鸿沟桥：升级时关键词级稀薄 → 先扩展（口语翻书面）→ 加权重取。
+func TestEscalateExpandsVocabularyGap(t *testing.T) {
+	// 快路：主级稀薄（几乎全是语料外词），覆盖低 → escalate
+	analysis := query.Analysis{
+		Intent:  "search",
+		Primary: map[string]float64{"饲养": 1},
+		OOV:     []string{"闯红", "灯怎", "么处"},
+		Score:   1,
+	}
+	var expandedWith []string
+	weightedCalled := false
+	optsEscalate := &EscalateStage{
+		Retrieve: coverageStub(win1(), 0.3), // 普通贵路（不该被走到）
+		Expand: fnExpander(func(_ gocontext.Context, q string) ([]string, error) {
+			expandedWith = append(expandedWith, q)
+			return []string{"饲养动物", "噪声"}, nil
+		}),
+		Weighted: func(weights map[string]float64) ([]EvidenceWindow, error) {
+			weightedCalled = true
+			// 扩展词按索引口径拆成二元组后着重（整词进不了倒排）
+			for _, bg := range []string{"饲养", "养动", "动物"} {
+				if weights[bg] != 2.0 {
+					t.Fatalf("拆开的扩展词应着重(2.0)，got %v", weights)
+				}
+			}
+			// 原主级降为边注
+			if weights["饲养"] != 2.0 {
+				t.Fatal("原主级已被扩展词覆盖")
+			}
+			return winDeep(), nil
+		},
+	}
+	// 手工驱动 stage（不走 Runner，专注级联逻辑）
+	c := context.New("default")
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵谁管"})
+	_ = context.Set(c, KeyAnalysis, analysis)
+	_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+	_ = context.Set(c, KeyWindows, win1())
+	if err := optsEscalate.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	if !weightedCalled {
+		t.Fatal("稀薄时必须走加权重取（桥）")
+	}
+	if len(expandedWith) != 1 || expandedWith[0] != "养狗叫得太吵谁管" {
+		t.Fatalf("扩展应拿到原问，got %v", expandedWith)
+	}
+	ws, _ := context.Get(c, KeyWindows)
+	if len(ws) != 1 || ws[0].SourceID != "ops-1" {
+		t.Fatalf("桥的窗口必须进 context，got %v", ws)
+	}
+}
+
+// 桥失败不阻塞：扩展报错 → 退化普通贵路（流程继续，不搞死）。
+func TestEscalateBridgeFailureFallsBack(t *testing.T) {
+	analysis := query.Analysis{Primary: map[string]float64{}, Score: 0}
+	stage := EscalateStage{
+		Retrieve: coverageStub(win1(), 0.3),
+		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return nil, errors.New("llm down") }),
+		Weighted: func(map[string]float64) ([]EvidenceWindow, error) {
+			t.Fatal("扩展失败时不该走加权路")
+			return nil, nil
+		},
+	}
+	c := context.New("default")
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵谁管"})
+	_ = context.Set(c, KeyAnalysis, analysis)
+	_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+	_ = context.Set(c, KeyWindows, win1())
+	if err := stage.Run(c); err != nil {
+		t.Fatalf("桥失败必须退化而不是失败: %v", err)
+	}
+	ws, _ := context.Get(c, KeyWindows)
+	if len(ws) != 1 {
+		t.Fatalf("贵路窗口必须在场，got %v", ws)
 	}
 }

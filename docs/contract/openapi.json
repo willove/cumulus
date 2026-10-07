@@ -1,6 +1,31 @@
 {
   "components": {
     "schemas": {
+      "AnalysisView": {
+        "properties": {
+          "intent": {
+            "type": "string"
+          },
+          "out_of_corpus_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "primary": {
+            "type": "object"
+          },
+          "score": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "intent",
+          "primary",
+          "score"
+        ],
+        "type": "object"
+      },
       "CoverageView": {
         "properties": {
           "out_of_corpus_terms": {
@@ -156,6 +181,9 @@
       },
       "QAResponse": {
         "properties": {
+          "analysis": {
+            "$ref": "#/components/schemas/AnalysisView"
+          },
           "answer": {
             "type": "string"
           },
@@ -203,6 +231,7 @@
           }
         },
         "required": [
+          "analysis",
           "answer",
           "citations",
           "coverage",
@@ -257,6 +286,9 @@
           "dead_rate": {
             "type": "number"
           },
+          "gap_thin": {
+            "type": "boolean"
+          },
           "margin": {
             "type": "number"
           },
@@ -268,6 +300,7 @@
           "confidence",
           "coverage",
           "dead_rate",
+          "gap_thin",
           "margin",
           "windows"
         ],

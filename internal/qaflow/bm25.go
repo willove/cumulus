@@ -27,7 +27,7 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 		if idx == nil {
 			return nil, errors.New("bm25 evidence: nil index")
 		}
-		hits := idx.SearchWith(r.Effective(), k, width, nil)
+		hits := retrieveWeighted(c, idx, r.Effective(), k, width)
 		// 语义重排（可选组件）：绑了 embedder 才走；没绑/失败都保序并留痕
 		hits, rerankState := rerankHits(c, hits, r.Effective(), maxRerankCompare)
 		if err := context.Set(c, KeyRerank, rerankState); err != nil {
@@ -56,4 +56,16 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 		}
 		return windows, nil
 	}
+}
+
+// searchWeightedOrPlain：有分析（主关键词级）就按权检索，否则全词等权。
+// retrieveWeighted：有查询分析（IDF 加权主关键词级）就按权检索，否则全词
+// 等权。权是查询侧加权的显式化——处罚类泛词降权、稀有实体词着重。加权
+// 级为空（问句几乎全是语料外词）时退回全词检索：那是鸿沟场景，交给级联
+// 里的扩展兜底，不让检索先卡死。
+func retrieveWeighted(c *context.Context, idx *retrieval.Index, q string, k, width int) []retrieval.Hit {
+	if a, ok := context.Get(c, KeyAnalysis); ok && len(a.Primary) > 0 {
+		return idx.SearchWeighted(a.Primary, k, width, nil)
+	}
+	return idx.SearchWith(q, k, width, nil)
 }

@@ -16,7 +16,9 @@ import (
 	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/qaflow"
+	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
 )
@@ -297,13 +299,35 @@ func runServe(args []string) error {
 	if _, err := srv.Rebuild(ctx); err != nil {
 		return err
 	}
+	// 查询侧三件（cumulus 的 IDF 加权关键词级 + 多级 fallback + LLM 词汇
+	// 鸿沟桥）：分析用索引事实，桥用 LLM，加权重取用加权检索。LLM 不在
+	// 时桥缺席——鸿沟时退化普通贵路（ 遥测可见）。
+	idx := srv.Index()
+	srv.Options.Analyzer = func(q string) query.Analysis { return query.Analyze(q, idx, idx.N) }
+	if *synthFlag == "llm" {
+		client, err := llm.FromEnv(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_CHAT_MODEL"))
+		if err != nil {
+			return err
+		}
+		srv.Options.Expander = &query.LLM{Client: client}
+		srv.Options.WeightedRetrieve = func(weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
+			hits := idx.SearchWeighted(weights, *topk, *width, nil)
+			out := make([]qaflow.EvidenceWindow, 0, len(hits))
+			for _, h := range hits {
+				out = append(out, qaflow.EvidenceWindow{SourceID: h.DocID, Title: h.Title, Span: h.SpanCoord, Text: h.SpanText, Score: h.Score})
+			}
+			return out, nil
+		}
+	}
+	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排
+	// 与语义接地尺）——升级判了却没有执行处，等于级联半条腿
+	srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
 	if *embedFlag == "minilm" {
 		embFn, _, err := pickEmbed(*embedFlag)
 		if err != nil {
 			return err
 		}
 		srv.Embedder = embFn()
-		srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
 	}
 	// 看目录：文件落进去即入库（零摩擦摄入的第三条路）
 	if *watchDir != "" {

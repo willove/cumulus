@@ -3,6 +3,10 @@ package qaflow
 import (
 	"fmt"
 
+	gocontext "context"
+
+	"github.com/willove/cumulus/internal/query"
+
 	"github.com/willove/cumulus/internal/context"
 )
 
@@ -31,6 +35,12 @@ type EscalationRecord struct {
 // 注册件，换底物不动流程。
 type EscalateStage struct {
 	Retrieve func(*context.Context, Rewrite) ([]EvidenceWindow, error) // 贵路：nil = 无执行处
+	// 词汇鸿沟桥（cumulus 的 keywords_multilevel）：升级且关键词级稀薄
+	// 时，先把口语问句翻成语料语言的检索词，再重取。缺一个字段就只走
+	// 普通贵路——桥是可选件，不是必经路。
+	Expand   query.Expander
+	Analyze  func(q string) query.Analysis
+	Weighted func(weights map[string]float64) ([]EvidenceWindow, error)
 }
 
 func (EscalateStage) Name() string { return "escalate" }
@@ -56,7 +66,7 @@ func (s EscalateStage) Run(c *context.Context) error {
 	if !ok {
 		return fmt.Errorf("escalate: rewrite missing")
 	}
-	ws, err := s.Retrieve(c, rw)
+	ws, err := s.escalateRetrieve(c, rw)
 	if err != nil {
 		return fmt.Errorf("escalate: retrieve: %w", err)
 	}
@@ -102,4 +112,36 @@ func routeWith(c *context.Context, ws []EvidenceWindow) RouteDecision {
 		d.Reason = fmt.Sprintf("resolved by escalation: confidence %.3f (coverage=%.3f margin=%.3f)", sig.Confidence, sig.Coverage, sig.Margin)
 	}
 	return d
+}
+
+// escalateRetrieve 升级时的取数：关键词级稀薄（词汇鸿沟）且有桥时，先
+// 扩展再按权取；否则走普通贵路。扩展失败不阻塞——按原查询走贵路，
+// 原因由调用方日志承担，不许把流程搞死。
+func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]EvidenceWindow, error) {
+	a, hasAnalysis := context.Get(c, KeyAnalysis)
+	thin := !hasAnalysis || a.Thin(2, 2.0)
+	if s.Expand == nil || s.Weighted == nil || !thin {
+		return s.Retrieve(c, rw)
+	}
+	expanded, err := s.Expand.Expand(gocontext.Background(), rw.Original)
+	if err != nil || len(expanded) == 0 {
+		return s.Retrieve(c, rw) // 桥失败：退化贵路
+	}
+	// 合并权重：**扩展词为主，原主级降为 0.2 的边注**。桥的语义是替换不
+	// 是并列——原问词在鸿沟场景下正是失败的那批（垃圾二元组在库里稀
+	// 有、idf 高，并列着会把桥带歪：真跑教训"养狗叫得太吵"扩出噪声，
+	// 得太/谁管俩垃圾词权重 2.0/1.0 把窗口拉去太湖流域管理条例）。
+	// 原词不清零：非纯鸿沟时它们仍可能带对信号。
+	weights := map[string]float64{}
+	for k, v := range a.Primary {
+		weights[k] = v * 0.2
+	}
+	for _, k := range expanded {
+		// 扩展词拆成索引口径（二元组）才进得了倒排
+		for _, bg := range query.SplitTerms(k) {
+			// 扩展词覆盖同形原词（桥比原问词懂行——重叠时听桥的）
+			weights[bg] = 2.0
+		}
+	}
+	return s.Weighted(weights)
 }
