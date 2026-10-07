@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/willove/cumulus/internal/abstain"
@@ -45,8 +46,10 @@ func run(args []string) error {
 		return runLearn(gocontext.Background())
 	case "serve":
 		return runServe(args[1:])
+	case "signals":
+		return runSignals(args[1:])
 	default:
-		return fmt.Errorf("unknown command %q; usage: cumulus selftest | cumulus eval | cumulus learn", args[0])
+		return fmt.Errorf("unknown command %q; usage: cumulus selftest | cumulus eval | cumulus learn | cumulus serve | cumulus signals", args[0])
 	}
 }
 
@@ -324,6 +327,9 @@ func runServe(args []string) error {
 		// 一问题的第二次起行为完全一致（破局后 12 跑时对时不对，根因就
 		// 是模型每次给的扩展词不同）
 		srv.Options.Expander = &query.Cached{Inner: &query.LLM{Client: client}}
+		// 使用信号落数据目录（与语料同盘，同生共死）：再问族服务端推
+		// 导，cite 族前端钩子，cumulus signals 看聚合
+		srv.Signals = knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
 		srv.Options.WeightedRetrieve = func(weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
 			hits := idx.SearchWeighted(weights, *topk, *width, nil)
 			out := make([]qaflow.EvidenceWindow, 0, len(hits))
@@ -357,4 +363,38 @@ func runServe(args []string) error {
 	fmt.Printf("serve: corpus=%d docs synth=%s embed=%s listen=%s\n", len(docs), synthLabel, *embedFlag, *listen)
 	fmt.Printf("serve: POST /v1/qa {question, session?} · GET /v1/health · GET /v1/status\n")
 	return http.ListenAndServe(*listen, srv.Handler())
+}
+
+// runSignals 打印使用信号聚合（"下一轮靶子从哪挑"的那张表）。信号是
+// 本地资产：只读本机文件，不出网。
+func runSignals(args []string) error {
+	fs := flag.NewFlagSet("signals", flag.ContinueOnError)
+	data := fs.String("data", "", "store directory (signals.json 在里面)")
+	top := fs.Int("top", 10, "每族列几条")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *data == "" {
+		return fmt.Errorf("signals: -data is required")
+	}
+	st := knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
+	if st.Len() == 0 {
+		fmt.Println("signals: 还没有信号（先跑服务、真问几个问题）")
+		return nil
+	}
+	fmt.Printf("signals: 共 %d 条\n", st.Len())
+	counts := st.Counts()
+	for _, kind := range []string{knowledge.SignalReaskAfterRefusal, knowledge.SignalReaskAfterAnswer, knowledge.SignalCitationClick} {
+		fmt.Printf("\n[%s] %d 条\n", kind, counts[kind])
+		if kind == knowledge.SignalCitationClick {
+			for _, s := range st.TopCitations(*top) {
+				fmt.Printf("  %6s 次  %s\n", s.Note, s.Target)
+			}
+			continue
+		}
+		for _, s := range st.TopQuestions(kind, *top) {
+			fmt.Printf("  %6s 次  %s\n", s.Note, s.Question)
+		}
+	}
+	return nil
 }

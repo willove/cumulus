@@ -58,6 +58,7 @@ const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&g
 async function ask() {
   const q = $('q').value.trim(); if (!q) return;
   const r = await fetch('/v1/qa', {method:'POST', headers:{'Content-Type':'application/json'},
+    lastQuestion = q;
     body: JSON.stringify({question:q, session:'web'})});
   const d = await r.json();
   render(d);
@@ -96,8 +97,14 @@ function meta(d) {
     '<details><summary>证据窗口 ' + (d.windows||[]).length + ' 个</summary>' + wins + '</details></div>';
 }
 
+let lastQuestion = "";
+
 async function showDoc(cite) {
   const [id, span] = cite.split('#');
+  // 引用点击 = 使用信号（"长"的地基）：这条证据被真看了。fire-and-forget，
+  // 失败不影响看文档。
+  fetch('/v1/signal', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({session:'web', kind:'cite', target: cite, question: lastQuestion})}).catch(()=>{});
   const r = await fetch('/v1/doc/' + encodeURIComponent(id) + '?span=' + encodeURIComponent(span||''));
   const d = await r.json();
   const box = $('docview');

@@ -12,6 +12,7 @@ import (
 
 	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -306,5 +307,44 @@ func TestQAResponseCarriesWindowTitles(t *testing.T) {
 	}
 	if qa.Windows[0].Title != "中华人民共和国甲法" {
 		t.Fatalf("window must carry its document title, got %q", qa.Windows[0].Title)
+	}
+}
+
+// 引用点击钩子：POST /v1/signal 落库，空 kind 拒收。
+func TestSignalEndpoint(t *testing.T) {
+	s := NewWithStore(newFakeStore(), nil, 3, 160)
+	req := httptest.NewRequest(http.MethodPost, "/v1/signal",
+		strings.NewReader(`{"session":"s","kind":"cite","target":"d1#rune[0:9]"}`))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("cite 该 204，got %d %s", rec.Code, rec.Body.String())
+	}
+	if s.Signals.Len() != 1 {
+		t.Fatalf("该落一条：%d", s.Signals.Len())
+	}
+	// 空 kind：没类型的信号聚合不了，拒收
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/signal", strings.NewReader(`{"kind":""}`))
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("空 kind 该 400，got %d", rec2.Code)
+	}
+}
+
+// GET /v1/signals：聚合视图（分布 + top 引用）机器可读。
+func TestSignalsAggregate(t *testing.T) {
+	s := NewWithStore(newFakeStore(), nil, 3, 160)
+	s.Signals.Record(knowledge.Signal{Kind: knowledge.SignalCitationClick, Target: "d1#rune[0:9]"})
+	s.Signals.Record(knowledge.Signal{Kind: knowledge.SignalCitationClick, Target: "d1#rune[0:9]"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/signals", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("200 该给：%d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "cite") || !strings.Contains(body, "d1#rune[0:9]") {
+		t.Fatalf("聚合里该有 cite 族与 target：%s", body)
 	}
 }

@@ -36,6 +36,9 @@ type Server struct {
 	Synth    qaflow.SynthFunc
 	Embedder embedPkg.Embedder // 可空：nil = 语义重排/语义尺缺席
 	Reuse    *knowledge.ReuseStore
+	// Signals 使用信号库（"长"的地基）：再问族服务端推导，cite 族前端
+	// 钩子。nil = 不记（库是可选件，缺了问答照常）。
+	Signals  *knowledge.SignalStore
 	Escalate func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error)
 	TopK     int
 	Width    int
@@ -80,7 +83,7 @@ func NewWithStore(st corpus.Port, synth qaflow.SynthFunc, topk, width int) *Serv
 	if width <= 0 {
 		width = 160
 	}
-	return &Server{Store: st, Synth: synth, TopK: topk, Width: width, Realm: "default", Reuse: knowledge.NewReuseStore()}
+	return &Server{Store: st, Synth: synth, TopK: topk, Width: width, Realm: "default", Reuse: knowledge.NewReuseStore(), Signals: knowledge.NewSignalStore("")}
 }
 
 // QARequest 是 POST /v1/qa 的请求。
@@ -198,6 +201,89 @@ type HealthResponse struct {
 	Realm      string `json:"realm"`
 }
 
+// SignalRequest 是 POST /v1/signal 的请求体（前端钩子用）。目前唯一
+// 的实际发送方是引用点击（cite）；接收端不锁死类型，服务端推导的四
+// 族之外的新族从这里进（加族前必须有真实使用在要它，不预先建）。
+type SignalRequest struct {
+	Session  string `json:"session"`
+	Kind     string `json:"kind"`
+	Target   string `json:"target"`   // cite 的 "doc#span"
+	Question string `json:"question"` // 可选：被点的答案对应的问句
+}
+
+// POST /v1/signal——外部信号入口。目前唯一发送方是引用点击；拒收空
+// kind（没类型的信号聚合不了）。
+func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	var req SignalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Kind) == "" {
+		writeErr(w, http.StatusBadRequest, "kind is required")
+		return
+	}
+	if s.Signals == nil {
+		writeErr(w, http.StatusNotImplemented, "signal store not configured")
+		return
+	}
+	s.Signals.Record(knowledge.Signal{
+		Session:  req.Session,
+		Kind:     req.Kind,
+		Target:   req.Target,
+		Question: knowledge.NormalizeQuestion(req.Question),
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /v1/signals——聚合视图（分布 + 每族 top 问句 + 最常被点引用）。
+// 这是"下一轮靶子从哪挑"的那张表，机器可读。
+func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if s.Signals == nil {
+		writeErr(w, http.StatusNotImplemented, "signal store not configured")
+		return
+	}
+	out := map[string]any{
+		"total":  s.Signals.Len(),
+		"counts": s.Signals.Counts(),
+		"top": map[string]any{
+			knowledge.SignalReaskAfterRefusal: questionCounts(s.Signals.TopQuestions(knowledge.SignalReaskAfterRefusal, 10)),
+			knowledge.SignalReaskAfterAnswer:  questionCounts(s.Signals.TopQuestions(knowledge.SignalReaskAfterAnswer, 10)),
+			knowledge.SignalCitationClick:     citeCounts(s.Signals.TopCitations(10)),
+		},
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func questionCounts(sigs []knowledge.Signal) []map[string]any {
+	out := make([]map[string]any, 0, len(sigs))
+	for _, s := range sigs {
+		out = append(out, map[string]any{"question": s.Question, "count": atoiView(s.Note)})
+	}
+	return out
+}
+
+func citeCounts(sigs []knowledge.Signal) []map[string]any {
+	out := make([]map[string]any, 0, len(sigs))
+	for _, s := range sigs {
+		out = append(out, map[string]any{"target": s.Target, "count": atoiView(s.Note)})
+	}
+	return out
+}
+
+func atoiView(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
 // StatusResponse 是 GET /v1/status 的响应：可选组件的启停。cumulus 的
 // MCS 静默不触发，缺的就是这一面。
 type StatusResponse struct {
@@ -218,6 +304,8 @@ type UsageView struct {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/qa", s.handleQA)
+	mux.HandleFunc("/v1/signal", s.handleSignal)
+	mux.HandleFunc("/v1/signals", s.handleSignals)
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/ingest", s.handleIngest)
@@ -258,7 +346,14 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "flow: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.record(c, req.Question))
+	resp := s.record(c, req.Question)
+	// 使用信号（"长"的地基）：同一 session 同一问句再来一次 = 再问。按
+	// 上轮答没答分两族（弃权没解决 / 答案没答全）——服务端推导，前端零
+	// 改动。无 session 的一次性问答不记（没有"再问"的上下文）。
+	if s.Signals != nil && req.Session != "" {
+		s.Signals.Remember(req.Session, req.Question, resp.Refused)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // record 从 context 采一次问答的完整记录。这是 HTTP 面的核心承诺：
