@@ -161,6 +161,7 @@ type FactView struct {
 	Covered  bool          `json:"covered"`
 	NearMiss float64       `json:"near_miss,omitempty"`
 	Supports []SupportView `json:"supports,omitempty"`
+	Judge    string        `json:"judge,omitempty"` // 判官裁决（rescued/no-support/error:…）
 }
 
 // SupportView 是支撑某条事实的一个窗口。
@@ -371,7 +372,7 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	}
 	if fx, ok := context.Get(c, qaflow.KeyFactReport); ok {
 		for _, f := range fx.Facts {
-			fv := FactView{ID: f.ID, Query: f.Query, Covered: f.Covered, NearMiss: f.NearMiss}
+			fv := FactView{ID: f.ID, Query: f.Query, Covered: f.Covered, NearMiss: f.NearMiss, Judge: f.Judge}
 			for _, s := range f.Supports {
 				fv.Supports = append(fv.Supports, SupportView{SourceID: s.SourceID, Span: s.Span, Score: s.Score})
 			}

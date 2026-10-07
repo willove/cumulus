@@ -16,6 +16,7 @@ import (
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/ctxmgmt"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/llm"
@@ -327,6 +328,9 @@ func runServe(args []string) error {
 		// 一问题的第二次起行为完全一致（破局后 12 跑时对时不对，根因就
 		// 是模型每次给的扩展词不同）
 		srv.Options.Expander = &query.Cached{Inner: &query.LLM{Client: client}}
+		// 事实覆盖判官：词面判据认不出改写（"专利期" vs "专利权的期
+		// 限"），未盖的事实让模型判一次——只升级不降级，失败不阻塞
+		srv.Options.FactScorer = &facts.LLMScorer{Client: client}
 		// 使用信号落数据目录（与语料同盘，同生共死）：再问族服务端推
 		// 导，cite 族前端钩子，cumulus signals 看聚合
 		srv.Signals = knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))

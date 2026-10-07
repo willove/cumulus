@@ -47,6 +47,7 @@ export interface FactView {
   covered: boolean;
   near_miss?: number;
   supports?: SupportView[];
+  judge?: string;
 }
 
 export interface SupportView {

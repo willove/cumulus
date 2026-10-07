@@ -424,7 +424,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	stages := []flow.Stage{
 		RewriteStage{Query: query, Hypothetical: opts.Hypothetical, Idx: opts.RewriteIdx, Analyze: opts.Analyzer, Prior: opts.Prior},
 		EvidenceStage{Retrieve: retrieve},
-		FactsStage{}, // 事实覆盖 + 一致性门（恒注册：这是"答得全不全"的
+		FactsStage{Scorer: opts.FactScorer}, // 事实覆盖 + 一致性门（恒注册：这是"答得全不全"的
 		// 判据，不是可选件；注不注册由上面的 list 说话，不设空壳）
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
@@ -440,7 +440,10 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	for _, st := range stages {
 		rerun = append(rerun, st)
 		if st.Name() == (EscalateStage{}).Name() {
-			rerun = append(rerun, FactsStage{})
+			// 插**同一个** FactsStage 实例（带判官）——空壳会把 Scorer 丢
+			// 掉：二次判定的存在意义就是按最终窗集重算，没判官的二次判
+			// 定会把第一次救回的事实又打回未盖（真跑教训）
+			rerun = append(rerun, FactsStage{Scorer: opts.FactScorer})
 		}
 	}
 	stages = rerun
@@ -530,7 +533,10 @@ type Options struct {
 	// + 标题 + 条文结构）。治 BM25 的短文档偏爱——答案在长法律里被短
 	// 解释压住的那类。cumulus 同款 opt-in（UsePrior），默认关，验完再
 	// 定去留。
-	Prior bool
+	// FactScorer 事实覆盖的模型判官（词面判据的兜底升级：认不出改写的
+	// 那类未盖事实让模型判一次）。nil = 只有词面判据。
+	FactScorer facts.Scorer
+	Prior      bool
 	// Escalate 是升级（FAST→DEEP）的贵路取数函数：路由判 escalate 时
 	// 跑它再判一次（BioHarness 级联）。nil = 升级无执行处（死标签，
 	// 遥测里可见）。

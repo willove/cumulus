@@ -11,7 +11,12 @@ import (
 // Missing/Weakest）与**证据一致性门**的冲突列表（同事实两窗给不同的数）。
 // 挂在 evidence 之后、evict 之前——判定要看的是驱逐前还是驱逐后的窗？
 // 驱逐前：事实缺口在驱逐前就报出来，驱逐不能把"未盖"洗成"已盖"。
-type FactsStage struct{}
+type FactsStage struct {
+	// Scorer 模型判官（词面判据的兜底升级）。nil = 只有词面判据。
+	// 判官只升级不降级：词面已盖的事实不过问；失败/违约时保持词面原判
+	// ——判官缺席流程照跑。
+	Scorer facts.Scorer
+}
 
 func (FactsStage) Name() string { return "fact-coverage" }
 func (FactsStage) Reads() []string {
@@ -21,7 +26,7 @@ func (FactsStage) Writes() []string {
 	return []string{KeyFactReport.String(), KeyConflicts.String()}
 }
 
-func (FactsStage) Run(c *context.Context) error {
+func (s FactsStage) Run(c *context.Context) error {
 	fx, ok := context.Get(c, KeyFacts)
 	if !ok {
 		// 直驱路径（测试/单独调深路）没走 intent 阶段：门静默跳过，不
@@ -34,6 +39,10 @@ func (FactsStage) Run(c *context.Context) error {
 		views = append(views, facts.Window{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
 	rep := facts.Evaluate(fx, views)
+	// 判官兜底：词面判没盖的事实（认不出改写的那类——"专利期"三字在
+	// "专利权的期限"里就不连续）问一次模型。词面判据的盲区正是模型
+	// 的读长项（Noesis：瓶颈是上下文利用，不是检索质量）。
+	_ = facts.Rescue(&rep, views, s.Scorer) // 判官失败 = 没有判官，原判不变
 	conflicts := facts.Conflicts(fx, views)
 	if err := context.Set(c, KeyFactReport, rep); err != nil {
 		return err

@@ -121,6 +121,15 @@ var articleMark = regexp.MustCompile(`第[一二三四五六七八九十百零�
 // 一个"第X条"标记，终点推到 hi 后第一个标记。命中必在窗内。没有标记
 // 可用时退回原窗口 [fallbackStart, fallbackEnd)。
 func snapToArticles(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (int, int) {
+	start, end, _ := snapToArticlesInfo(runes, lo, hi, fallbackStart, fallbackEnd)
+	return start, end
+}
+
+// snapToArticlesInfo 同 snapToArticles，另返回"是否真用上了条文标记"。
+// 锚点用它排除目录/前言（没有"第X条"标记的区域不是证据所在——真跑教
+// 训：专利法的目录里就有"期限"章节名，簇搜先撞上目录，答案条文第四十
+// 二条反而落选）。
+func snapToArticlesInfo(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (int, int, bool) {
 	body := string(runes)
 	runeAt := func(byteOff int) int { return utf8.RuneCountInString(body[:byteOff]) }
 	markBefore := func(runeOff int) (int, bool) {
@@ -147,12 +156,12 @@ func snapToArticles(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (int, 
 		end = fallbackEnd
 	}
 	if end <= lo { // 极端：标记极近，保命要紧
-		return fallbackStart, fallbackEnd
+		return fallbackStart, fallbackEnd, false
 	}
 	if start > lo {
 		start = lo
 	}
-	return start, end
+	return start, end, ok1 && ok2
 }
 
 // WindowAnchored 与 Window 同逻辑，但吸附锚点是**事实自己在文档里的落
@@ -250,12 +259,26 @@ func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor
 		}
 		return false
 	}
-	snap := func(at int) (int, int) {
-		start, end := snapToArticles(runes, at, at+3, at-width/2, at+width/2)
+	snap := func(at int) (lo, hi int, marked bool) {
+		// 兜底窗必须钳在 [0,n]：at-width/2 在文档头部是负数， snapToArticles
+		// 找不到条文标记时原样返回它 → 坐标 rune[-104:168] → ResolveSpan
+		// 取出空文本，锚点静默失效（真跑教训：专利法的锚一直落在负坐标
+		// 上，f1 的窗全是空壳）
+		fbLo, fbHi := at-width/2, at+width/2
+		if fbLo < 0 {
+			fbLo = 0
+		}
+		if fbHi > n {
+			fbHi = n
+		}
+		start, end, marked := snapToArticlesInfo(runes, at, at+3, fbLo, fbHi)
+		if start < 0 {
+			start = 0
+		}
 		if end > n {
 			end = n
 		}
-		return start, end
+		return start, end, marked
 	}
 
 	// 一级锚：3 字核心，稀有度升序 × 每次出现。覆盖判定选窗。
@@ -274,7 +297,7 @@ func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor
 	sort.SliceStable(coreOcc, func(i, j int) bool { return coreOcc[i].count < coreOcc[j].count })
 	var fallback string
 	for _, o := range coreOcc {
-		lo, hi := snap(o.at)
+		lo, hi, _ := snap(o.at)
 		coord := fmt.Sprintf("rune[%d:%d]", lo, hi)
 		if fallback == "" {
 			fallback = coord
@@ -297,14 +320,54 @@ func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor
 	if len(allPos) == 0 {
 		return idx.Window(docID, terms, width) // 锚词一个都不在：密度定心
 	}
-	bestAt, bestHits := allPos[0], -1
+	// 优先**紧跟条文标记**的位置（正文条目 = "第X条"后几个字；目录里同
+	// 名章节名的簇一样大，但最近的标记是上一条目录项、距离远——真跑教
+	// 训：专利法目录里就有"第四十二条 发明专利权的期限为二十年"整句，
+	// 簇大小与正文并列，不区分就锚进目录），其次簇最大，再其次最靠前。
+	marks := articleMark.FindAllStringIndex(d.Body, -1)
+	markRune := make([]int, 0, len(marks))
+	for _, m := range marks {
+		markRune = append(markRune, len([]rune(d.Body[:m[0]])))
+	}
+	markDist := func(p int) int { // p 到最近的前置条文标记的距离（无 = -1）
+		closest := -1
+		for _, m := range markRune {
+			if m <= p && m > closest {
+				closest = m
+			}
+		}
+		if closest < 0 {
+			return -1
+		}
+		return p - closest
+	}
+	bestAt, bestHits, bestTight := -1, -1, false
 	for _, p := range allPos {
-		if h := hitsIn(p-radius, p+radius); h > bestHits {
-			bestHits, bestAt = h, p
+		dist := markDist(p)
+		tight := dist >= 0 && dist <= tightMarkRunes
+		h := hitsIn(p-radius, p+radius)
+		if betterAnchor(h, tight, bestHits, bestTight) {
+			bestAt, bestHits, bestTight = p, h, tight
 		}
 	}
-	lo, hi := snap(bestAt)
+	if bestAt < 0 {
+		return idx.Window(docID, terms, width)
+	}
+	lo, hi, _ := snap(bestAt)
 	return fmt.Sprintf("rune[%d:%d]", lo, hi)
+}
+
+// tightMarkRunes 位置离最近条文标记多远还算"正文条目内"。目录项的上
+// 一个标记是上一条目录项（隔着一整行），正文条目紧跟自己的标记（几
+// 个全角空格）。40 = 正文条目内的典型距离的上界。
+const tightMarkRunes = 40
+
+// betterAnchor 簇位置择优：有条文标记 > 簇大 > 位置靠前。
+func betterAnchor(hits int, marked bool, bestHits int, bestMarked bool) bool {
+	if marked != bestMarked {
+		return marked // 有标记的赢（目录不是证据所在）
+	}
+	return hits > bestHits
 }
 
 // contentCores 事实的内容词（二元组，去胶水——与 query.IsGlue 同口径的

@@ -35,7 +35,12 @@ func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, fx f
 		var rendered []qaflow.EvidenceWindow
 		for _, f := range fx.Facts {
 			g := group{fact: f}
-			for _, s := range facts.SupportsOf(f, toFactWindows(windows)) {
+			// 用**报告里的**支撑（不用词面重算）：报告现在按最终窗集算
+			// （escalate 后二次判定），且带着判官的裁决——rescued 的支
+			// 撑是模型判的，词面重算会把它扔回"无支撑"，模型就照着错支
+			// 架答"未涉及"（真跑教训：判官救回 f1，合成仍显示无支撑）。
+			// 支撑窗必须还在最终窗集里（过滤掉已被驱逐的）。
+			for _, s := range f.Supports {
 				if w := findWindow(windows, s.SourceID, s.Span); w != nil {
 					g.ws = append(g.ws, *w)
 					rendered = append(rendered, *w)

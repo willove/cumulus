@@ -32,6 +32,7 @@ type Fact struct {
 	Score    float64  `json:"score,omitempty"`     // 最好支撑窗的分数
 	NearMiss float64  `json:"near_miss,omitempty"` // 未盖时的最好接进度
 	Supports []Window `json:"supports,omitempty"`  // 全部支撑窗（按分降序）
+	Judge    string   `json:"judge,omitempty"`     // 判官裁决（rescued=救回/no-support=判没支撑/error:…=判官缺席）
 }
 
 // Report 是事实覆盖状态。

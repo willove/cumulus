@@ -171,6 +171,9 @@
           "id": {
             "type": "string"
           },
+          "judge": {
+            "type": "string"
+          },
           "near_miss": {
             "type": "number"
           },
