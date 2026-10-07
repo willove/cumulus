@@ -105,3 +105,34 @@ func TestRankEmptyAndUnknownQuery(t *testing.T) {
 		t.Fatal("no-hit query must return nil, not everything")
 	}
 }
+
+// 混排文本（拉丁/数字直接接 CJK）必须在脚本边界分开：整串当一个词的
+// 话 df 恒为 0，查询取不到任何候选——DuReader 真实问句 10% 死在这里。
+func TestFieldsSplitsScriptBoundaries(t *testing.T) {
+	cases := []struct {
+		text string
+		want []string
+	}{
+		{"iphone6照片流在哪", []string{"iphone6", "照片", "片流", "流在", "在哪"}},
+		{"8月去关山牧场穿什么", []string{"8", "月去", "去关", "关山", "山牧", "牧场", "场穿", "穿什", "什么"}},
+		{"gtx960比gtx660强多少", []string{"gtx960", "gtx660", "强多", "多少"}}, // 单字 CJK 段丢弃
+		{"GTX960", []string{"gtx960"}},
+		{"连接池配置", []string{"连接", "接池", "池配", "配置"}},
+	}
+	for _, c := range cases {
+		if got := Fields(c.text); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("Fields(%q)\n want %v\n  got %v", c.text, c.want, got)
+		}
+	}
+}
+
+// 混排问句在真索引里必须能取到候选（回归：修复前整串一个词，Rank 恒空）。
+func TestMixedScriptQueryFindsCandidates(t *testing.T) {
+	idx := Build([]Document{
+		{ID: "d1", Body: "iphone6 的照片流功能可以把照片同步到云端相册。"},
+		{ID: "d2", Body: "连接池最大连接数默认为 100。"},
+	})
+	if ids := idx.Rank("iphone6照片流在哪", 3); len(ids) == 0 || ids[0] != "d1" {
+		t.Fatalf("mixed-script query must reach the index, got %v", ids)
+	}
+}

@@ -14,42 +14,59 @@ import (
 
 // Fields 把文本切成检索词项：CJK 连续段出二元组，字母数字连续段出整词。
 // 与 cumulus 的 mcs.Fields 同语义（端口重写，不引依赖）。
+//
+// **两种脚本必须在边界处分开**。合并成一段的写法有一个致命后果：混排
+// 文本（"iphone6照片流在哪"、"8月去关山牧场穿什么"）整串变成一个词，
+// 它的 df 恒为 0——查询一个候选都取不到，症状是"拒答/召回不足"，根因
+// 却是分词（DuReader 真实问句实测 10% 死在这一步：iphone6照片流、soc、
+// ie、linux、gtx960 全是这一类）。语法边界就是语义边界，这里不许省。
 func Fields(text string) []string {
 	var out []string
 	var cur []rune
+	curCJK := false
 	flush := func() {
-		if len(cur) >= 2 {
+		if len(cur) == 0 {
+			return
+		}
+		if curCJK {
+			// CJK 段切二元组；单字段丢弃（与既有行为一致：单字噪声大）
+			if len(cur) >= 2 {
+				for i := 0; i+1 < len(cur); i++ {
+					out = append(out, string(cur[i:i+2]))
+				}
+			}
+		} else {
 			out = append(out, strings.ToLower(string(cur)))
 		}
 		cur = cur[:0]
 	}
 	for _, r := range text {
 		switch {
-		case r >= 0x4e00 && r <= 0x9fff:
+		case isCJK(r):
+			if len(cur) > 0 && !curCJK {
+				flush() // 字母数字段 → CJK 段
+			}
+			curCJK = true
 			cur = append(cur, r)
-		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+		case isAlnum(r):
+			if len(cur) > 0 && curCJK {
+				flush() // CJK 段 → 字母数字段
+			}
+			curCJK = false
 			cur = append(cur, r)
 		default:
 			flush()
 		}
 	}
 	flush()
-	// CJK 段再切二元组；字母数字段保持整词。
-	expanded := make([]string, 0, len(out))
-	for _, f := range out {
-		runes := []rune(f)
-		if len(runes) >= 2 && isCJK(runes[0]) {
-			for i := 0; i+1 < len(runes); i++ {
-				expanded = append(expanded, string(runes[i:i+2]))
-			}
-		} else {
-			expanded = append(expanded, f)
-		}
-	}
-	return expanded
+	return out
 }
 
 func isCJK(r rune) bool { return r >= 0x4e00 && r <= 0x9fff }
+
+func isAlnum(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+}
 
 // UniqueTerms 去重且保序（查询侧与 RankTerms 共用）。
 func UniqueTerms(terms []string) []string {
