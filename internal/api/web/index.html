@@ -86,6 +86,8 @@ function meta(d) {
   if (d.reuse && d.reuse.hit) chips.push('复用命中');
   if (d.eviction && (d.eviction.merged + d.eviction.dropped) > 0)
     chips.push('驱逐:合' + d.eviction.merged + '/丢' + d.eviction.dropped);
+  if (d.prior && d.prior.length)
+    chips.push('prior×' + d.prior.length + ' 置顶' + (d.prior[0].score).toFixed(2));
   const wins = (d.windows||[]).map(w =>
     '<div class="win">' + esc(w.title || w.source_id) + ' · ' + esc(w.span) + ' · ' + w.score.toFixed(2) +
     '<br><span class="meta">' + esc((w.text||'').slice(0,80)) + '</span></div>').join('');
