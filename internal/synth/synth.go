@@ -119,10 +119,13 @@ func parseSynthesis(raw string, windows []qaflow.EvidenceWindow, labels []string
 	// 拒答协议：answer 与 assertions 都必须空；带文本的"拒答"是混日子，
 	// 按错误处理（拒答不许夹带答案）
 	if parsed.Refused {
-		if strings.TrimSpace(parsed.Answer) != "" || len(parsed.Assertions) > 0 {
-			return qaflow.Answer{}, fmt.Errorf("synth llm: refused answer must not carry text or assertions; raw=%q", truncate(raw, 200))
+		// 拒答可以带理由（模型天然会解释为什么拒——"现有证据不足以…"），
+		// 但理由进 RefusalReason 字段，不进 Text、不许带断言。断言跟着
+		// 拒答出现 = 既说不知道又摆证据，自相矛盾，按错误处理。
+		if len(parsed.Assertions) > 0 {
+			return qaflow.Answer{}, fmt.Errorf("synth llm: refused answer must not carry assertions; raw=%q", truncate(raw, 200))
 		}
-		return qaflow.Answer{Refused: true}, nil
+		return qaflow.Answer{Refused: true, RefusalReason: strings.TrimSpace(parsed.Answer)}, nil
 	}
 	if strings.TrimSpace(parsed.Answer) == "" && len(parsed.Assertions) == 0 {
 		return qaflow.Answer{}, fmt.Errorf("synth llm: empty answer; raw=%q", truncate(raw, 200))

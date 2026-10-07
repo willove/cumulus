@@ -37,6 +37,7 @@ type Summary struct {
 	JudgeAcc              float64
 	AvgLatencyMS          int64
 	Refused               int // 拒答题数（合法结局：诚实的不知道）
+	ItemErrors            int // 单题失败数（网络抖动/畸形输出；不杀全场）
 	JudgeErrs             int // 判官未判上分的题数（原因逐题在 JudgeErr）
 	TotalPromptTokens     int
 	TotalCompletionTokens int
@@ -56,6 +57,9 @@ func Summarize(s RunState) Summary {
 	for _, r := range s.Results {
 		if r.Refused {
 			out.Refused++
+		}
+		if len(r.Failure) > 9 && r.Failure[:10] == "eval-error" {
+			out.ItemErrors++
 		}
 		if r.JudgeOK == nil && r.JudgeErr != "" {
 			out.JudgeErrs++
@@ -99,8 +103,8 @@ func (s Summary) String() string {
 		judge = fmt.Sprintf("%.1f%% (n=%d)", s.JudgeAcc*100, s.JudgeN)
 	}
 	return fmt.Sprintf(
-		"items=%d rule=%.1f%% evidence=%.1f%% citations=%.1f%% judge=%s latency=%dms tokens(p/c/j)=%d/%d/%d cost_unknown=%d refused=%d judge_errs=%d",
+		"items=%d rule=%.1f%% evidence=%.1f%% citations=%.1f%% judge=%s latency=%dms tokens(p/c/j)=%d/%d/%d cost_unknown=%d refused=%d judge_errs=%d item_errors=%d",
 		s.ItemsDone, s.RuleAvg*100, s.EvidenceHitRate*100, s.CitationsOKRate*100,
-		judge, s.AvgLatencyMS, s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalJudgeTokens, s.CostUnknownItems, s.Refused, s.JudgeErrs,
+		judge, s.AvgLatencyMS, s.TotalPromptTokens, s.TotalCompletionTokens, s.TotalJudgeTokens, s.CostUnknownItems, s.Refused, s.JudgeErrs, s.ItemErrors,
 	)
 }

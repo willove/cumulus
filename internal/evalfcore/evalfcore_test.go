@@ -204,20 +204,45 @@ func TestInterruptedRunIsNotColdReplayed(t *testing.T) {
 	}
 }
 
-func TestExecutorFailureKeepsPersistedItems(t *testing.T) {
+// 单题失败不杀全场：记成 eval-error 项，其余题照跑（真跑教训：300 题
+// 两次都在 130-250 题处被单题杀死，12 分钟全废）。
+func TestSingleItemErrorDoesNotKillRun(t *testing.T) {
 	st := newMemStore()
 	ex := &failOnSecondExecutor{}
 	r := NewRunner(st, testFP(), ex, nil)
-	_, err := r.Start(context.Background(), "run-f", testItems())
-	if err == nil {
-		t.Fatal("executor failure must surface")
+	state, err := r.Start(context.Background(), "run-f", testItems())
+	if err != nil {
+		t.Fatalf("single item error must not kill the run: %v", err)
 	}
-	saved, _ := st.LoadRun(context.Background(), "run-f")
+	if state.Status != StatusDone {
+		t.Fatalf("run must complete, got %s", state.Status)
+	}
+	if state.ItemErrors != 1 {
+		t.Fatalf("item error must be counted, got %d", state.ItemErrors)
+	}
+	var found bool
+	for _, res := range state.Results {
+		if res.ItemID == testItems()[1].ID && len(res.Failure) > 9 && res.Failure[:10] == "eval-error" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("failed item must be recorded with reason: %+v", state.Results[1])
+	}
+}
+
+// 系统性故障：开头全失败 → 停（key 错/端点挂，重试无意义）。
+func TestSystemicFailureAbortsEarly(t *testing.T) {
+	st := newMemStore()
+	ex := &alwaysFailExecutor{}
+	r := NewRunner(st, testFP(), ex, nil)
+	_, err := r.Start(context.Background(), "run-s", testItems())
+	if err == nil {
+		t.Fatal("systemic failure must abort")
+	}
+	saved, _ := st.LoadRun(context.Background(), "run-s")
 	if saved.Status != StatusFailed {
 		t.Fatalf("want failed, got %s", saved.Status)
-	}
-	if saved.ItemsDone != 1 {
-		t.Fatalf("completed item must stay persisted, got %d", saved.ItemsDone)
 	}
 }
 
@@ -229,6 +254,12 @@ func (e *failOnSecondExecutor) Answer(_ context.Context, _ string) (ItemOutcome,
 		return ItemOutcome{}, errors.New("upstream exploded")
 	}
 	return ItemOutcome{Answer: "100", RouteAction: "fast"}, nil
+}
+
+type alwaysFailExecutor struct{}
+
+func (e *alwaysFailExecutor) Answer(_ context.Context, _ string) (ItemOutcome, error) {
+	return ItemOutcome{}, errors.New("endpoint down")
 }
 
 // ---- 可比性 ----

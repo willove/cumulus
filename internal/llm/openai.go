@@ -6,10 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// transient 判瞬时网络错（超时、连接重置、EOF）。只重试这些——
+// 4xx/5xx 是 HTTP 层，重试无意义（限流另说）。
+func transient(err error) bool {
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "broken pipe")
+}
 
 // OpenAICompleter 是 OpenAI 兼容的 /chat/completions 客户端
 // （MiniMax、DeepSeek、Groq 等同一形状）。契约与 cumulus 的
@@ -103,7 +116,20 @@ func (c *OpenAICompleter) Complete(ctx context.Context, req Request) (Response, 
 		httpReq.Header.Set("X-LLM-Caller", c.Caller)
 	}
 
-	resp, err := c.Client.Do(httpReq)
+	// 有界重试：只为瞬时网络错（超时/连接重置）重试，最多 2 次，间隔
+	// 短。一次 TCP 抖动不该废掉一个跑了 12 分钟的评测（真跑教训：
+	// 300 题跑到 247 题被一个 read timeout 全杀掉）。
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		// 重试前重置请求体：第一次尝试已把它读走
+		httpReq.Body = io.NopCloser(bytes.NewReader(raw))
+		httpReq.ContentLength = int64(len(raw))
+		resp, err = c.Client.Do(httpReq)
+		if err == nil || attempt >= 2 || !transient(err) {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+	}
 	if err != nil {
 		return Response{}, fmt.Errorf("llm: do: %w", err)
 	}

@@ -154,3 +154,46 @@ func TestCompleteSendsReasoningEffortLow(t *testing.T) {
 		t.Fatalf("reasoning_effort must be low, got %q", gotEffort)
 	}
 }
+
+// 瞬时网络错有界重试：第一次超时、第二次成功 → 成功且只重试一次。
+func TestCompleteRetriesTransientError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// 模拟一次读超时：直接断连
+			hj, _ := w.(http.Hijacker)
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := &OpenAICompleter{BaseURL: srv.URL, APIKey: "k", Model: "m", Client: srv.Client()}
+	r, err := c.Complete(context.Background(), Request{System: "s", Prompt: "p"})
+	if err != nil {
+		t.Fatalf("transient error must be retried, got %v", err)
+	}
+	if r.Text != "ok" || calls != 2 {
+		t.Fatalf("want one retry then success, calls=%d text=%q", calls, r.Text)
+	}
+}
+
+// 非瞬时错不重试：400 立刻返回。
+func TestCompleteDoesNotRetryHTTPError(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(400)
+		w.Write([]byte(`{"error":{"message":"bad request"}}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := &OpenAICompleter{BaseURL: srv.URL, APIKey: "k", Model: "m", Client: srv.Client()}
+	if _, err := c.Complete(context.Background(), Request{System: "s", Prompt: "p"}); err == nil {
+		t.Fatal("400 must fail")
+	}
+	if calls != 1 {
+		t.Fatalf("http error must not retry, calls=%d", calls)
+	}
+}

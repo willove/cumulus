@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	gocontext "context"
 
@@ -124,6 +125,27 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 // defaultGroundingFloor 语义接地地板的默认值（可过 CUMULUS_GROUNDING 调）。
 const defaultGroundingFloor = 0.5
 
+// knobsFromEnv 用环境变量覆盖旋钮（实验入口：CUMULUS_TOPK /
+// CUMULUS_WIDTH）。旋钮本来就该被实验驱动——覆盖只是把注册表的口
+// 开到命令行，不新增旋钮语义。
+func knobsFromEnv(knobs map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for k, v := range knobs {
+		out[k] = v
+	}
+	if v := os.Getenv("CUMULUS_TOPK"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			out["evidence.topk"] = float64(n)
+		}
+	}
+	if v := os.Getenv("CUMULUS_WIDTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			out["evidence.width"] = float64(n)
+		}
+	}
+	return out
+}
+
 // defaultKnobs 默认旋钮。width=160 不是拍的：真实运行（cn-law-rag，
 // MiniMax 真合成）发现 60 字宽把法条拦腰截断（“为了保护专利权人的合法权”
 // 就断了），模型对碎片证据全部正确拒答——judge 一度只有 6%。法条平均
@@ -227,10 +249,10 @@ func runEval(ctx gocontext.Context) error {
 		// 三者窗口预算一致才可比——不然"窗口多所以命中高"是预算差异不是
 		// 部件差异。（belief 全局声望臂已退役；按会话复用由 selftest 覆盖。）
 		deepOpts := &qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0}
-		k9 := defaultKnobs()
+		k9 := knobsFromEnv(defaultKnobs())
 		k9["evidence.topk"] = 9
 		deepEnabled := os.Getenv("CUMULUS_DEEP") == "1"
-		a, err := runOne("run-ab-bm25", "bm25", false, defaultKnobs(), nil)
+		a, err := runOne("run-ab-bm25", "bm25", false, knobsFromEnv(defaultKnobs()), nil)
 		if err != nil {
 			return err
 		}
@@ -241,7 +263,7 @@ func runEval(ctx gocontext.Context) error {
 			if err != nil {
 				return err
 			}
-			deepRun, err := runOne("run-ab-deep", "deep", true, defaultKnobs(), deepOpts)
+			deepRun, err := runOne("run-ab-deep", "deep", true, knobsFromEnv(defaultKnobs()), deepOpts)
 			if err != nil {
 				return err
 			}
@@ -275,7 +297,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", defaultKnobs(), nil)
+	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", knobsFromEnv(defaultKnobs()), nil)
 	if err != nil {
 		return err
 	}

@@ -71,9 +71,12 @@ type RouteDecision struct {
 
 // Answer 是 stage 4 的产物。Citations 必须能映射回窗口 id。
 type Answer struct {
-	Text      string
-	Citations []string // window 标识（SourceID#Span）
-	Refused   bool
+	Text          string
+	Citations     []string // window 标识（SourceID#Span）
+	Refused       bool
+	RefusalReason string // 拒答理由（模型给的解释）。Text 保持空——
+	// 理由不当答案，不许进判官与规则臂（真运行学到的：模型拒答天然
+	// 带解释，硬要清空等于把有用信息扔掉，混进 Text 又成了夹带）
 }
 
 // Usage 是 stage 5 的记账。上游不报 usage 时 CostKnown=false，
@@ -339,6 +342,10 @@ func (s SynthesizeStage) Verify(c *context.Context) error {
 		if a.Text != "" {
 			return errors.New("refused answer must not carry text")
 		}
+		if len(a.Citations) > 0 {
+			return errors.New("refused answer must not carry citations")
+		}
+		// RefusalReason 允许非空（理由不是答案）
 		return nil
 	}
 	ws, _ := context.Get(c, KeyWindows)

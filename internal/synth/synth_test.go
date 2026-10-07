@@ -154,9 +154,26 @@ func TestLLMSynthesizeAcceptsRefusalProtocol(t *testing.T) {
 }
 
 // 拒答夹带答案/断言：混日子，按错误处理。
-func TestLLMSynthesizeRejectsRefusalWithContent(t *testing.T) {
-	l := &LLM{Client: &fakeCompleter{text: `{"answer":"100","assertions":[],"refused":true}`}}
+func TestLLMSynthesizeRefusalReasonIsKeptSeparate(t *testing.T) {
+	// 模型拒答天然带解释（真运行学到的）：理由进 RefusalReason，
+	// 不进 Text、不许带断言
+	l := &LLM{Client: &fakeCompleter{text: `{"answer":"现有证据不足以确定","assertions":[],"refused":true}`}}
+	ans, _, err := l.Synthesize("q", windows())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ans.Refused || ans.Text != "" {
+		t.Fatalf("reason must not leak into answer text: %+v", ans)
+	}
+	if ans.RefusalReason != "现有证据不足以确定" {
+		t.Fatalf("reason must be preserved: %q", ans.RefusalReason)
+	}
+}
+
+func TestLLMSynthesizeRejectsRefusalWithAssertions(t *testing.T) {
+	// 既说不知道又摆断言：自相矛盾，按错误处理
+	l := &LLM{Client: &fakeCompleter{text: `{"answer":"不知道","assertions":[{"text":"x","window":"w1"}],"refused":true}`}}
 	if _, _, err := l.Synthesize("q", windows()); err == nil {
-		t.Fatal("refusal carrying an answer must be rejected")
+		t.Fatal("refusal with assertions must be rejected")
 	}
 }

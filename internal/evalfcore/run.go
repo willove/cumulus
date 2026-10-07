@@ -31,6 +31,7 @@ type RunState struct {
 	Status       Status       `json:"status"`
 	Fingerprints Fingerprints `json:"fingerprints"`
 	ItemsTotal   int          `json:"items_total"`
+	ItemErrors   int          `json:"item_errors,omitempty"` // 单题失败数（不杀全场的那些）
 	ItemsDone    int          `json:"items_done"`
 	Results      []ItemResult `json:"results"`
 	Error        string       `json:"error,omitempty"`
@@ -116,6 +117,10 @@ func NewRunner(store RunStore, fp Fingerprints, ex Executor, j Judge) *Runner {
 //
 // executor 出错：该运行记 failed，已完成的题留在档案里，错误带上
 // 已落盘的题数（可审计的中断点）。
+// systemicHead 是系统性故障判窗口：开头这么多次全部单题失败 → 端点/
+// key 级故障，停。之后单题失败只记项（网络抖动、畸形输出各例）。
+const systemicHead = 5
+
 func (r *Runner) Start(ctx context.Context, runID string, items []Item) (RunState, error) {
 	if prev, err := r.Store.LoadRun(ctx, runID); err == nil {
 		switch prev.Status {
@@ -152,10 +157,27 @@ func (r *Runner) Start(ctx context.Context, runID string, items []Item) (RunStat
 		}
 		res, err := r.runItem(ctx, item)
 		if err != nil {
-			state.Status = StatusFailed
-			state.Error = fmt.Sprintf("item %s: %v", item.ID, err)
-			_ = r.Store.SaveRun(ctx, state)
-			return state, fmt.Errorf("evalfcore: item %s: %w (completed %d persisted)", item.ID, err, state.ItemsDone)
+			// 单题失败不杀全场：记成失败项（带原因）继续跑——一次网络
+			// 抖动或一个畸形模型输出不该废掉 12 分钟的评测（真跑教训：
+			// 300 题两次都在 130-250 题处被单题杀死）。系统性故障另行
+			// 判：前 systemicHead 题全错即停（key 错、端点挂，重试无意义）。
+			state.Results = append(state.Results, ItemResult{
+				ItemID:  item.ID,
+				Refused: false,
+				Failure: "eval-error: " + err.Error(),
+			})
+			state.ItemsDone = i + 1
+			state.ItemErrors++
+			if state.ItemsDone <= systemicHead && state.ItemErrors == state.ItemsDone {
+				state.Status = StatusFailed
+				state.Error = fmt.Sprintf("systemic: first %d items all failed, latest: %v", state.ItemsDone, err)
+				_ = r.Store.SaveRun(ctx, state)
+				return state, fmt.Errorf("evalfcore: systemic failure: %w", err)
+			}
+			if err := r.Store.SaveRun(ctx, state); err != nil {
+				return state, fmt.Errorf("evalfcore: persist after item error %s: %w", item.ID, err)
+			}
+			continue
 		}
 		state.Results = append(state.Results, res)
 		state.ItemsDone = i + 1
