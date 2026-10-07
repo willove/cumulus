@@ -342,7 +342,12 @@ func printRun(arm string, state evalfcore.RunState) {
 					j = "NO"
 				}
 			}
-			fmt.Printf("    %s gold=%q answer=%q judge=%s\n", r.ItemID, truncateRunes(golds[r.ItemID], 40), truncateRunes(r.Answer, 60), j)
+			raw := ""
+			if r.JudgeRaw != "" {
+				raw = " raw=%q" + ""
+				raw = fmt.Sprintf(raw, truncateRunes(r.JudgeRaw, 30))
+			}
+			fmt.Printf("    %s gold=%q answer=%q judge=%s%s\n", r.ItemID, truncateRunes(golds[r.ItemID], 40), truncateRunes(r.Answer, 60), j, raw)
 		}
 		f := "ok"
 		if r.Failure != "" {

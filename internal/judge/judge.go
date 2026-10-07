@@ -26,19 +26,31 @@ type LLM struct {
 	Client llm.Completer
 }
 
-const judgeSystem = `你是裁判。判断候选答案与标准答案在事实层面是否等价（数字、实体、
-结论一致即算等价，措辞不同不算不等价）。只回答 YES 或 NO，不要解释。`
+// 判官口径（校准后）：问“支持”不问“等价”。
+//
+// 校准数据（25 题人工核对）发现原口径（“事实等价”）在**金标是段落**
+// 的基准上系统性过严：答案逐字重述金标（q16）、答案第一句即金标原文
+// 后面带解释（q13）都被判 NO——拿答案和整段法条要求等价，答案当然
+// “不等价”。正确口径：答案的每个事实点是否被金标支持；答案可以只覆盖
+// 金标一部分、可以带解释，只要不与金标矛盾、不引入金标外的内容。
+const judgeSystem = `你是裁判。判断候选答案是否被标准答案（金标材料）支持。
+判 YES：答案的事实点都能在金标里找到依据；答案可以只覆盖金标的一部分，
+可以换措辞、可以带解释。
+判 NO：答案与金标矛盾，或答案包含金标中没有依据的内容。
+标准答案是一段参考材料，不是唯一正确表述——不要因为它比答案长就判 NO。
+只回答 YES 或 NO，不要解释。`
 
 func (l *LLM) Judge(question, answer, gold string) (evalfcore.Verdict, error) {
 	if l.Client == nil {
 		return evalfcore.Verdict{}, llm.ErrNotConfigured
 	}
-	prompt := fmt.Sprintf("问题：%s\n标准答案：%s\n候选答案：%s\n是否等价？", question, gold, answer)
+	prompt := fmt.Sprintf("问题：%s\n金标材料：%s\n候选答案：%s\n候选答案是否被金标材料支持？", question, gold, answer)
 	resp, err := l.Client.Complete(gocontext.Background(), llm.Request{System: judgeSystem, Prompt: prompt, MaxTokens: 64})
 	if err != nil {
 		return evalfcore.Verdict{}, fmt.Errorf("judge: complete: %w", err)
 	}
 	v := evalfcore.Verdict{
+		Raw:              resp.Text,
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 		CostKnown:        resp.Usage.CostKnown,

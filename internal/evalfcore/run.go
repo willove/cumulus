@@ -53,6 +53,7 @@ type ItemResult struct {
 	JudgeOK           *bool    `json:"judge_ok,omitempty"`
 	JudgeErr          string   `json:"judge_err,omitempty"`    // 判官没判上分的原因（留痕，不许静默 N/A）
 	JudgeTokens       int      `json:"judge_tokens,omitempty"` // 判官花费（prompt+completion），进账单
+	JudgeRaw          string   `json:"judge_raw,omitempty"`    // 判词原文（校准用）
 	Failure           string   `json:"failure,omitempty"`
 	LatencyMS         int64    `json:"latency_ms"`
 	PromptTokens      int      `json:"prompt_tokens"`
@@ -236,6 +237,7 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 			ok := v.OK
 			res.JudgeOK = &ok
 			res.JudgeTokens = v.PromptTokens + v.CompletionTokens
+			res.JudgeRaw = v.Raw
 		} else {
 			res.JudgeErr = jerr.Error()
 		}

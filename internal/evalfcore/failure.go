@@ -8,6 +8,7 @@ import (
 // 它的 token 要进账单（计费诚实：花过钱的调用都记账）。
 type Verdict struct {
 	OK               bool
+	Raw              string // 判词原文（校准要看得见模型说了什么，只留解析结果等于盲调）
 	PromptTokens     int
 	CompletionTokens int
 	CostKnown        bool
