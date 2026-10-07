@@ -41,9 +41,10 @@ type bm25Executor struct {
 	route         qaflow.RouteConfig  // 路由阈值与校准来源
 }
 
+// envInt 读一个整数环境变量（未设置或非法 → ok=false，用默认值）。
 // escalateBackend 是级联的贵路（深循环）。
 func (e *bm25Executor) escalateBackend() func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error) {
-	return qaflow.BM25DeepEvidence(e.idx, e.width(), qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+	return qaflow.BM25DeepEvidence(e.idx, e.width(), qaflow.DefaultDeep())
 }
 
 func (e *bm25Executor) topk() int {
@@ -368,7 +369,7 @@ func runEval(ctx gocontext.Context) error {
 		//    cascade    快路 + 判 escalate 才升级（级联）
 		// 除哑臂外窗口预算一致才可比——不然"窗口多所以命中高"是预算差异
 		// 不是部件差异。（belief 全局声望臂已退役；按会话复用由 selftest 覆盖。）
-		deepOpts := &qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0}
+		deepOpts := deepFromEnv()
 		k9 := knobsFromEnv(defaultKnobs())
 		k9["evidence.topk"] = 9
 		deepEnabled := os.Getenv("CUMULUS_DEEP") == "1"
@@ -386,7 +387,7 @@ func runEval(ctx gocontext.Context) error {
 				evalfcore.Arm{ID: "bm25-k9", Note: "k=9 单轮（预算对齐）",
 					Run: armRun("run-ab-k9", execSpec{knobs: k9})},
 				evalfcore.Arm{ID: "deep", Note: "覆盖度驱动深循环",
-					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: deepOpts})},
+					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: &deepOpts})},
 				evalfcore.Arm{ID: "cascade", Note: "快路 + escalate 才升级",
 					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true})},
 			)
@@ -434,6 +435,7 @@ func runEval(ctx gocontext.Context) error {
 			}
 		}
 		fmt.Println(evalfcore.CalibrationReport(strongest.Arm, strongest))
+		printCalib(strongest)
 		if tau0Auto {
 			tau, oracle := evalfcore.SuggestedTau0(strongest)
 			fmt.Printf("tau0 suggestion: CUMULUS_TAU0=%.3f (from %s, next run applies it)\n", tau, oracle)
@@ -451,6 +453,7 @@ func runEval(ctx gocontext.Context) error {
 	// 是当前这一臂的读数，只能当参考，不能当 τ₀ 直接套。
 	if tau0Auto || os.Getenv("CUMULUS_CALIB") == "1" {
 		fmt.Println(evalfcore.CalibrationReport(state.Arm, state))
+		printCalib(state)
 	}
 	if tau0Auto {
 		tau, oracle := evalfcore.SuggestedTau0(state)

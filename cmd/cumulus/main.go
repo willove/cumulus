@@ -101,7 +101,7 @@ func runSelftest(args []string) error {
 	selftestIdx = idx
 
 	// 升级贵路：充足性判了 escalate 才跑（BioHarness 级联）
-	escalateBackend := qaflow.BM25DeepEvidence(idx, 160, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+	escalateBackend := qaflow.BM25DeepEvidence(idx, 160, qaflow.DefaultDeep())
 	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), synthFn, qaflow.Options{
 		CorpusVersion:   "selftest",
 		ConfigVersion:   "selftest",
@@ -349,7 +349,7 @@ func runServe(args []string) error {
 	}
 	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排
 	// 与语义接地尺）——升级判了却没有执行处，等于级联半条腿
-	srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
+	srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DefaultDeep())
 	if *embedFlag == "minilm" {
 		embFn, _, err := pickEmbed(*embedFlag)
 		if err != nil {

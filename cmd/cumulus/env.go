@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/willove/cumulus/internal/embed"
@@ -114,4 +115,36 @@ func pickEmbed(which string) (func() embed.Embedder, string, error) {
 	default:
 		return nil, "", fmt.Errorf("unknown embed: %s (off|minilm)", which)
 	}
+}
+
+// deepFromEnv 从默认档出发按环境微调深循环（实验旋钮：池子大小与预算
+// 决定"选择阶段有没有余量"）。
+//
+//	CUMULUS_DEEP_BUDGET  最终保留窗口数（默认 9，与 k9 同预算）
+//	CUMULUS_DEEP_PAGE    每轮新候选数（默认 9）
+//	CUMULUS_DEEP_ROUNDS  轮数（默认 3，池子 = PAGE×ROUNDS）
+func deepFromEnv() qaflow.DeepOptions {
+	d := qaflow.DefaultDeep()
+	if v, ok := envInt("CUMULUS_DEEP_BUDGET"); ok {
+		d.Budget = v
+	}
+	if v, ok := envInt("CUMULUS_DEEP_PAGE"); ok {
+		d.PageSize = v
+	}
+	if v, ok := envInt("CUMULUS_DEEP_ROUNDS"); ok {
+		d.MaxRounds = v
+	}
+	return d
+}
+
+func envInt(name string) (int, bool) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0, false
+	}
+	return v, true
 }

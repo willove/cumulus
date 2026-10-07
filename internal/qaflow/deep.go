@@ -32,6 +32,17 @@ var KeyDeep = context.NewKey[deepcore.Telemetry]("evidence.deep")
 // DeepOptions 是问答流程里的深循环预算（透传给 deepcore）。
 type DeepOptions = deepcore.Options
 
+// DefaultDeep 是与单轮 topk=9 **同预算**的深循环默认档：每轮取 9 条新候选、
+// 最多 3 轮（池子 27），最终按覆盖贪心保留 9 条。
+//
+// 为什么同预算：深循环要和单轮比，就得把"取数总量"对齐——否则赢的是
+// 预算不是机制（v1 的错在这里反过来：它比单轮拿得少，输的是预算）。
+// 池子（27）大于预算（9）才有"选哪几条"的余地；选择阶段是深循环唯一的
+// 真优势所在。
+func DefaultDeep() DeepOptions {
+	return DeepOptions{MaxRounds: 3, CoverageTarget: 1.0, Budget: 9, PageSize: 9}
+}
+
 // BM25DeepEvidence 把倒排索引接成"多轮取证"的取数函数：每轮取一页
 // （k*page 个候选），可选语义重排（embedder 绑了才走），窗口进循环，
 // 覆盖度达标/预算尽/无新候选三者收口。
@@ -39,15 +50,22 @@ type DeepOptions = deepcore.Options
 // 单轮版是 BM25Evidence——行为完全一致（MaxRounds=1 时）。
 func BM25DeepEvidence(idx *retrieval.Index, width int, deep DeepOptions) func(*context.Context, Rewrite) ([]EvidenceWindow, error) {
 	return func(c *context.Context, r Rewrite) ([]EvidenceWindow, error) {
-		k := deepK()
 		windows, tele, err := deepcore.Run(gocontext.Background(), r.Original, deep,
-			func(_ gocontext.Context, page int) ([]deepcore.Window, error) {
+			func(_ gocontext.Context, offset, limit int) ([]deepcore.Window, error) {
 				// 循环内不重排：每页候选只过 BM25。理由不是省事——覆盖度
 				// 信号要的是便宜且可重复的词法候选；把每页最多 50 个候选
 				// 全送进 MiniLM，一次 300 题的评测就是几万次 CPU 推理，
 				// 机器直接被打满（实测过，+680ms/题）。重排是收敛后的
 				// 事：最终窗口最多十几条，比一次就够。
-				hits := idx.SearchWith(r.Effective(), k*page, width, nil)
+				//
+				// 分页语义：取 offset+limit 条再跳过前 offset 条——第 r 轮
+				// 拿到的是"下一段新候选"，不是"前 3r 条"（后者会让池子
+				// 永远等于 top-k，选择阶段无从发挥）。
+				hits := idx.SearchWith(r.Effective(), offset+limit, width, nil)
+				if offset >= len(hits) {
+					return nil, nil
+				}
+				hits = hits[offset:]
 				out := make([]deepcore.Window, 0, len(hits))
 				for _, h := range hits {
 					out = append(out, deepcore.Window{
@@ -206,10 +224,6 @@ func recomputeCoverage(query string, terms []string, texts []string) CoverageInf
 	}
 	return CoverageInfo{Value: float64(covered) / float64(len(terms)), Terms: terms}
 }
-
-// deepK 每页候选数。固定 3：与单轮 BM25 的默认 topk 一致——A/B 时
-// 第一轮的条件完全相同，差异全部来自"后面又取了几轮"。
-func deepK() int { return 3 }
 
 func dedupe(in []string) []string {
 	seen := make(map[string]bool, len(in))

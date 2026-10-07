@@ -5,11 +5,27 @@ import (
 	"testing"
 )
 
-// fakeAcquire 按页给候选：page 1 给 A、B（与查询无关）；page 2 给 C
-// （覆盖查询词）。用来验证"覆盖不达标就继续取"。
+// fakeAcquire 按轮给候选：喂一个"候选带"，每轮按 (offset, limit) 切一段
+// ——与真实取数（SearchWith 取 offset+limit 条再跳过前 offset 条）同形。
 func fakeAcquire(pages map[int][]Window) Acquire {
-	return func(_ gocontext.Context, page int) ([]Window, error) {
-		return pages[page], nil
+	round := 0
+	return func(_ gocontext.Context, offset, limit int) ([]Window, error) {
+		round++
+		return pages[round], nil
+	}
+}
+
+// bandAcquire 按 offset/limit 从一条候选带里切：第 r 轮拿到第 r 段。
+func bandAcquire(band []Window) Acquire {
+	return func(_ gocontext.Context, offset, limit int) ([]Window, error) {
+		if offset >= len(band) {
+			return nil, nil
+		}
+		end := offset + limit
+		if end > len(band) {
+			end = len(band)
+		}
+		return band[offset:end], nil
 	}
 }
 
@@ -113,8 +129,77 @@ func TestRunStopsOnBudget(t *testing.T) {
 
 // acquire 报错必须带着已取到的窗口返回（调用方决定降级还是失败）。
 func TestRunAcquireErrorSurfaces(t *testing.T) {
-	acquire := func(gocontext.Context, int) ([]Window, error) { return nil, gocontext.Canceled }
+	acquire := func(gocontext.Context, int, int) ([]Window, error) { return nil, gocontext.Canceled }
 	if _, _, err := Run(gocontext.Background(), "q", Options{}, acquire, covFake); err == nil {
 		t.Fatal("acquire error must surface")
+	}
+}
+
+// 限额模式：池子没取满不许停——v1 在覆盖达标处就停，把预算剩在桌上，
+// 窗集成了单轮 top-k 的真子集（DuReader hard 实测 61% 的题这样）。
+func TestRunBudgetModeDoesNotStopAtCoverageTarget(t *testing.T) {
+	band := []Window{
+		{SourceID: "a", Span: "rune[0:2]", Text: "查询词"}, // 第一轮就覆盖达标
+		{SourceID: "b", Span: "rune[0:2]", Text: "x"},
+		{SourceID: "c", Span: "rune[0:2]", Text: "y"},
+		{SourceID: "d", Span: "rune[0:2]", Text: "z"},
+	}
+	ws, tele, err := Run(gocontext.Background(), "查询词",
+		Options{MaxRounds: 4, PageSize: 1, Budget: 2, CoverageTarget: 1}, bandAcquire(band), covFake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tele.Pooled != 4 {
+		t.Fatalf("budget mode must fill the pool, pooled=%d", tele.Pooled)
+	}
+	if len(ws) != 2 || tele.Selected != 2 {
+		t.Fatalf("must select exactly the budget, got %d (tele %+v)", len(ws), tele)
+	}
+	if ws[0].SourceID != "a" {
+		t.Fatalf("selection must keep the coverage-carrying window, got %v", ws)
+	}
+}
+
+// 选择阶段挑的是**互补**的窗口，不是分数最高的几条：分数最高的两条
+// 覆盖同一批词，第三、第四条才把新词带进来。
+func TestSelectPrefersComplementaryWindows(t *testing.T) {
+	pool := []Window{
+		{SourceID: "hi1", Span: "s", Text: "甲", Score: 9},
+		{SourceID: "hi2", Span: "s", Text: "甲", Score: 8},
+		{SourceID: "lo1", Span: "s", Text: "乙", Score: 1},
+	}
+	cov := func(_ string, ws []Window) float64 {
+		seen := map[string]bool{}
+		for _, w := range ws {
+			seen[w.Text] = true
+		}
+		return float64(len(seen)) / 2
+	}
+	got := selectByCoverage("q", pool, 2, cov)
+	if len(got) != 2 {
+		t.Fatalf("want 2 windows, got %d", len(got))
+	}
+	ids := map[string]bool{}
+	for _, w := range got {
+		ids[w.SourceID] = true
+	}
+	if !ids["hi1"] || !ids["lo1"] {
+		t.Fatalf("must pick the complementary pair, got %v", ids)
+	}
+	if got[0].Score < got[1].Score {
+		t.Fatalf("presentation order must be score-desc, got %v", got)
+	}
+}
+
+// 池子干了（没新候选）在限额模式下也停，别空转轮次。
+func TestRunBudgetModeStopsWhenPoolExhausted(t *testing.T) {
+	band := []Window{{SourceID: "a", Span: "s", Text: "x"}}
+	_, tele, err := Run(gocontext.Background(), "q",
+		Options{MaxRounds: 5, PageSize: 3, Budget: 9}, bandAcquire(band), func(string, []Window) float64 { return 0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tele.StopReason != "pool-exhausted" || tele.Rounds != 2 {
+		t.Fatalf("must stop as soon as the pool dries up: %+v", tele)
 	}
 }

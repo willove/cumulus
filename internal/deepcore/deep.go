@@ -6,18 +6,25 @@
 //
 //	round 0  取第一页候选 → 抽窗口 → 算覆盖度
 //	不够？    展开下一页（候选池更大）→ 跳过分轮验证过的死路 → 再算覆盖
-//	终止      覆盖达标 / 轮数预算尽 / 没有新候选（三者任一）
+//	终止      池子取满（限额模式）/ 覆盖达标 / 轮数预算尽 / 没有新候选
 //
 // 和 cumulus 原版的区别：**死路记忆只活在单次提问内**。全局声望版
 // （文档跨查询累积好坏）在真实语料上已证伪（−11pp，见 evolution-log
 // 三·补七/八）——热门文档被错引沉底，轮到它是金标也捞不回。单问之内的
 // "这篇刚才取过、什么都没覆盖"是干净信号，不跨问。
+//
+// v2 修的是收口：v1 在"覆盖达标/零增益"处就停，把预算剩在桌上——
+// DuReader hard 实测 61% 的题提前停在 3–6 条，窗集是单轮 top-9 的真
+// 子集，命中率 58.8% vs 70.4%。现在限额模式先取满池子，再在预算内按
+// 覆盖贪心选（见 Options.Budget 与 selectByCoverage）。
 package deepcore
 
 import (
 	gocontext "context"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 )
 
 // Window 是深循环处理的最小单元（与 qaflow.EvidenceWindow 同字段；
@@ -30,21 +37,28 @@ type Window struct {
 	Score    float64
 }
 
-// Acquire 取一轮候选。page 从 1 开始（第一页）；实现方按页展开池子
-// （BM25 就是 k*page）。
-type Acquire func(ctx gocontext.Context, page int) ([]Window, error)
+// Acquire 取一页候选：offset 是**已经取过多少条候选**（调用方据此跳过
+// 已见部分，别重复打分），limit 是本轮要多少条新候选。
+type Acquire func(ctx gocontext.Context, offset, limit int) ([]Window, error)
 
-// Coverage 算当前窗口集合对查询的覆盖度（0..1）。qaflow 默认给词面
-// 覆盖（查询词有多少落在窗口原文里）；语义覆盖以后接 embedder。
+// Coverage 覆盖度函数：查询在这批窗口原文上的词面覆盖（由调用方定义）。
 type Coverage func(query string, windows []Window) float64
 
-// Options 是深循环的预算与目标。
+// Options 是深循环的预算。
 type Options struct {
 	MaxRounds      int     // 轮数预算（默认 3；1 = 退回单轮检索）
-	CoverageTarget float64 // 覆盖度目标（默认 1.0；达到即停）
-	// MinGain 是新候选并入的最小增益：并入后覆盖度提升低于此值且
-	// 预算未尽时，允许再取一轮（防止"差一点点就停"的早停）。
-	MinGain float64 // 默认 0.1
+	CoverageTarget float64 // 覆盖度目标（默认 1.0）——只在不限额模式下停循环
+	// Budget 是最终留给下游的窗口数（0 = 不限额 = v1 行为：取到的都留）。
+	//
+	// 限额模式的正确收口是：**池子取满，再在预算内按覆盖选**——取数成本
+	// 由 MaxRounds×PageSize 定，不由覆盖度定；覆盖度退回去当遥测与路由
+	// 信号（它答不了"够不够"：词面覆盖饱和不等于答案在窗里，DuReader
+	// hard 上覆盖 1.0 的题照样有 30% 金标不在窗内）。
+	Budget int
+	// PageSize 是每轮要多少条新候选（默认 3，与单轮默认 topk 一致：第一轮
+	// 与单轮臂的条件完全相同，差异全部来自"后面又取了几轮"）。池子
+	// （PageSize×MaxRounds）大于 Budget 才有"选哪几条"的余地。
+	PageSize int
 }
 
 func (o *Options) withDefaults() {
@@ -54,23 +68,33 @@ func (o *Options) withDefaults() {
 	if o.CoverageTarget <= 0 || o.CoverageTarget > 1 {
 		o.CoverageTarget = 1
 	}
-	if o.MinGain <= 0 {
-		o.MinGain = 0.1
+	if o.PageSize <= 0 {
+		o.PageSize = 3
+	}
+	if o.Budget < 0 {
+		o.Budget = 0
 	}
 }
 
-// Telemetry 是一轮深循环的全部可观测事实：几轮、取过多少文档、几条
-// 死路（本问之内取出但零覆盖的文档）、覆盖度轨迹。测试与 status 面
-// 都读它——循环内部状态不许不可见。
+// Telemetry 是一轮深循环的全部可观测事实：几轮、池子多大、留下几条、
+// 取过多少文档、几条死路（本问之内取出但零覆盖的文档）、覆盖度轨迹。
+// 测试与 status 面都读它——循环内部状态不许不可见。
 type Telemetry struct {
 	Rounds      int       `json:"rounds"`       // 实际跑了几轮
+	Pooled      int       `json:"pooled"`       // 池子里一共多少条候选
+	Selected    int       `json:"selected"`     // 最终留给下游几条
 	SampledDocs int       `json:"sampled_docs"` // 累计取过的不同文档数
 	DeadEnds    int       `json:"dead_ends"`    // 本问内被标记死路的文档数
 	Coverage    []float64 `json:"coverage"`     // 每轮末的覆盖度
-	StopReason  string    `json:"stop_reason"`  // 为什么停：target / budget / no-new / dead-end
+	StopReason  string    `json:"stop_reason"`  // 为什么停：budget / pool-exhausted / target / no-new
 }
 
 // Run 跑一次深循环，返回最终窗口与遥测。
+//
+// 两种收口模式：
+//   - 限额（Budget > 0）：先把池子按 MaxRounds×PageSize 取满（池子干了
+//     就认输），再在池子里按覆盖贪心选 Budget 条（同增益按分数）。
+//   - 不限额（Budget = 0，v1 行为）：覆盖达标 / 池子干了 / 轮数尽即停。
 //
 // 死路规则：某文档在并入时对覆盖度零增益，标记死路；后续轮次再取到它
 // 直接跳过（不重复抽同样的死路）。零增益不等于文档坏——它只是对这个
@@ -87,25 +111,28 @@ func Run(ctx gocontext.Context, query string, opts Options, acquire Acquire, cov
 	var (
 		windows  []Window
 		tele     Telemetry
-		seen     = map[string]bool{} // 本问取过的文档
-		deadEnds = map[string]bool{} // 本问的死路
+		seen     = map[string]bool{} // 本问取过的窗口（来源#坐标）
+		deadEnds = map[string]bool{} // 本问的死路（文档级）
+		consumed int                 // 已取过的候选数（分页游标）
 		cov      float64
 	)
 	for round := 1; round <= opts.MaxRounds; round++ {
 		tele.Rounds = round
-		cands, err := acquire(ctx, round)
+		cands, err := acquire(ctx, consumed, opts.PageSize)
 		if err != nil {
 			return windows, tele, fmt.Errorf("deepcore: acquire page %d: %w", round, err)
 		}
+		consumed += len(cands)
 		fresh := 0
 		for _, w := range cands {
 			if w.SourceID == "" || w.Span == "" {
 				continue // 引用不可回溯的候选直接丢（契约优先）
 			}
-			if seen[w.SourceID] || deadEnds[w.SourceID] {
-				continue // 取过的、死路的都不重复抽
+			key := w.SourceID + "#" + w.Span
+			if seen[key] || deadEnds[w.SourceID] {
+				continue // 取过的窗口、死路文档都不重复抽
 			}
-			seen[w.SourceID] = true
+			seen[key] = true
 			windows = append(windows, w)
 			fresh++
 		}
@@ -122,21 +149,71 @@ func Run(ctx gocontext.Context, query string, opts Options, acquire Acquire, cov
 			tele.DeadEnds = len(deadEnds)
 		}
 
-		if cov >= opts.CoverageTarget {
-			tele.StopReason = "target"
-			return windows, tele, nil
-		}
-		if fresh == 0 {
-			tele.StopReason = "no-new"
-			return windows, tele, nil
-		}
-		// 增益显著（超过 MinGain）→ 值得再取一轮；增益微弱且预算在
-		// 最后一轮也由下面的预算检查收口
-		if cov-prev < opts.MinGain && round == opts.MaxRounds {
-			tele.StopReason = "budget"
-			return windows, tele, nil
+		if opts.Budget > 0 {
+			// 限额模式：池子没取满就不许停——**这正是 v1 丢掉预算的地方**；
+			// 池子干了才认输（没有新候选可取，再跑就是空转）。
+			if fresh == 0 {
+				tele.StopReason = "pool-exhausted"
+				break
+			}
+		} else {
+			if cov >= opts.CoverageTarget {
+				tele.StopReason = "target"
+				return windows, tele, nil
+			}
+			if fresh == 0 {
+				tele.StopReason = "no-new"
+				return windows, tele, nil
+			}
 		}
 	}
-	tele.StopReason = "budget"
+	if tele.StopReason == "" {
+		tele.StopReason = "budget"
+	}
+	tele.Pooled = len(windows)
+	if opts.Budget > 0 && len(windows) > opts.Budget {
+		windows = selectByCoverage(query, windows, opts.Budget, cover)
+	}
+	tele.Selected = len(windows)
 	return windows, tele, nil
+}
+
+// selectByCoverage 在预算内挑一组**互补**窗口：每步取"并入后覆盖度最高"
+// 的那条（同增益按分数降序），直到选满预算。
+//
+// 为什么不是按分数取前 k：分数是各自的分数，覆盖是整组的性质。同一份
+// 证据重复十遍不如十个互补的窗口——这是深循环相对单轮唯一的真优势，
+// 也是它必须在**选择**阶段（而不是停止阶段）体现的地方。
+//
+// 返回顺序按分数降序（集合是覆盖最优的；顺序是给人看的引用序，与单轮
+// 臂的呈现口径一致）。确定性：池子序来自检索（确定），同分同增益取池子
+// 序先者，不许依赖 map 迭代序。
+func selectByCoverage(query string, pool []Window, budget int, cover Coverage) []Window {
+	if budget <= 0 || len(pool) <= budget {
+		return pool
+	}
+	remaining := append([]Window(nil), pool...)
+	chosen := make([]Window, 0, budget)
+	scratch := make([]Window, 0, budget+1)
+	for len(chosen) < budget && len(remaining) > 0 {
+		best, bestCov := -1, math.Inf(-1)
+		for i, w := range remaining {
+			scratch = append(scratch[:0], chosen...)
+			scratch = append(scratch, w)
+			c := cover(query, scratch)
+			switch {
+			case c > bestCov+1e-12:
+				best, bestCov = i, c
+			case math.Abs(c-bestCov) <= 1e-12 && best >= 0 && w.Score > remaining[best].Score:
+				best, bestCov = i, c
+			}
+		}
+		if best < 0 {
+			break
+		}
+		chosen = append(chosen, remaining[best])
+		remaining = append(remaining[:best], remaining[best+1:]...)
+	}
+	sort.SliceStable(chosen, func(i, j int) bool { return chosen[i].Score > chosen[j].Score })
+	return chosen
 }
