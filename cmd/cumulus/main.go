@@ -320,7 +320,10 @@ func runServe(args []string) error {
 		if err != nil {
 			return err
 		}
-		srv.Options.Expander = &query.LLM{Client: client}
+		// 桥的结果按归一化问句缓存：桥是链上最后一个非确定源，缓存后同
+		// 一问题的第二次起行为完全一致（破局后 12 跑时对时不对，根因就
+		// 是模型每次给的扩展词不同）
+		srv.Options.Expander = &query.Cached{Inner: &query.LLM{Client: client}}
 		srv.Options.WeightedRetrieve = func(weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
 			hits := idx.SearchWeighted(weights, *topk, *width, nil)
 			out := make([]qaflow.EvidenceWindow, 0, len(hits))
