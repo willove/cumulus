@@ -31,6 +31,10 @@ type Runner struct {
 	Stages []Stage
 	// View 是本次迁移要记录的提交视图（四版本由调用方填）。
 	View context.CommittedView
+	// ViewHook 在 Commit 之前调用，让流程把运行时才知道的版本填进视图
+	// （典型：路由实际生效的档位与校准程序——只有 stage 跑完才存在）。
+	// 可空。填进来的字段是"发生额"，不是调用方的声明值。
+	ViewHook func(c *context.Context, v *context.CommittedView)
 }
 
 // Run 执行全部 stage。任一 stage 的 Run 或 Verify 失败：
@@ -54,6 +58,9 @@ func (r *Runner) Run(c *context.Context) error {
 		}
 	}
 	r.View.Flow = r.Flow
+	if r.ViewHook != nil {
+		r.ViewHook(c, &r.View)
+	}
 	c.Commit(r.View)
 	return nil
 }

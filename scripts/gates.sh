@@ -9,7 +9,11 @@ gate() { printf '[gate] %-28s' "$1"; shift; if "$@"; then echo "ok"; else echo "
 gate "gofmt" bash -c 'test -z "$(gofmt -l .)"'
 gate "vet" go vet ./...
 gate "test" go test ./...
-gate "grammar-conformance" go test ./internal/qaflow/ -run 'TestConfinement|TestUnwind|TestRegister|TestEvidenceVerify|TestRouteRefuses' -count=1
+# grammar-conformance：stage 契约（禁闭/反卷/注册）与**合流**（v0.2 §三.6：
+# 随机装卸重放三断言——无悬挂/逆干净/终态等价）都是流程文法的执行处。
+gate "grammar-conformance" go test ./internal/qaflow/ -run 'TestConfinement|TestUnwind|TestRegister|TestEvidenceVerify|TestRouteRefuses|TestConfluence' -count=1
+# 哑对照臂不变量（v0.2 §三.7）：对照运行必须含最笨基线臂，缺了直接红。
+gate "dumb-arm-invariant" go test ./internal/evalfcore/ -run 'TestValidateArmsRequiresDumb|TestRunArmsRejectsBeforeRunning' -count=1
 gate "contract-gen" bash -c 'go run ./cmd/contract-gen -check'
 gate "doc-fresh" go run ./cmd/doc-fresh
 gate "file-size" bash scripts/check-file-size.sh

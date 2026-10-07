@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/willove/cumulus/internal/failure"
 	"github.com/willove/cumulus/internal/store"
 )
 
@@ -291,7 +292,20 @@ func TestClassifyRules(t *testing.T) {
 	}{
 		{"budget", ClassifyInput{BudgetExhausted: true}, "budget-exceeded"},
 		{"unresolved", ClassifyInput{Windows: 3, UnresolvedCitations: 1}, "grounding-fail"},
-		{"refused", ClassifyInput{Refused: true}, "rot"},
+		// 底物错配（BioHarness）：要数值、有窗、窗里没有数
+		{"substrate numeric", ClassifyInput{Windows: 2, AsksNumeric: true, EvidenceHasNumeric: false}, "substrate-mismatch"},
+		// 查询的实体语料里没有：需要实体接地，不是再翻文本
+		{"substrate oov", ClassifyInput{Windows: 2, QueryOutOfCorpus: true}, "substrate-mismatch"},
+		// 连窗都没有也算错配：库没命名这个实体，跟"检索没够到"是两种病
+		{"substrate oov no windows", ClassifyInput{Windows: 0, QueryOutOfCorpus: true, Refused: true}, "substrate-mismatch"},
+		// 窗里有数就不是底物问题——宁可落到召回/路由，不许滥用错配
+		{"numeric but evidence has numbers", ClassifyInput{Windows: 2, AsksNumeric: true, EvidenceHasNumeric: true, GoldHit: true, RouteAction: "escalate", RuleScore: 1}, "unclassified"},
+		// 拒答不再一律算腐烂：金标在窗内却拒 = 过度拒答（路由误判）
+		{"refused with evidence", ClassifyInput{Windows: 2, GoldHit: true, Refused: true}, "route-error"},
+		// 空手拒答：出口是对的，账记在召回上
+		{"refused no windows", ClassifyInput{Refused: true}, "recall-miss"},
+		// 有窗、没命中、预算没用完就放弃 = 提前给不确定答案
+		{"refused early with windows", ClassifyInput{Windows: 2, Refused: true}, "rot"},
 		{"no windows", ClassifyInput{Windows: 0}, "recall-miss"},
 		{"gold miss", ClassifyInput{Windows: 2, GoldHit: false}, "recall-miss"},
 		{"route", ClassifyInput{Windows: 2, GoldHit: true, RouteAction: "fast", RuleScore: 0}, "route-error"},
@@ -301,6 +315,28 @@ func TestClassifyRules(t *testing.T) {
 		got := FormatCategory(Classify(c.in))
 		if got != c.want {
 			t.Errorf("%s: want %s, got %s", c.name, c.want, got)
+		}
+	}
+}
+
+// 六类必须都是可达的：定义了判据却没有规则返回它 = 诊断词汇表变装饰。
+// 这条测试用最小输入逐个触达六类——加规则时若把某类挤成死标签，这里红。
+func TestAllCategoriesReachable(t *testing.T) {
+	reached := map[string]bool{}
+	inputs := []ClassifyInput{
+		{BudgetExhausted: true},
+		{Windows: 1, UnresolvedCitations: 1},
+		{Windows: 1, AsksNumeric: true},
+		{Windows: 1, GoldHit: true, Refused: true},
+		{Windows: 1, Refused: true},
+		{},
+	}
+	for _, in := range inputs {
+		reached[FormatCategory(Classify(in))] = true
+	}
+	for _, c := range failure.All() {
+		if !reached[c.String()] {
+			t.Errorf("failure category %q is unreachable by the classifier rules", c)
 		}
 	}
 }

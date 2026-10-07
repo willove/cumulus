@@ -59,7 +59,7 @@ flowchart LR
     RT -->|escalate| ESC["6 escalate<br/>贵路重取（BM25 deep/加权）<br/>KeyEscalation"]
     RT -->|fast| F2["7 facts 二判<br/>按最终窗集重算<br/>（escalate 也走这里）"]
     ESC --> F2
-    F2 --> SY["8 synthesize<br/>多事实：逐事实 fan-out 检索+事实锚定窗<br/>提示词=事实骨架+逐事实分组<br/>JSON 契约：断言必挂窗，违例→拒答"]
+    F2 --> SY["8 synthesize<br/>多事实：提示词=事实骨架+逐事实分组<br/>JSON 契约：断言必挂窗，违例→拒答<br/>（逐事实 fan-out 检索发生在 stage 2：bm25.go 的 retrievePerFact）"]
     SY --> AC["9 account<br/>用量账进 committed view"]
     AC --> RESP["响应=完整记录<br/>答案只是其中一个字段"]
 ```
@@ -85,5 +85,12 @@ flowchart LR
 
 ## 四、数字（2026-10-08）
 
-25 个包（22 个有测试）· 七门禁全绿 · 37 提交 · 唯一外部依赖：
-MiniMax API（合成/桥）与 ~/.cumulus/models 的 MiniLM 权重。
+25 个包（23 个有测试；无测试的两个是 minilm 的 vendored forward 与 flow 的 runner）·
+**八门禁全绿**（gofmt/vet/test/grammar-conformance/dumb-arm-invariant/contract-gen/
+doc-fresh/file-size）· 唯一外部依赖：MiniMax API（合成/桥）与 ~/.cumulus/models
+的 MiniLM 权重。
+
+提交视图（v0.2 §五.4）已上服务面：`/v1/qa` 的 `committed` 字段带四版本 +
+路由校准档位（语料版本 = 内容摘要，改一个字就变）；路由信号档位记
+`retrieval`（provider 不返回 logprobs，优先档未接）；评测的对照运行强制
+含哑臂 `bm25-bare`（零改写零管理）。

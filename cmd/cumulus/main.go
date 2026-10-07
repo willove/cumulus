@@ -226,6 +226,10 @@ func printAsk(label string, c *context.Context) {
 	for _, v := range c.Views() {
 		fmt.Printf("committed: flow=%s realm=%s corpus=%s strategy=%s at=%s\n",
 			v.Flow, v.Realm, v.CorpusVersion, v.StrategyVersion, v.At.Format("15:04:05"))
+		// 路由档位与校准程序是**发生额**：跑完才知道，所以由 ViewHook 填。
+		// 不打印它就没人会发现它没填（不变量 4 的执行处要看得见）。
+		fmt.Printf("  calibration: tier=%s program=%s threshold=%.3f version=%s\n",
+			v.Calibration.Tier, v.Calibration.Program, v.Calibration.Threshold, v.Calibration.ThresholdVersion)
 	}
 	if ws, ok := context.Get(c, qaflow.KeyWindows); ok {
 		for _, w := range ws {

@@ -9,6 +9,7 @@ package context
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -39,13 +40,29 @@ type Registration struct {
 
 // CommittedView 一次迁移针对的环境快照。四版本缺一不可比（见流程文法 §五.4）。
 type CommittedView struct {
-	At              time.Time
-	Realm           Realm
-	Flow            string
-	CorpusVersion   string
-	ConfigVersion   string
-	StrategyVersion string
-	BeliefVersion   string
+	At              time.Time `json:"at"`
+	Realm           Realm     `json:"realm"`
+	Flow            string    `json:"flow"`
+	CorpusVersion   string    `json:"corpus_version"`
+	ConfigVersion   string    `json:"config_version"`
+	StrategyVersion string    `json:"strategy_version"`
+	BeliefVersion   string    `json:"belief_version"`
+	// Calibration 是本次迁移实际生效的路由档位与校准程序（v0.2 §2.1：
+	// 档位、校准参数与程序、阈值版本都进提交视图）。零值 = 没走路由
+	// （评测/学习流程）或调用方没填——不许假装有。
+	Calibration Calibration `json:"calibration"`
+}
+
+// Calibration 是路由的档位与校准来源。
+//
+// 为什么进提交视图：换 provider 必须重校准，否则跨 provider 的评测
+// 数字不可比（CAUC 的结论，不是工程洁癖）；校准程序本身是一等设计项
+// （SLC 实证：同一目标下换程序，两个门之间的覆盖差距 28.14pp→7.91pp）。
+type Calibration struct {
+	Tier             string  `json:"tier"`              // 实际生效的信号档：logprob（优先）/ retrieval（兜底）
+	Program          string  `json:"program"`           // 阈值来源程序：hand-set / CAUC（τ₀=强臂校准准确率）
+	Threshold        float64 `json:"threshold"`         // 本次实际用的升级线（0 = 未判阈值，如强制升级）
+	ThresholdVersion string  `json:"threshold_version"` // 阈值版本标签（改程序即改标签）
 }
 
 // Context 是单一中介。零值不可用，必须 New。
@@ -211,5 +228,19 @@ func (c *Context) Views() []CommittedView {
 	defer c.mu.RUnlock()
 	out := make([]CommittedView, len(c.views))
 	copy(out, c.views)
+	return out
+}
+
+// Keys 返回当前绑定的全部 key 名（有序）。审计面用：一次装卸之后
+// "还剩哪些键、丢了哪些键"要可查——合流测试的"逆干净"断言就靠它
+// （装卸前后键集必须一致，只增不改的类除外）。
+func (c *Context) Keys() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]string, 0, len(c.values))
+	for k := range c.values {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }

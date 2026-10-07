@@ -58,7 +58,7 @@ func Summarize(s RunState) Summary {
 		if r.Refused {
 			out.Refused++
 		}
-		if len(r.Failure) > 9 && r.Failure[:10] == "eval-error" {
+		if isEvalError(r.Failure) {
 			out.ItemErrors++
 		}
 		if r.JudgeOK == nil && r.JudgeErr != "" {

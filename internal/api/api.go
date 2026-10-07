@@ -12,6 +12,7 @@ package api
 import (
 	goembed "embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -44,9 +45,69 @@ type Server struct {
 	Width    int
 	Realm    string
 	Options  qaflow.Options
+	// StrategyVersion 是检索/路由策略的版本标签（进提交视图）。换策略
+	// 实现、换阈值程序都要改它——两次运行的策略不同，数字就不可比。
+	StrategyVersion string
 
 	mu    sync.RWMutex
 	index *retrieval.Index
+}
+
+// DefaultStrategyVersion 是本装配的策略版本。改路由/检索策略时改这里
+// （或由调用方覆盖 Server.StrategyVersion）——版本标签是承诺，不是注释。
+//
+// v0.2：检索分词修了混排文本的脚本边界（"iphone6照片流在哪"整串曾变成一个
+// df=0 的词，真实问句 10% 因此零候选）——检索语义变了，策略版本必须跟着
+// 变，否则 v0.1 与 v0.2 的答案混在一张表里不可比。
+const DefaultStrategyVersion = "qa.v0.2"
+
+// corpusVersion 渲染语料版本：条数 + 内容摘要前 12 位。
+func (s *Server) corpusVersion() string {
+	idx := s.Index()
+	if idx == nil || idx.N == 0 {
+		return "empty"
+	}
+	return fmt.Sprintf("n=%d sha=%s", idx.N, idx.ShortDigest())
+}
+
+// configVersion 从**生效的装配**渲染配置版本（不是调用方填的标签）：
+// 旋钮、可选件在不在场、阈值的校准程序——这些东西变了，答案就可能变。
+func (s *Server) configVersion() string {
+	parts := []string{fmt.Sprintf("topk=%d", s.TopK), fmt.Sprintf("width=%d", s.Width)}
+	if s.Options.Prior {
+		parts = append(parts, "prior")
+	}
+	if s.Options.Abstain != nil {
+		parts = append(parts, "abstain")
+	}
+	if s.Options.Escalate != nil || s.Escalate != nil {
+		parts = append(parts, "escalate")
+	}
+	if s.Embedder != nil {
+		parts = append(parts, "embed")
+	}
+	if s.Options.GroundingFloor > 0 {
+		parts = append(parts, fmt.Sprintf("grounding=%.2f", s.Options.GroundingFloor))
+	}
+	if s.Options.Route.Program != "" {
+		parts = append(parts, "route="+s.Options.Route.ProgramName())
+	}
+	return strings.Join(parts, ",")
+}
+
+// strategyVersion 取策略标签（未设置时用默认）。
+func (s *Server) strategyVersion() string {
+	if s.StrategyVersion != "" {
+		return s.StrategyVersion
+	}
+	return DefaultStrategyVersion
+}
+
+// committedVersions 是提交视图的四版本（问答面每次迁移都要记）。
+// 信念版本记 none：belief 已从检索路径退役（真语料 A/B 证实全局声望版
+// 有害），退役就要说退役，不许留个版本号假装它还在。
+func (s *Server) committedVersions() (corpus, config, strategy, belief string) {
+	return s.corpusVersion(), s.configVersion(), s.strategyVersion(), "none(belief-retired)"
 }
 
 // Index 读当前索引（摄入与问答之间只有这一把锁）。
@@ -84,132 +145,6 @@ func NewWithStore(st corpus.Port, synth qaflow.SynthFunc, topk, width int) *Serv
 		width = 160
 	}
 	return &Server{Store: st, Synth: synth, TopK: topk, Width: width, Realm: "default", Reuse: knowledge.NewReuseStore(), Signals: knowledge.NewSignalStore("")}
-}
-
-// QARequest 是 POST /v1/qa 的请求。
-type QARequest struct {
-	Question string `json:"question"`
-	Session  string `json:"session"` // 空 = 不问复用（一次性问答）
-}
-
-// QAResponse 是一次问答的完整记录（committed view 的 HTTP 形状）。
-type QAResponse struct {
-	Question  string                  `json:"question"`
-	Answer    string                  `json:"answer"`
-	Refused   bool                    `json:"refused"`
-	Reason    string                  `json:"refusal_reason,omitempty"`
-	Citations []string                `json:"citations"`
-	Analysis  AnalysisView            `json:"analysis"`
-	Prior     []PriorView             `json:"prior,omitempty"`     // 空 = 未开多信号重排
-	Facts     []FactView              `json:"facts,omitempty"`     // 事实分解与逐条覆盖
-	Conflicts []ConflictView          `json:"conflicts,omitempty"` // 证据一致性门：同事实不同值
-	Abstain   *AbstainView            `json:"abstain,omitempty"`   // 零 LLM 失败预测头裁决
-	Route     RouteView               `json:"route"`
-	Escalate  qaflow.EscalationRecord `json:"escalation"`
-	Reuse     qaflow.ReuseState       `json:"reuse"`
-	Coverage  CoverageView            `json:"coverage"`
-	Eviction  EvictionView            `json:"eviction"`
-	Rerank    qaflow.RerankState      `json:"rerank"`
-	Windows   []WindowView            `json:"windows"`
-	Usage     UsageView               `json:"usage"`
-}
-
-// AnalysisView 是查询侧理解的快照：意图、IDF 加权主关键词级（着重/降权
-// 的取舍看得见）、语料外词（词汇鸿沟信号）。查询侧做了什么，答案旁边
-// 直接可查。
-type AnalysisView struct {
-	Intent  string             `json:"intent"`
-	Primary map[string]float64 `json:"primary"` // 语词 → 权重（2.0 着重/1.0 平权）
-	OOV     []string           `json:"out_of_corpus_terms,omitempty"`
-	Score   float64            `json:"score"` // 主级总权重（稀薄度代理）
-}
-
-// RouteView 是路由判定（含信号——可审计）。
-type RouteView struct {
-	Action  string              `json:"action"`
-	Reason  string              `json:"reason"`
-	Signals qaflow.RouteSignals `json:"signals"`
-}
-
-// CoverageView 是覆盖度 + 语料外词。
-type CoverageView struct {
-	Value float64  `json:"value"`
-	OOV   []string `json:"out_of_corpus_terms,omitempty"`
-}
-
-// EvictionView 是驱逐账。
-type EvictionView struct {
-	Merged  int `json:"merged"`
-	Dropped int `json:"dropped"`
-}
-
-// WindowView 是一个证据窗口。
-// PriorView 是一篇文档的多信号置信（cumulus prior 移植的可视化：
-// lexical 无长度归一 / 标题 / 条文结构，融合后置顶归一）。
-type PriorView struct {
-	DocID   string             `json:"doc_id"`
-	Score   float64            `json:"score"`
-	Signals map[string]float64 `json:"signals"`
-	Title   string             `json:"title,omitempty"`
-}
-
-// FactView 是一条事实的覆盖判定与支撑证据（可溯证据路径：每个窗支撑
-// 哪条事实，逐窗可查——SUBQRAG 的 graph memory 在我们这里的露出）。
-type FactView struct {
-	ID       string        `json:"id"`
-	Query    string        `json:"query"`
-	Covered  bool          `json:"covered"`
-	NearMiss float64       `json:"near_miss,omitempty"`
-	Supports []SupportView `json:"supports,omitempty"`
-	Judge    string        `json:"judge,omitempty"` // 判官裁决（rescued/no-support/error:…）
-}
-
-// SupportView 是支撑某条事实的一个窗口。
-type SupportView struct {
-	SourceID string  `json:"source_id"`
-	Title    string  `json:"title,omitempty"`
-	Span     string  `json:"span"`
-	Score    float64 `json:"score"`
-}
-
-// ConflictView 是同事实两窗给不同的数的冲突（证据一致性门产出）。
-type ConflictView struct {
-	FactID    string   `json:"fact_id"`
-	Values    []string `json:"values"`
-	SourceIDs []string `json:"source_ids"`
-}
-
-// AbstainView 是失败预测头的裁决（p_fail 与动作）。
-type AbstainView struct {
-	PFail  float64 `json:"p_fail"`
-	Action string  `json:"action"`
-	Reason string  `json:"reason,omitempty"`
-}
-
-type WindowView struct {
-	SourceID string  `json:"source_id"`
-	Title    string  `json:"title"` // 文档身份（法律名）——前端要显示"这是哪份文档的第几条"
-	Span     string  `json:"span"`
-	Text     string  `json:"text"`
-	Score    float64 `json:"score"`
-}
-
-// HealthResponse 是 GET /v1/health 的响应（类型化——契约从代码生成，
-// map[string]any 生成不出契约）。
-type HealthResponse struct {
-	Status     string `json:"status"`
-	CorpusDocs int    `json:"corpus_docs"`
-	Realm      string `json:"realm"`
-}
-
-// SignalRequest 是 POST /v1/signal 的请求体（前端钩子用）。目前唯一
-// 的实际发送方是引用点击（cite）；接收端不锁死类型，服务端推导的四
-// 族之外的新族从这里进（加族前必须有真实使用在要它，不预先建）。
-type SignalRequest struct {
-	Session  string `json:"session"`
-	Kind     string `json:"kind"`
-	Target   string `json:"target"`   // cite 的 "doc#span"
-	Question string `json:"question"` // 可选：被点的答案对应的问句
 }
 
 // POST /v1/signal——外部信号入口。目前唯一发送方是引用点击；拒收空
@@ -285,22 +220,6 @@ func atoiView(s string) int {
 	return n
 }
 
-// StatusResponse 是 GET /v1/status 的响应：可选组件的启停。cumulus 的
-// MCS 静默不触发，缺的就是这一面。
-type StatusResponse struct {
-	Synthesis bool `json:"synthesis"`
-	Embedder  bool `json:"embedder"`
-	Reuse     bool `json:"reuse"`
-	Escalate  bool `json:"escalate"`
-}
-
-// UsageView 是用量账。CostKnown=false 表示上游不报（成本未知不是 0）。
-type UsageView struct {
-	PromptTokens     int  `json:"prompt_tokens"`
-	CompletionTokens int  `json:"completion_tokens"`
-	CostKnown        bool `json:"cost_known"`
-}
-
 // Handler 返回挂好路由的 http.Handler（测试与 serve 共用）。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -342,6 +261,10 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 	if s.Escalate != nil {
 		opts.Escalate = s.Escalate
 	}
+	// 提交视图的四版本在受理时定死（一次性迁移只认开始时那一套环境）：
+	// 语料版本是内容摘要，配置版本是生效装配的形状，策略是标签，信念
+	// 已退役记 none。语料在长，答案必须能说明"这是针对哪一版给的"。
+	opts.CorpusVersion, opts.ConfigVersion, opts.StrategyVersion, opts.BeliefVersion = s.committedVersions()
 	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index(), s.TopK, s.Width), s.Synth, opts)
 	if err := runner.Run(c); err != nil {
 		writeErr(w, http.StatusInternalServerError, "flow: "+err.Error())
@@ -418,6 +341,11 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	if u, ok := context.Get(c, qaflow.KeyUsage); ok {
 		resp.Usage = UsageView{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, CostKnown: u.CostKnown}
 	}
+	// 提交视图取最后一次迁移（这一问就是最后一次）。没有视图 = 流程没
+	// 走完 Commit，此时留零值并在字段上看得出来（四版本全空）。
+	if views := c.Views(); len(views) > 0 {
+		resp.Committed = views[len(views)-1]
+	}
 	return resp
 }
 
@@ -426,7 +354,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if idx := s.Index(); idx != nil {
 		docs = idx.N
 	}
-	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", CorpusDocs: docs, Realm: s.Realm})
+	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", CorpusDocs: docs, Realm: s.Realm, CorpusVersion: s.corpusVersion()})
 }
 
 // handleStatus 是分类器可见面：哪些可选组件活着、缺什么。cumulus 的

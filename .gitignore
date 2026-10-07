@@ -4,3 +4,4 @@
 .env
 /doc-fresh
 /contract-gen
+.gocache/

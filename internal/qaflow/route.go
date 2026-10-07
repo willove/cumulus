@@ -20,10 +20,62 @@ func (RouteStage) Writes() []string { return []string{KeyRoute.String()} }
 // 0.95 封顶）——绝对上限在抬高后的基线下会静默把线拉低。
 const gammaStep = 0.05
 
+// RouteConfig 是路由的阈值与校准来源（v0.2 §2.1：阈值不手调）。
+//
+// 两条来源都在这一个结构里，因为它必须进提交视图：换 provider 要重
+// 校准、换校准程序要换版本标签，否则两次运行的数字不可比。
+type RouteConfig struct {
+	// UpgradeBase 是升级线基线 τ₀。<=0 用默认 0.5（手工值）。
+	UpgradeBase float64
+	// GammaStepOverride 覆盖每事实一格的步长；<=0 用默认 0.05。
+	GammaStepOverride float64
+	// Program 是阈值来源程序名：hand-set / CAUC。空 = hand-set。
+	Program string
+	// ThresholdVersion 是阈值版本标签（改程序或改校准集即改标签）。
+	ThresholdVersion string
+}
+
+// ProgramName 归一化程序名（空值 = 手工）。
+func (rc RouteConfig) ProgramName() string {
+	if rc.Program == "" {
+		return ProgramHandSet
+	}
+	return rc.Program
+}
+
+// ProgramHandSet / ProgramCAUC 是两个阈值来源程序。CAUC 的规则：
+// 升级阈值 = 强臂（DEEP）在校准集上的经验准确率——低于这条线，弱臂
+// 的可信度还不如直接花钱走强臂。程序名进提交视图，换程序必须换标签。
+const (
+	ProgramHandSet = "hand-set(v0.1)"
+	ProgramCAUC    = "CAUC(tau0=deep-arm-accuracy)"
+)
+
+// Tau0FromDeepAccuracy 按 CAUC 从校准集读数推升级线：
+// τ₀ = DEEP 臂在校准集上的经验准确率（钳到 [0,1]）。
+//
+// 边界（诚实写在这里，不许省）：CAUC 的 τ₀ 作用在**校准过的正确概率**
+// 上；本项目的 Confidence 在 provider 无 logprobs 时是检索侧合成的
+// 置信代理（档位 retrieval），不是正确概率。所以在跑出可靠性曲线
+// （evalfcore.CalibrationTable）之前，τ₀ 只能当"待验证的候选值"，
+// 默认仍是 hand-set 的 0.5——换程序要显式 opt-in（CUMULUS_TAU0）。
+func Tau0FromDeepAccuracy(acc float64) float64 {
+	if acc < 0 {
+		return 0
+	}
+	if acc > 1 {
+		return 1
+	}
+	return acc
+}
+
 // thresholdFor 按意图形状调升级线（fact 数量）。
-func thresholdFor(base float64, factsK int) float64 {
+func thresholdFor(base, step float64, factsK int) float64 {
+	if step <= 0 {
+		step = gammaStep
+	}
 	thr := base
-	cap := thr + 3*gammaStep
+	cap := thr + 3*step
 	if cap > 0.95 {
 		cap = 0.95
 	}
@@ -31,7 +83,7 @@ func thresholdFor(base float64, factsK int) float64 {
 	if extra > 3 {
 		extra = 3
 	}
-	thr += gammaStep * float64(extra)
+	thr += step * float64(extra)
 	if thr > cap {
 		thr = cap
 	}
@@ -42,6 +94,9 @@ func (s RouteStage) Run(c *context.Context) error {
 	ws, _ := context.Get(c, KeyWindows)
 	grounded := len(ws) > 0
 	sig := gatherSignals(c, ws)
+	sig.Tier = TierRetrieval
+	sig.CalibrationProgram = s.Config.ProgramName()
+	sig.ThresholdVersion = s.Config.ThresholdVersion
 
 	d := RouteDecision{Grounded: grounded, Signals: sig}
 	// 再问加深（KeyDeepen）：用户原样再问是比任何内部信号都硬的"上次
@@ -55,11 +110,12 @@ func (s RouteStage) Run(c *context.Context) error {
 		}
 		return nil
 	}
-	base := s.MinConfidence
+	base := s.Config.UpgradeBase
 	if base <= 0 {
 		base = 0.5
 	}
-	threshold := thresholdFor(base, max(1, sig.FactsK))
+	threshold := thresholdFor(base, s.Config.GammaStepOverride, max(1, sig.FactsK))
+	d.Signals.Threshold = threshold
 	switch {
 	case !grounded:
 		d.Action = "refuse" // 没有证据：诚实的不知道，不许硬答
@@ -96,14 +152,31 @@ type RouteSignals struct {
 	Margin     float64 `json:"margin"`     // (top1-top2)/top1：候选区分度代理，0..1
 	DeadRate   float64 `json:"dead_rate"`  // 死路/取样：翻过多少空文档
 	Windows    int     `json:"windows"`    // 最终窗口数
-	Confidence float64 `json:"confidence"` // 上三项的加权组合（DraftConfidence）
-	GapThin    bool    `json:"gap_thin"`   // 词汇鸿沟折扣是否生效（审计用）
+	Confidence float64 `json:"confidence"` // 兜底档：上三项的加权组合（RetrievalConfidence）
+	// Tier 是本次实际生效的信号档（v0.2 §2.1 三级）：logprob 优先 /
+	// grounding 常备 / retrieval 兜底。**档位必须留痕**——把兜底档当
+	// "草稿置信度"报出去，就是口径漂移（provider 不返回 logprobs 时
+	// 正确做法是记未知并只依接地，不是编一个同名数）。
+	Tier               string  `json:"tier"`
+	ConfidenceKnown    bool    `json:"confidence_known"`    // 优先档（logprob）才有
+	CalibrationProgram string  `json:"calibration_program"` // 阈值来源程序
+	ThresholdVersion   string  `json:"threshold_version,omitempty"`
+	Threshold          float64 `json:"threshold"` // 本次实际用的升级线（0 = 未判阈值，如强制升级）
+	GapThin            bool    `json:"gap_thin"`  // 词汇鸿沟折扣是否生效（审计用）
 	// 事实族（cumulus 的准确定义：事实点全盖）
 	FactsK       int `json:"facts_k"`       // 拆出几条事实
 	FactsCovered int `json:"facts_covered"` // 盖到几条
 	FactsMissing int `json:"facts_missing"` // 没盖几条
 	Conflicts    int `json:"conflicts"`     // 证据冲突数（同事实不同值）
 }
+
+// 信号档位取值。logprob 档需要 provider 返回 logprobs（本项目当前
+// provider 不返回 → 恒为 retrieval；真接上时改这一个常量并重校准）。
+const (
+	TierLogprob   = "logprob"
+	TierGrounding = "grounding"
+	TierRetrieval = "retrieval"
+)
 
 // gatherSignals 从 context 采集路由信号。
 func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
@@ -141,18 +214,25 @@ func gatherSignals(c *context.Context, ws []EvidenceWindow) RouteSignals {
 	// → 置信度减半，逼升级走桥。**注意：事实族必须先填再走这个早退
 	// （曾经的 bug：早退在事实填充之前，稀薄查询的信号族全是 0）**
 	if an, ok := context.Get(c, KeyAnalysis); ok && an.Thin(2, 2.0) {
-		sig.Confidence = DraftConfidence(sig) * 0.5
+		sig.Confidence = RetrievalConfidence(sig) * 0.5
 		sig.GapThin = true
 		return sig
 	}
-	sig.Confidence = DraftConfidence(sig)
+	sig.Confidence = RetrievalConfidence(sig)
 	return sig
 }
 
-// DraftConfidence 权重公开可审：覆盖度 0.5（证据到没到位的直接度量）、
-// 区分度 0.3（top 与次席分不开 = 没把握）、死路率 0.2（翻过多少空文档，
-// 取负）。权重不是魔数，是默认值——改它要走评测对照，不靠感觉。
-func DraftConfidence(sig RouteSignals) float64 {
+// RetrievalConfidence 是**兜底档**的置信代理（原 DraftConfidence）。
+//
+// 改名是有意的：v0.2 §2.1 的优先档是"草稿置信度 = 首 token 对数概率"，
+// 本项目 provider 不返回 logprobs（llm 包没有 logprobs 字段），所以真正
+// 生效的是检索侧合成值。名字必须说出它的来历，否则响应里的 confidence
+// 会被读成"模型自己的把握"——那是口径漂移，不是命名品味。
+//
+// 权重公开可审：覆盖度 0.5（证据到没到位的直接度量）、区分度 0.3
+// （top 与次席分不开 = 没把握）、死路率 0.2（翻过多少空文档，取负）。
+// 权重不是魔数，是默认值——改它要走评测对照，不靠感觉。
+func RetrievalConfidence(sig RouteSignals) float64 {
 	conf := 0.5*sig.Coverage + 0.3*sig.Margin + 0.2*(1-sig.DeadRate)
 	if conf < 0 {
 		return 0
@@ -162,3 +242,7 @@ func DraftConfidence(sig RouteSignals) float64 {
 	}
 	return conf
 }
+
+// DraftConfidence 是 RetrievalConfidence 的旧名（保留一个版本防外部
+// 引用断裂）；新代码一律用 RetrievalConfidence——名字要说出档位。
+func DraftConfidence(sig RouteSignals) float64 { return RetrievalConfidence(sig) }

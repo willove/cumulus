@@ -218,3 +218,29 @@ func hasWindow(ws []EvidenceWindow, sourceID string) bool {
 	}
 	return false
 }
+
+// 升级重判不许丢校准来源：档位/程序/阈值版本是装配的事实，不是窗口的
+// 函数。丢过一版——凡走过升级的题，响应与提交视图里的 calibration 全空
+// （serve 实测抓到），等于这次判定来历不明。
+func TestEscalationKeepsCalibrationProvenance(t *testing.T) {
+	c := context.New("default")
+	o := escOpts(coverageStub(winDeep(), 0.9))
+	o.Route = RouteConfig{UpgradeBase: 0.95, Program: ProgramCAUC, ThresholdVersion: "tau0=0.950"}
+	if err := Runner("q", coverageStub(win1(), 0.3), offlineStub, o).Run(c); err != nil {
+		t.Fatal(err)
+	}
+	route, _ := context.Get(c, KeyRoute)
+	if route.Signals.Tier != TierRetrieval {
+		t.Fatalf("tier lost after escalation: %+v", route.Signals)
+	}
+	if route.Signals.CalibrationProgram != ProgramCAUC || route.Signals.ThresholdVersion != "tau0=0.950" {
+		t.Fatalf("calibration provenance lost after escalation: %+v", route.Signals)
+	}
+	if route.Signals.Threshold != 0.95 {
+		t.Fatalf("threshold lost after escalation: %v", route.Signals.Threshold)
+	}
+	views := c.Views()
+	if len(views) != 1 || views[0].Calibration.Program != ProgramCAUC {
+		t.Fatalf("committed view must keep the calibration of an escalated answer: %+v", views)
+	}
+}

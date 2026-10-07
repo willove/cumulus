@@ -106,6 +106,17 @@ func (EscalateStage) Verify(c *context.Context) error {
 // 这题是带疑作答，不是干净命中）。
 func routeWith(c *context.Context, ws []EvidenceWindow) RouteDecision {
 	sig := gatherSignals(c, ws)
+	// 档位与校准来源是**装配的事实**，不是本轮窗口的函数：重判换的是窗口
+	// 与结论，不换档位、程序和阈值版本。丢了它们，升级过的题在响应与
+	// 提交视图里就变成"来历不明"——审计上等于这次判定没有校准出处
+	// （真跑抓到过：serve 里凡是走过升级的题，committed.calibration 全空）。
+	if prev, ok := context.Get(c, KeyRoute); ok {
+		sig.Tier = prev.Signals.Tier
+		sig.ConfidenceKnown = prev.Signals.ConfidenceKnown
+		sig.CalibrationProgram = prev.Signals.CalibrationProgram
+		sig.ThresholdVersion = prev.Signals.ThresholdVersion
+		sig.Threshold = prev.Signals.Threshold
+	}
 	d := RouteDecision{Grounded: len(ws) > 0, Signals: sig}
 	switch {
 	case len(ws) == 0:

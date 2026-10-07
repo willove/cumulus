@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/willove/cumulus/internal/failure"
 )
 
 // Status 是运行状态。
@@ -22,9 +24,10 @@ const (
 // ErrStartNewRun 表示这个 runID 的历史状态不能续跑，必须另起新 run。
 var ErrStartNewRun = errors.New("evalfcore: start a new run")
 
-// RunState 与逐题结果在同一个 KV 值里原子落盘——进度不可能领先于
-// 未持久化的结果。进程被 SIGKILL 后：已完成的运行原样还在；当时在飞的
-// 运行重启后只报 interrupted（绝不冷启动重放，那是没被同意的二次计费）。
+// RunState 的逐题结果落文档集合、清单落 KV 小值，**清单最后写**——
+// 进度不可能领先于未持久化的结果（见 archive.go）。进程被 SIGKILL 后：
+// 已完成的运行原样还在；当时在飞的运行重启后只报 interrupted
+// （绝不冷启动重放，那是没被同意的二次计费）。
 type RunState struct {
 	RunID        string       `json:"run_id"`
 	Arm          string       `json:"arm,omitempty"` // 臂标签（bm25 / bm25+rerank）：A/B 里的变动因子，不进指纹——指纹冻结实验，臂是实验内的对照维度
@@ -55,6 +58,9 @@ type ItemResult struct {
 	JudgeTokens       int      `json:"judge_tokens,omitempty"` // 判官花费（prompt+completion），进账单
 	JudgeRaw          string   `json:"judge_raw,omitempty"`    // 判词原文（校准用）
 	Failure           string   `json:"failure,omitempty"`
+	RouteAction       string   `json:"route_action,omitempty"` // fast / escalate / refuse（归因与校准分桶用）
+	Confidence        float64  `json:"confidence,omitempty"`   // 路由实际用的置信代理（校准分桶用）
+	RouteTier         string   `json:"route_tier,omitempty"`   // 置信信号档位：logprob / retrieval
 	LatencyMS         int64    `json:"latency_ms"`
 	PromptTokens      int      `json:"prompt_tokens"`
 	CompletionTokens  int      `json:"completion_tokens"`
@@ -81,6 +87,15 @@ type ItemOutcome struct {
 	PromptTokens     int
 	CompletionTokens int
 	CostKnown        bool
+	// 底物信号（失败归因用，BioHarness）：窗里有没有可读数值、
+	// 查询内容词是不是全体语料外。执行面手上有窗口与查询分析，顺手报
+	// 上来；缺省 false = 按"不知道"处理（判据保守，宁漏勿滥）。
+	EvidenceHasNumeric bool
+	QueryOutOfCorpus   bool
+	// Confidence 是本次路由实际用的置信代理（无 logprobs 时是检索侧
+	// 合成值，档位见 RouteTier）。校准报告要用它分桶，所以必须随结果落盘。
+	Confidence float64
+	RouteTier  string
 }
 
 // Executor 在冻结语料上执行一次问答。实现方负责隔离：每次运行一个
@@ -112,7 +127,7 @@ func NewRunner(store RunStore, fp Fingerprints, ex Executor, j Judge) *Runner {
 }
 
 // Start 开始（或认领）一次运行：
-//   - 新 runID：排队 → 逐题执行 → 每完成一题原子落盘 → 全部完成记 done；
+//   - 新 runID：排队 → 逐题执行 → 每完成一题落一条 + 更新清单 → 全部完成记 done；
 //   - 已有 running 档案：不重跑，标记 interrupted 后返回既有档案；
 //   - 已有 done/failed/interrupted 档案：返回 ErrStartNewRun。
 //
@@ -182,7 +197,7 @@ func (r *Runner) Start(ctx context.Context, runID string, items []Item) (RunStat
 		}
 		state.Results = append(state.Results, res)
 		state.ItemsDone = i + 1
-		// 每完成一题原子落盘：进度永远不领先于结果
+		// 每完成一题落一条 + 更新清单：进度永远不领先于结果
 		if err := r.Store.SaveRun(ctx, state); err != nil {
 			return state, fmt.Errorf("evalfcore: persist after item %s: %w", item.ID, err)
 		}
@@ -226,6 +241,9 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		EvidenceHit:       EvidenceHit(citedIDs, item.GoldIDs),
 		CitationsResolved: resolvedCount,
 		CitationsTotal:    len(out.Cited),
+		RouteAction:       out.RouteAction,
+		Confidence:        out.Confidence,
+		RouteTier:         out.RouteTier,
 		LatencyMS:         latency,
 		PromptTokens:      out.PromptTokens,
 		CompletionTokens:  out.CompletionTokens,
@@ -260,6 +278,9 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 			Refused:             out.Refused,
 			RouteAction:         out.RouteAction,
 			RuleScore:           res.RuleScore,
+			AsksNumeric:         failure.AsksNumeric(item.Question),
+			EvidenceHasNumeric:  out.EvidenceHasNumeric,
+			QueryOutOfCorpus:    out.QueryOutOfCorpus,
 		}))
 	}
 	return res, nil

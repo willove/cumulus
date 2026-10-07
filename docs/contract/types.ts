@@ -25,6 +25,7 @@ export interface QAResponse {
   rerank: RerankState;
   windows: WindowView[];
   usage: UsageView;
+  committed: CommittedView;
 }
 
 export interface AnalysisView {
@@ -81,6 +82,11 @@ export interface RouteSignals {
   dead_rate: number;
   windows: number;
   confidence: number;
+  tier: string;
+  confidence_known: boolean;
+  calibration_program: string;
+  threshold_version?: string;
+  threshold: number;
   gap_thin: boolean;
   facts_k: number;
   facts_covered: number;
@@ -131,10 +137,41 @@ export interface UsageView {
   cost_known: boolean;
 }
 
+export interface CommittedView {
+  at: Record<string, unknown>;
+  realm: string;
+  flow: string;
+  corpus_version: string;
+  config_version: string;
+  strategy_version: string;
+  belief_version: string;
+  calibration: Calibration;
+}
+
+export interface Time {
+}
+
+export interface Location {
+}
+
+export interface zone {
+}
+
+export interface zoneTrans {
+}
+
+export interface Calibration {
+  tier: string;
+  program: string;
+  threshold: number;
+  threshold_version: string;
+}
+
 export interface HealthResponse {
   status: string;
   corpus_docs: number;
   realm: string;
+  corpus_version: string;
 }
 
 export interface StatusResponse {

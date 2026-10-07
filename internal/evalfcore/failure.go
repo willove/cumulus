@@ -30,19 +30,50 @@ type ClassifyInput struct {
 	RouteAction         string // fast / escalate / refuse
 	RuleScore           float64
 	BudgetExhausted     bool
+	// 底物信号（BioHarness 的"证据类型错配"，可观测化）：
+	AsksNumeric        bool // 问题要的是数值型答案
+	EvidenceHasNumeric bool // 窗里有可读的数值（failure.HasNumeric 口径）
+	QueryOutOfCorpus   bool // 库与问句词面零共享（内容词一个都不在语料里）：需要外部实体接地
 }
 
 // Classify 按固定规则归类。规则只有这几条，判据写死；
 // 没有规则匹配时返回未分类（-1）——不硬塞一个类别让人误判。
-// 拒答归类为 Rot：文法里拒答是诚实出口，但在评测归因里它仍是
-// “没答上”的一种，单列出来由人复核这次拒答应不应该。
+//
+// 归因口径（每一条都对着一个可观测事实，且六类都可达）：
+//   - 超限：轮次/窗口打满；
+//   - 接地失败：引用核不掉；
+//   - 底物错配：要数值却全是叙述文本，或查询的实体语料里根本没有——
+//     BioHarness 的判据：这时再加检索是治错病；
+//   - 路由误判：有证据（金标在窗内）却拒答 = 过度拒答；或快路硬答而
+//     规则分为零 = 该升级没升级；
+//   - 召回不足：空手拒答或金标没进候选——拒答本身是诚实出口，但归因
+//     要落到"检索没够到"，不是笼统贴给腐烂；
+//   - 腐烂：手上有窗、预算没用完就提前给不确定答案（abstain 早弃权那
+//     类）。**拒答不再一律算腐烂**——那是把系统的正确出口当失败，会
+//     同时污染诊断与学习周期（文法的"拒答是诚实结局"与归因口径别混）。
 func Classify(in ClassifyInput) failure.Category {
 	switch {
 	case in.BudgetExhausted:
 		return failure.BudgetExceeded
 	case in.UnresolvedCitations > 0:
 		return failure.GroundingFail
+	case in.AsksNumeric && in.Windows > 0 && !in.EvidenceHasNumeric:
+		// 要数值、有窗、窗里没有数：证据类型不对（在叙述文本里找测量值）
+		return failure.SubstrateMismatch
+	case in.QueryOutOfCorpus:
+		// 库与问句**词面零共享**：语料没命名这个问题里的任何内容词，
+		// 需要的是实体接地/换证据源，不是再翻文本。**有没有窗都算**。
+		// 判据之所以要"零共享"这么窄：松一档（用 OOV 占比）就会把
+		// 普通口语问句标成错配——那是词表桥的触发器，不是失败标签。
+		return failure.SubstrateMismatch
+	case in.Refused && in.GoldHit:
+		// 金标就在窗里却拒答 = 过度拒答（路由漏了该走的那条路）
+		return failure.RouteError
+	case in.Refused && in.Windows == 0:
+		// 空手拒答：出口是对的，账要记在召回上
+		return failure.RecallMiss
 	case in.Refused:
+		// 有窗、没命中、预算没用完就放弃 = 提前给不确定答案
 		return failure.Rot
 	case in.Windows == 0:
 		return failure.RecallMiss

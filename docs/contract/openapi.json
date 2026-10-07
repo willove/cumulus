@@ -44,6 +44,68 @@
         ],
         "type": "object"
       },
+      "Calibration": {
+        "properties": {
+          "program": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "number"
+          },
+          "threshold_version": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "program",
+          "threshold",
+          "threshold_version",
+          "tier"
+        ],
+        "type": "object"
+      },
+      "CommittedView": {
+        "properties": {
+          "at": {
+            "type": "object"
+          },
+          "belief_version": {
+            "type": "string"
+          },
+          "calibration": {
+            "$ref": "#/components/schemas/Calibration"
+          },
+          "config_version": {
+            "type": "string"
+          },
+          "corpus_version": {
+            "type": "string"
+          },
+          "flow": {
+            "type": "string"
+          },
+          "realm": {
+            "type": "string"
+          },
+          "strategy_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "belief_version",
+          "calibration",
+          "config_version",
+          "corpus_version",
+          "flow",
+          "realm",
+          "strategy_version"
+        ],
+        "type": "object"
+      },
       "ConflictView": {
         "properties": {
           "fact_id": {
@@ -199,6 +261,9 @@
           "corpus_docs": {
             "type": "integer"
           },
+          "corpus_version": {
+            "type": "string"
+          },
           "realm": {
             "type": "string"
           },
@@ -208,6 +273,7 @@
         },
         "required": [
           "corpus_docs",
+          "corpus_version",
           "realm",
           "status"
         ],
@@ -301,6 +367,9 @@
             },
             "type": "array"
           },
+          "committed": {
+            "$ref": "#/components/schemas/CommittedView"
+          },
           "conflicts": {
             "items": {
               "$ref": "#/components/schemas/ConflictView"
@@ -360,6 +429,7 @@
           "analysis",
           "answer",
           "citations",
+          "committed",
           "coverage",
           "escalation",
           "eviction",
@@ -403,8 +473,14 @@
       },
       "RouteSignals": {
         "properties": {
+          "calibration_program": {
+            "type": "string"
+          },
           "confidence": {
             "type": "number"
+          },
+          "confidence_known": {
+            "type": "boolean"
           },
           "conflicts": {
             "type": "integer"
@@ -430,12 +506,23 @@
           "margin": {
             "type": "number"
           },
+          "threshold": {
+            "type": "number"
+          },
+          "threshold_version": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          },
           "windows": {
             "type": "integer"
           }
         },
         "required": [
+          "calibration_program",
           "confidence",
+          "confidence_known",
           "conflicts",
           "coverage",
           "dead_rate",
@@ -444,6 +531,8 @@
           "facts_missing",
           "gap_thin",
           "margin",
+          "threshold",
+          "tier",
           "windows"
         ],
         "type": "object"
