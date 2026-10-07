@@ -52,9 +52,11 @@ func BM25DeepEvidence(idx *retrieval.Index, width int, deep DeepOptions) func(*c
 				for _, h := range hits {
 					out = append(out, deepcore.Window{
 						SourceID: h.DocID,
-						Span:     h.SpanCoord,
-						Text:     h.SpanText,
-						Score:    h.Score,
+						Title:    h.Title, // 转换链第三处：deep 的 Hit→Window 不许蒸发标题
+						// （真跑踩过：升级路径回填的窗口全程无标题）
+						Span:  h.SpanCoord,
+						Text:  h.SpanText,
+						Score: h.Score,
 					})
 				}
 				return out, nil

@@ -94,3 +94,42 @@ func TestRunnerPlumbsPriorOption(t *testing.T) {
 		t.Fatal("Options.Prior=true 必须让 prior 跑出信号（KeyPrior 有值）")
 	}
 }
+
+// 升级路径必须带标题：deep 回填的窗口与快路同权（曾经 deep 的
+// Hit→Window 转换丢了 Title，升级后全程无标题——真跑踩过第三次同型
+// 转换蒸发：evict 一次、deep 一次）。这条测试从 escalate 的取数函数
+// 走到底，钉死 Title 过桥。
+func TestEscalateCarriesWindowTitles(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "law", Body: "中华人民共和国甲法\n第一条 甲法规定连接池默认为一百，超过需调整。"},
+	})
+	stage := EscalateStage{
+		Retrieve: func(_ *context.Context, _ Rewrite) ([]EvidenceWindow, error) {
+			// 真深路：走 BM25DeepEvidence（与 serve 同一条）
+			return BM25DeepEvidence(idx, 160, DeepOptions{MaxRounds: 2, CoverageTarget: 1.0})(
+				context.New("default"), Rewrite{Original: "连接池默认多少"})
+		},
+	}
+	c := context.New("default")
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "连接池默认多少"})
+	_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+	if err := stage.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := context.Get(c, KeyWindows)
+	if len(ws) == 0 {
+		t.Fatal("深路必须有窗口")
+	}
+	for _, w := range ws {
+		if w.Title == "" {
+			t.Fatalf("升级路径的窗口必须带标题（%s 丢了）", w.SourceID[:min(8, len(w.SourceID))])
+		}
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
