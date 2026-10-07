@@ -160,14 +160,20 @@ const synthesisSystemPrompt = `你是证据合成器。规则只有一条：每�
 不许凭记忆补充。输出严格 JSON：{"answer": "最终答案", "assertions": [{"text": "断言", "window": "wN"}]}。
 没有窗口支持的要点，删掉，不要写。
 
-证据不足以回答问题时，输出 {"answer": "", "assertions": [], "refused": true}——
-宁可说不知道，不许用窗口外的话拼答案。`
+证据与问题相关但不完整时，用已有证据回答能答的部分，并在答案里说明局限
+（如"证据未涉及具体分值"）——知识工作里"库里最接近的"胜过干巴巴的不知道；
+只有证据与问题完全无关时才输出 {"answer": "", "assertions": [], "refused": true}。
+无论答不答，不许用窗口外的话拼答案。`
 
 func buildSynthesisPrompt(question string, windows []qaflow.EvidenceWindow, labels []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "问题：%s\n\n证据窗口：\n", question)
 	for i, w := range windows {
-		fmt.Fprintf(&b, "[%s] 文档 %s 位置 %s 得分 %.2f\n原文：%s\n", labels[i], w.SourceID, w.Span, w.Score, w.Text)
+		title := w.Title
+		if title == "" {
+			title = w.SourceID // 没身份的退化成 id（不该发生，但有兜底）
+		}
+		fmt.Fprintf(&b, "[%s] %s（%s）位置 %s 得分 %.2f\n原文：%s\n", labels[i], title, w.SourceID, w.Span, w.Score, w.Text)
 	}
 	b.WriteString("\n按系统提示的 JSON 契约作答。")
 	return b.String()

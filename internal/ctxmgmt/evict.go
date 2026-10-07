@@ -44,9 +44,11 @@ func (b Budget) withDefaults() Budget {
 // Window 是驱逐的最小单元。
 type Window struct {
 	SourceID string
-	Span     string
-	Text     string
-	Score    float64
+	Title    string // 文档身份——驱逐的来回转换不许把它蒸发（真跑踩过：
+	// 转换丢了 title，窗口在响应里只剩内容哈希）
+	Span  string
+	Text  string
+	Score float64
 }
 
 // MergeRecord 是一次合并的记录：并进了谁、为什么（余弦值）。

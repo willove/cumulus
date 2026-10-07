@@ -116,24 +116,56 @@ func ImportFile(ctx gocontext.Context, p Port, path string) (int, error) {
 	return n, nil
 }
 
-// ImportDir 导入目录下全部 .jsonl（按文件名排序，确定性）。
+// ImportDir 递归导入目录下全部 .jsonl/.txt/.md（一文一文件的形态）。
 func ImportDir(ctx gocontext.Context, p Port, dir string) (int, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, fmt.Errorf("corpus: read dir %s: %w", dir, err)
-	}
 	total := 0
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
+	// 递归（laws-full 的形态：法律/司法解释/宪法各占子目录）
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || strings.HasPrefix(info.Name(), ".") {
+			return nil
 		}
-		n, err := ImportFile(ctx, p, filepath.Join(dir, e.Name()))
-		if err != nil {
-			return total, err
+		switch {
+		case strings.HasSuffix(info.Name(), ".jsonl"):
+			n, ierr := ImportFile(ctx, p, path)
+			if ierr != nil {
+				return ierr
+			}
+			total += n
+		case strings.HasSuffix(info.Name(), ".txt"), strings.HasSuffix(info.Name(), ".md"):
+			// 一文一文件（laws-full 的形态：一法一个 .txt）：整篇为一文档，
+			// 内容寻址 id，窗口 machinery 负责篇内 span
+			n, ierr := importTextFile(ctx, p, path)
+			if ierr != nil {
+				return ierr
+			}
+			total += n
 		}
-		total += n
+		return nil
+	})
+	if err != nil {
+		return total, fmt.Errorf("corpus: walk %s: %w", dir, err)
 	}
 	return total, nil
+}
+
+// importTextFile 把一个 .txt/.md 文件整篇入库。
+func importTextFile(ctx gocontext.Context, p Port, path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("corpus: read %s: %w", path, err)
+	}
+	body := string(raw)
+	if strings.TrimSpace(body) == "" {
+		return 0, nil
+	}
+	if err := p.EnsureCollection(ctx, Collection); err != nil {
+		return 0, err
+	}
+	id := hashID(body)
+	if err := p.PutStruct(ctx, Collection, id, Doc{ID: id, Body: body}); err != nil {
+		return 0, fmt.Errorf("corpus: put %s: %w", id, err)
+	}
+	return 1, nil
 }
 
 func hashID(s string) string {

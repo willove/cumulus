@@ -128,6 +128,7 @@ type EvictionView struct {
 // WindowView 是一个证据窗口。
 type WindowView struct {
 	SourceID string  `json:"source_id"`
+	Title    string  `json:"title"` // 文档身份（法律名）——前端要显示"这是哪份文档的第几条"
 	Span     string  `json:"span"`
 	Text     string  `json:"text"`
 	Score    float64 `json:"score"`
@@ -234,7 +235,7 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	}
 	if ws, ok := context.Get(c, qaflow.KeyWindows); ok {
 		for _, w := range ws {
-			resp.Windows = append(resp.Windows, WindowView{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
+			resp.Windows = append(resp.Windows, WindowView{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score})
 		}
 	}
 	if u, ok := context.Get(c, qaflow.KeyUsage); ok {

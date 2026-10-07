@@ -45,6 +45,7 @@ func (s ReuseStage) Run(c *context.Context) error {
 	for _, w := range e.Windows {
 		windows = append(windows, EvidenceWindow{
 			SourceID: w.SourceID,
+			Title:    w.Title,
 			Span:     w.Span,
 			Text:     w.Text,
 			Score:    w.Score,
@@ -105,7 +106,7 @@ func (s ReuseRecordStage) Run(c *context.Context) error {
 	}
 	wins := make([]knowledge.Window, 0, len(ws))
 	for _, w := range ws {
-		wins = append(wins, knowledge.Window{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
+		wins = append(wins, knowledge.Window{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
 	cov, _ := context.Get(c, KeyCoverage)
 	s.Store.Record(s.Session, s.Query, wins, len(ans.Citations) > 0, knowledge.Coverage{

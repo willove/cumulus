@@ -21,6 +21,7 @@ import (
 // 同字段；知识层不依赖流程层，两边在 qaflow 的适配处转换）。
 type Window struct {
 	SourceID string
+	Title    string
 	Span     string
 	Text     string
 	Score    float64

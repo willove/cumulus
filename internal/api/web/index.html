@@ -87,7 +87,7 @@ function meta(d) {
   if (d.eviction && (d.eviction.merged + d.eviction.dropped) > 0)
     chips.push('驱逐:合' + d.eviction.merged + '/丢' + d.eviction.dropped);
   const wins = (d.windows||[]).map(w =>
-    '<div class="win">' + esc(w.source_id) + ' ' + esc(w.span) + ' · ' + w.score.toFixed(2) +
+    '<div class="win">' + esc(w.title || w.source_id) + ' · ' + esc(w.span) + ' · ' + w.score.toFixed(2) +
     '<br><span class="meta">' + esc((w.text||'').slice(0,80)) + '</span></div>').join('');
   return '<div class="box"><div>' + chips.map(c=>'<span class="sig">'+esc(c)+'</span>').join('') +
     '<div class="meta" style="margin-top:4px">' + esc(r.reason||'') + '</div>' +

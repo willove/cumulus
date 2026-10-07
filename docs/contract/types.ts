@@ -67,6 +67,7 @@ export interface RerankState {
 
 export interface WindowView {
   source_id: string;
+  title: string;
   span: string;
   text: string;
   score: number;

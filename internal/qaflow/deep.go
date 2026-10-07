@@ -75,6 +75,7 @@ func BM25DeepEvidence(idx *retrieval.Index, width int, deep DeepOptions) func(*c
 		for _, w := range windows {
 			out = append(out, EvidenceWindow{
 				SourceID: w.SourceID,
+				Title:    w.Title,
 				Span:     w.Span,
 				Text:     w.Text,
 				Score:    w.Score,

@@ -347,13 +347,17 @@
           },
           "text": {
             "type": "string"
+          },
+          "title": {
+            "type": "string"
           }
         },
         "required": [
           "score",
           "source_id",
           "span",
-          "text"
+          "text",
+          "title"
         ],
         "type": "object"
       }

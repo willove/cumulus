@@ -54,6 +54,7 @@ func (r Rewrite) Effective() string {
 // 原文就等于没有证据（第一次真调用学到的：坐标不是内容）。
 type EvidenceWindow struct {
 	SourceID  string
+	Title     string // 文档身份（法律名/文档题）——合成提示词用它标注窗口
 	Span      string
 	Text      string
 	Score     float64

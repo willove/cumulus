@@ -54,12 +54,12 @@ func (s EvictStage) Run(c *context.Context) error {
 	}
 	in := make([]ctxmgmt.Window, 0, len(ws))
 	for _, w := range ws {
-		in = append(in, ctxmgmt.Window{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score})
+		in = append(in, ctxmgmt.Window{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score})
 	}
 	kept, log := ctxmgmt.Apply(in, vecs, s.Budget)
 	out := make([]EvidenceWindow, 0, len(kept))
 	for _, w := range kept {
-		out = append(out, EvidenceWindow{SourceID: w.SourceID, Span: w.Span, Text: w.Text, Score: w.Score, Substrate: "text"})
+		out = append(out, EvidenceWindow{SourceID: w.SourceID, Title: w.Title, Span: w.Span, Text: w.Text, Score: w.Score, Substrate: "text"})
 	}
 	if err := context.Set(c, KeyWindows, out); err != nil {
 		return err

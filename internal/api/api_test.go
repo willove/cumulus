@@ -286,3 +286,24 @@ func jsonReq(method, path, body string) *http.Request {
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }
+
+// 窗口必须带文档身份（title）——模型靠它知道"第二十二条"是哪部法律的；
+// 前端也显示它。回归：曾经只有内容哈希，模型把两部法律的第一十二条搞混。
+func TestQAResponseCarriesWindowTitles(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "law-a", Body: "中华人民共和国甲法\n第一条 甲法的内容。"},
+		{ID: "law-b", Body: "中华人民共和国乙法\n第一条 乙法的内容。"},
+	})
+	s := New(idx, offlineQA(), 3, 160)
+	h := s.Handler()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, jsonReq("POST", "/v1/qa", `{"question":"甲法的内容"}`))
+	var qa QAResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &qa)
+	if len(qa.Windows) == 0 {
+		t.Fatal("no windows")
+	}
+	if qa.Windows[0].Title != "中华人民共和国甲法" {
+		t.Fatalf("window must carry its document title, got %q", qa.Windows[0].Title)
+	}
+}
