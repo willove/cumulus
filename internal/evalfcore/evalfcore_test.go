@@ -348,7 +348,7 @@ func TestRunStoreOnCumulite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := NewKVStore(p)
+	st := NewArchive(p)
 	r := NewRunner(st, testFP(), &stubExecutor{outcomes: map[string]ItemOutcome{
 		"连接池最大连接数是多少": {Answer: "100", RouteAction: "fast",
 			Cited: []Citation{{DocID: "law-1", Resolved: true}}},

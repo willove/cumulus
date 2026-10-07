@@ -5,6 +5,7 @@ import (
 
 	gocontext "context"
 
+	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/learncore"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -42,8 +43,8 @@ func runLearn(ctx gocontext.Context) error {
 		return err
 	}
 	fp := evalfcore.Fingerprints{
-		ItemsSHA:  "learn-items",
-		CorpusSHA: "learn-corpus",
+		ItemsSHA:  evaldata.HashItems(learnDataset()),
+		CorpusSHA: evaldata.HashDocs(learnCorpus()),
 		ConfigSHA: evalfcore.Config{Arms: []string{"rule"}, Model: "offline-stub"}.SHA(),
 	}
 
@@ -63,7 +64,7 @@ func runLearn(ctx gocontext.Context) error {
 	}
 
 	// 1+2. 观察与诊断的输入：先用当前旋钮跑一次基线
-	base, err := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, newExec(reg.Snapshot()), nil).Start(ctx, "learn-baseline", items)
+	base, err := evalfcore.NewRunner(evalfcore.NewArchive(st), fp, newExec(reg.Snapshot()), nil).Start(ctx, "learn-baseline", items)
 	if err != nil {
 		return err
 	}
@@ -87,14 +88,14 @@ func runLearn(ctx gocontext.Context) error {
 		Base:         learncore.Baseline{EvidenceHitRate: baseSum.EvidenceHitRate, CitationsOKRate: baseSum.CitationsOKRate},
 		NewExec:      newExec,
 		Fingerprints: fp,
-		RunStore:     evalfcore.NewKVStore(st),
+		RunStore:     evalfcore.NewArchive(st),
 	}
 	rec, err := cyc.RunWithObservation(ctx, obs, items, "cyc-demo")
 	if err != nil {
 		return err
 	}
 	// 候选运行的逐题结果（信念观测的原料）：用提升后的旋钮再跑一次
-	candState, err := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, newExec(reg.Snapshot()), nil).Start(ctx, "learn-candidate", items)
+	candState, err := evalfcore.NewRunner(evalfcore.NewArchive(st), fp, newExec(reg.Snapshot()), nil).Start(ctx, "learn-candidate", items)
 	if err != nil {
 		return err
 	}

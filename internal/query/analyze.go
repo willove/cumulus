@@ -188,3 +188,32 @@ func (a Analysis) SortedTerms() []Term {
 func (a Analysis) Thin(minTerms int, floor float64) bool {
 	return len(a.Primary) < minTerms || a.Score < floor || a.OOVShare() >= 0.6 || len(a.OOV) > 0
 }
+
+// NoSharedContent 查询的内容词（去停用词、去胶水二元组）在语料里**一个
+// 都找不到**——库连词面都不共享。
+//
+// 这是"底物错配"（BioHarness）的保守判据：问题要的实体语料里根本没有，
+// 需要的是外部实体接地/词表桥，不是"再检索一遍"。**不要用 OOVShare 代替**：
+// 那是**词表桥的触发器**（有任一句外语料内容词即触发——口语问句几乎必然
+// 触发，桥本来就该常开），拿它当失败标签会把普通口语问句标成错配，
+// 真跑踩过：项目自己的演示题"成本结构怎么样"（成本/结构都在库里，只有
+// "么样"是 OOV）被误标成底物错配，学习循环的诊断因此走偏。
+//
+// 判据的松紧要跟用途匹配：桥的触发器要宽（宁开勿漏），失败标签要窄
+// （宁漏勿滥——误标会同时污染诊断与学习）。
+func NoSharedContent(q string, corpus CorpusTerms) bool {
+	if corpus == nil {
+		return false // 没有语料事实就判不了：不判，不假装
+	}
+	content := 0
+	for _, term := range termsOf(q) {
+		if stopwords[term] || isGlueTerm(term) {
+			continue
+		}
+		content++
+		if corpus.HasTerm(term) {
+			return false // 有一个共享词就不算"零共享"
+		}
+	}
+	return content > 0
+}

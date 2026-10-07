@@ -13,7 +13,9 @@ import (
 	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/failure"
 	"github.com/willove/cumulus/internal/qaflow"
+	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
 )
@@ -35,6 +37,8 @@ type bm25Executor struct {
 	groundingFlag bool                // semantic grounding scale (true=on)
 	deep          *qaflow.DeepOptions // 非空 = 首程就走深循环（多轮取证）
 	escalate      bool                // true = 快路首程 + 判 escalate 才升级（级联）
+	bare          bool                // true = 哑臂：零改写、零管理（v0.2 §三.7）
+	route         qaflow.RouteConfig  // 路由阈值与校准来源
 }
 
 // escalateBackend 是级联的贵路（深循环）。
@@ -107,6 +111,8 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 		BeliefVersion:   "none",
 		GroundingFloor:  e.grounding(),
 		Escalate:        escalateFn,
+		Bare:            e.bare,
+		Route:           e.route,
 	})
 	if err := r.Run(c); err != nil {
 		return evalfcore.ItemOutcome{}, fmt.Errorf("qaflow: %w", err)
@@ -127,7 +133,22 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		CostKnown:        usage.CostKnown,
+		Confidence:       route.Signals.Confidence,
+		RouteTier:        route.Signals.Tier,
 	}
+	// 底物信号交给归因（不在评审器的签名里加东西，执行面顺手报）：
+	// 窗里有没有数、查询的实体语料里有没有。
+	texts := make([]string, 0, len(windows))
+	for _, w := range windows {
+		texts = append(texts, w.Text)
+	}
+	out.EvidenceHasNumeric = failure.HasNumeric(texts...)
+	// 底物信号：库与问句**词面零共享**（内容词一个都不在语料里）。这里做
+	// 一次离线判据、不写进 context——评测臂的检索口径保持纯 BM25，不因为
+	// 多了一个信号就换底物。
+	// 判据只认"零共享"，不认 OOV 占比：后者是词表桥的触发器（桥本来就
+	// 该常开），当失败标签用会误标普通口语问句（真跑踩过）。
+	out.QueryOutOfCorpus = query.NoSharedContent(question, e.idx)
 	for _, w := range windows {
 		out.Cited = append(out.Cited, evalfcore.Citation{DocID: w.SourceID, Span: w.Span, Resolved: true})
 	}
@@ -176,8 +197,10 @@ func runEval(ctx gocontext.Context) error {
 	)
 	corpus = evalCorpus()
 	rawItems = evalItems()
-	corpusSHA = "inline"
-	itemsSHA = "inline"
+	// 内联小样也给真指纹：占位串会在 [:12] 截断处炸（且"同样内容同指纹"
+	// 的纪律对演示路径同样成立）。
+	corpusSHA = evaldata.HashDocs(corpus)
+	itemsSHA = evaldata.HashItems(rawItems)
 	if os.Getenv("CUMULUS_REALDATA") == "cnlaw" {
 		path := os.Getenv("CNLAW_DIR")
 		if path == "" {
@@ -196,6 +219,47 @@ func runEval(ctx gocontext.Context) error {
 		corpus, rawItems = set.Docs, set.Items
 		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
 		fmt.Printf("realdata: %s sample=%d corpus=%d docs\n", path, len(rawItems), len(corpus))
+	}
+	// local：任意来源裁剪好的小语料（ModelScope 拉的 CMRC、自裁领域语料、
+	// 按块切的校准集）。目录里放 corpus.jsonl + items.jsonl，见
+	// scripts/prep_cmrc.py；也可用 CUMULUS_LOCAL_CORPUS / CUMULUS_LOCAL_ITEMS
+	// 分别指定两条文件。
+	if os.Getenv("CUMULUS_REALDATA") == "local" {
+		dir := os.Getenv("CUMULUS_LOCAL_DIR")
+		if dir == "" {
+			return fmt.Errorf("CUMULUS_REALDATA=local needs CUMULUS_LOCAL_DIR (dir with corpus.jsonl + items.jsonl)")
+		}
+		corpusPath, itemsPath := evaldata.DefaultLocalPaths(dir)
+		if v := os.Getenv("CUMULUS_LOCAL_CORPUS"); v != "" {
+			corpusPath = v
+		}
+		if v := os.Getenv("CUMULUS_LOCAL_ITEMS"); v != "" {
+			itemsPath = v
+		}
+		set, warnings, err := evaldata.LoadJSONL(corpusPath, itemsPath)
+		if err != nil {
+			return err
+		}
+		corpus, rawItems = set.Docs, set.Items
+		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
+		// CUMULUS_SAMPLE 对本地集同样生效（截前 N 题）——它是"跑多少题"
+		// 的统一旋钮，不该因为数据来源不同就失灵（真跑踩过：以为跑 30 题，
+		// 实际把 200 题全送进了 LLM 臂）。
+		if v := os.Getenv("CUMULUS_SAMPLE"); v != "" {
+			n := 0
+			if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+				return fmt.Errorf("CUMULUS_SAMPLE not a number: %q", v)
+			}
+			if n > 0 && n < len(rawItems) {
+				rawItems = rawItems[:n]
+			}
+		}
+		fmt.Printf("local: corpus=%s items=%s docs=%d items=%d\n", corpusPath, itemsPath, len(corpus), len(rawItems))
+		// 数据诊断必须看得见：金标不在语料里是"该拒答"的合法构造，但要
+		// 显式选择，不能默默跑（否则把数据错当成检索失败）。
+		for _, w := range warnings {
+			fmt.Printf("  warn: %s\n", w)
+		}
 	}
 	dset, err := evalfcore.NewDataset(rawItems)
 	ds = dset
@@ -233,16 +297,48 @@ func runEval(ctx gocontext.Context) error {
 		ConfigSHA: evalfcore.Config{Arms: []string{"rule"}, Model: "offline-stub"}.SHA(),
 	}
 	ab := os.Getenv("CUMULUS_AB") == "1"
-	// execFor 组装执行面：embedder/信念都是可选件，由参数决定装不装
-	execFor := func(withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions, escalate bool) *bm25Executor {
-		ex := &bm25Executor{idx: idx, knobs: knobs, synthFn: synthFn, groundingFlag: grounding > 0, deep: deep, escalate: escalate}
-		if withEmbed && embedFn != nil {
+	// 路由阈值与校准来源（v0.2 §2.1：阈值不手调）。
+	// CUMULUS_TAU0=<数> 显式换到 CAUC 程序（τ₀ = 强臂校准准确率）；
+	// CUMULUS_TAU0=auto 只打印建议值，不改本轮——应用它是下一轮的事，
+	// 因为"强臂准确率"要跑完本轮才知道（不为了一个数把评测跑两遍）。
+	routeCfg := qaflow.RouteConfig{}
+	tau0Auto := false
+	if v := os.Getenv("CUMULUS_TAU0"); v != "" {
+		if v == "auto" {
+			tau0Auto = true
+		} else {
+			tau, err := strconv.ParseFloat(v, 64)
+			if err != nil {
+				return fmt.Errorf("CUMULUS_TAU0 not a number or auto: %q", v)
+			}
+			if tau < 0 || tau > 1 {
+				return fmt.Errorf("CUMULUS_TAU0 out of [0,1]: %v", tau)
+			}
+			routeCfg = qaflow.RouteConfig{
+				UpgradeBase:      qaflow.Tau0FromDeepAccuracy(tau),
+				Program:          qaflow.ProgramCAUC,
+				ThresholdVersion: fmt.Sprintf("tau0=%.3f", tau),
+			}
+		}
+	}
+	// execSpec 是一次执行面的装配参数（臂注册用）。
+	type execSpec struct {
+		withEmbed bool
+		knobs     map[string]float64
+		deep      *qaflow.DeepOptions
+		escalate  bool
+		bare      bool
+	}
+	execFor := func(sp execSpec) *bm25Executor {
+		ex := &bm25Executor{idx: idx, knobs: sp.knobs, synthFn: synthFn, groundingFlag: grounding > 0,
+			deep: sp.deep, escalate: sp.escalate, bare: sp.bare, route: routeCfg}
+		if sp.withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
 		return ex
 	}
-	runOne := func(runID, arm string, withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions, escalate bool) (evalfcore.RunState, error) {
-		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, knobs, deep, escalate), j)
+	runOne := func(runID, arm string, sp execSpec) (evalfcore.RunState, error) {
+		runner := evalfcore.NewRunner(evalfcore.NewArchive(st), fp, execFor(sp), j)
 		state, err := runner.Start(ctx, runID, ds.Items)
 		state.Arm = arm
 		if err != nil {
@@ -250,74 +346,117 @@ func runEval(ctx gocontext.Context) error {
 		}
 		return state, nil
 	}
-	fmt.Printf("dataset %s items=%d\n", ds.ID[:12], len(ds.Items))
-	fmt.Printf("fingerprints items=%s corpus=%s config=%s\n", fp.ItemsSHA[:12], fp.CorpusSHA, fp.ConfigSHA[:12])
+	fmt.Printf("dataset %s items=%d\n", shortSHA(ds.ID), len(ds.Items))
+	fmt.Printf("fingerprints items=%s corpus=%s config=%s\n", shortSHA(fp.ItemsSHA), shortSHA(fp.CorpusSHA), shortSHA(fp.ConfigSHA))
+	effTau := routeCfg.UpgradeBase
+	if effTau <= 0 {
+		effTau = 0.5 // RouteStage 的同款默认（零值 = 手工基线）
+	}
+	fmt.Printf("route: program=%s tau0=%.3f\n", routeCfg.ProgramName(), effTau)
+	if tau0Auto {
+		fmt.Println("route: CUMULUS_TAU0=auto —— 本轮不改阈值，建议值在评测末尾给出")
+	}
 
 	if ab {
-		// 三臂对照（同一指纹；臂是实验内维度，不进指纹）：
-		//   bm25        k=3 单轮（基线）
-		//   bm25-k9     k=9 单轮（预算对齐：与深循环的窗口上限同预算）
-		//   deep        k=3 起步的深循环（覆盖度驱动多轮，预算同上）
-		// 三者窗口预算一致才可比——不然"窗口多所以命中高"是预算差异不是
-		// 部件差异。（belief 全局声望臂已退役；按会话复用由 selftest 覆盖。）
+		// 对照组臂注册（v0.2 §三.3/§三.7）：臂是可挂卸的注册，且**必须
+		// 含一个哑臂**（纯 BM25 top-3、零改写、零管理）——没有它，
+		// "全管线命中多少"无法归因：是管线在增值，还是在补自己造的洞。
+		//    bm25-bare  哑基线（哑臂，Dumb=true）
+		//    bm25       全管线快路 k=3
+		//    bm25-k9    k=9 单轮（预算对齐：与深循环窗口上限同预算）
+		//    deep       k=3 起步的深循环（覆盖度驱动多轮，预算同上）
+		//    cascade    快路 + 判 escalate 才升级（级联）
+		// 除哑臂外窗口预算一致才可比——不然"窗口多所以命中高"是预算差异
+		// 不是部件差异。（belief 全局声望臂已退役；按会话复用由 selftest 覆盖。）
 		deepOpts := &qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0}
 		k9 := knobsFromEnv(defaultKnobs())
 		k9["evidence.topk"] = 9
 		deepEnabled := os.Getenv("CUMULUS_DEEP") == "1"
-		a, err := runOne("run-ab-bm25", "bm25", false, knobsFromEnv(defaultKnobs()), nil, false)
+		armRun := func(runID string, sp execSpec) func(gocontext.Context) (evalfcore.RunState, error) {
+			return func(gocontext.Context) (evalfcore.RunState, error) { return runOne(runID, runID, sp) }
+		}
+		arms := []evalfcore.Arm{
+			{ID: "bm25-bare", Dumb: true, Note: "纯 BM25 top-3、零改写、零管理（哑基线）",
+				Run: armRun("run-ab-bm25-bare", execSpec{knobs: knobsFromEnv(defaultKnobs()), bare: true})},
+			{ID: "bm25", Note: "全管线快路 k=3",
+				Run: armRun("run-ab-bm25", execSpec{knobs: knobsFromEnv(defaultKnobs())})},
+		}
+		if deepEnabled {
+			arms = append(arms,
+				evalfcore.Arm{ID: "bm25-k9", Note: "k=9 单轮（预算对齐）",
+					Run: armRun("run-ab-k9", execSpec{knobs: k9})},
+				evalfcore.Arm{ID: "deep", Note: "覆盖度驱动深循环",
+					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: deepOpts})},
+				evalfcore.Arm{ID: "cascade", Note: "快路 + escalate 才升级",
+					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true})},
+			)
+		} else {
+			arms = append(arms, evalfcore.Arm{ID: "bm25+rerank", Note: "语义重排（需 embedder）",
+				Run: armRun("run-ab-rerank", execSpec{withEmbed: true, knobs: defaultKnobs()})})
+		}
+		// 丢掉 Run 的闭包再交给注册表：注册表只认 ID/Dumb/Note/Run，
+		// 便于测试直接构造（ValidateArms 的判据不依赖真实执行面）。
+		for _, a := range arms {
+			fmt.Printf("arm %-12s dumb=%-5v %s\n", a.ID, a.Dumb, a.Note)
+		}
+		states, err := evalfcore.RunArms(ctx, arms)
 		if err != nil {
 			return err
 		}
-		arms := []evalfcore.RunState{a}
-		labels := []string{"bm25   "}
-		if deepEnabled {
-			k9Run, err := runOne("run-ab-k9", "bm25-k9", false, k9, nil, false)
-			if err != nil {
-				return err
+		var base evalfcore.RunState
+		for i, s := range states {
+			printRun(arms[i].ID, s)
+			if arms[i].Dumb {
+				base = s
 			}
-			deepRun, err := runOne("run-ab-deep", "deep", false, knobsFromEnv(defaultKnobs()), deepOpts, false)
-			if err != nil {
-				return err
-			}
-			cascRun, err := runOne("run-ab-cascade", "cascade", false, knobsFromEnv(defaultKnobs()), nil, true)
-			if err != nil {
-				return err
-			}
-			arms = append(arms, k9Run, deepRun, cascRun)
-			labels = append(labels, "bm25-k9", "deep    ", "cascade")
-		} else {
-			b, err := runOne("run-ab-rerank", "bm25+rerank", true, defaultKnobs(), nil, false)
-			if err != nil {
-				return err
-			}
-			arms = append(arms, b)
-			labels = append(labels, "bm25+rerank")
 		}
-		for i, s := range arms {
-			printRun(labels[i], s)
-		}
-		for i := 1; i < len(arms); i++ {
-			pair := struct {
-				label string
-				x, y  evalfcore.RunState
-			}{labels[i] + "-bm25", arms[i], a}
-			diff, reasons := evalfcore.Compare(pair.x, pair.y)
-			if len(reasons) > 0 {
-				fmt.Printf("diff %s: incomparable %v\n", pair.label, reasons)
+		// 差值与哑臂比：这才是"管线有没有增值"的正确问法
+		for i, s := range states {
+			if arms[i].Dumb {
 				continue
 			}
-			lost, gained := flips(pair.y, pair.x)
-			fmt.Printf("diff %-12s evidence=%+.3f citations=%+.3f latency=%+.0fms flips(lost/gained)=%d/%d\n",
-				pair.label, diff["evidence_hit"], diff["citations_ok"], diff["avg_latency_ms"], lost, gained)
+			diff, reasons := evalfcore.Compare(s, base)
+			label := arms[i].ID + "-bm25-bare"
+			if len(reasons) > 0 {
+				fmt.Printf("diff %s: incomparable %v\n", label, reasons)
+				continue
+			}
+			lost, gained := flips(base, s)
+			fmt.Printf("diff %-20s evidence=%+.3f citations=%+.3f latency=%+.0fms flips(lost/gained)=%d/%d\n",
+				label, diff["evidence_hit"], diff["citations_ok"], diff["avg_latency_ms"], lost, gained)
+		}
+		// 校准读数（v0.2 §2.1）：跑最强的臂，报 τ₀ 候选与分桶可靠性。
+		// 单调性不成立时不许把置信度当风险代理——这里明说。
+		strongest := states[0]
+		for i, s := range states {
+			if arms[i].ID == "deep" || len(states) == 1 {
+				strongest = s
+			}
+		}
+		fmt.Println(evalfcore.CalibrationReport(strongest.Arm, strongest))
+		if tau0Auto {
+			tau, oracle := evalfcore.SuggestedTau0(strongest)
+			fmt.Printf("tau0 suggestion: CUMULUS_TAU0=%.3f (from %s, next run applies it)\n", tau, oracle)
 		}
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", knobsFromEnv(defaultKnobs()), nil, false)
+	state, err := runOne("run-selftest", "default", execSpec{withEmbed: os.Getenv("CUMULUS_EMBED") == "minilm", knobs: knobsFromEnv(defaultKnobs())})
 	if err != nil {
 		return err
 	}
 	printRun("default      ", state)
+	// 校准读数也可单臂看（CUMULUS_CALIB=1），但 τ₀ 的**正确取法是强臂**：
+	// CAUC 的 τ₀ = 强模型（这里对应 DEEP 臂）的校准准确率——单臂跑出来的
+	// 是当前这一臂的读数，只能当参考，不能当 τ₀ 直接套。
+	if tau0Auto || os.Getenv("CUMULUS_CALIB") == "1" {
+		fmt.Println(evalfcore.CalibrationReport(state.Arm, state))
+	}
+	if tau0Auto {
+		tau, oracle := evalfcore.SuggestedTau0(state)
+		fmt.Printf("tau0 suggestion: CUMULUS_TAU0=%.3f（来自本臂 %s/%s）——CAUC 的 τ₀ 应取**强臂**读数：跑 CUMULUS_AB=1 CUMULUS_DEEP=1 取 deep 臂那一行\n",
+			tau, state.Arm, oracle)
+	}
 	return nil
 }
 
@@ -415,4 +554,13 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// shortSHA 安全截断指纹（12 位）。指纹长度随来源不同（内容寻址 16 位、
+// 演示用的短串），硬切 [:12] 会在短串上 panic——真跑踩过。
+func shortSHA(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
 }

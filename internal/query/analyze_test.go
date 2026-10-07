@@ -1,6 +1,10 @@
 package query
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/willove/cumulus/internal/retrieval"
+)
 
 type fakeCorpus struct {
 	df map[string]int
@@ -133,5 +137,33 @@ func TestThinOnAnyOOV(t *testing.T) {
 	rich := Analyze("红灯表示什么", fakeCorpus{df: map[string]int{"红灯": 5, "表示": 60, "灯表": 30, "示什": 30, "什么": 900}}, 1000)
 	if rich.Thin(2, 2.0) {
 		t.Fatalf("全库内词不该判稀薄，oov=%v", rich.OOV)
+	}
+}
+
+// NoSharedContent：只有"内容词一个都不在语料里"才算零共享。
+// 松一档（OOV 占比）就会误标普通口语问句——那是词表桥的触发器，
+// 不是失败标签（真跑：演示题"成本结构怎么样"被误标底物错配）。
+func TestNoSharedContentIsConservative(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "law-1", Body: "连接池最大连接数默认为 100，超过需调整配置并观察等待队列长度。"},
+		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
+	})
+	cases := []struct {
+		q    string
+		want bool
+	}{
+		{"成本结构怎么样", false},     // 成本/结构在库里，只有"么样"是 OOV → 不是零共享
+		{"连接池最大连接数是多少", false}, // 共享一堆内容词
+		{"iphone6照片流在哪", true}, // 这个小语料里一个内容词都不共享（照片/片流都不在）
+		{"πλκζξνο", true},      // 内容词全在库外 → 零共享
+		{"怎么", false},          // 全是胶水：判不了，不算错配
+	}
+	for _, c := range cases {
+		if got := NoSharedContent(c.q, idx); got != c.want {
+			t.Errorf("NoSharedContent(%q) = %v, want %v", c.q, got, c.want)
+		}
+	}
+	if NoSharedContent("任意问题", nil) {
+		t.Error("nil corpus 表示不知道语料，不该判零共享")
 	}
 }

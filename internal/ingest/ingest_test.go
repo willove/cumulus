@@ -130,3 +130,7 @@ func writeFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func (m *memPort) Query(_ gocontext.Context, _ string, _ map[string]any, _, _ int, _ any) (int, error) {
+	return 0, nil
+}

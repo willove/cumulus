@@ -355,3 +355,7 @@ func TestSignalsAggregate(t *testing.T) {
 		t.Fatalf("聚合里该有 cite 族与 target：%s", body)
 	}
 }
+
+func (f *fakeStore) Query(_ gocontext.Context, _ string, _ map[string]any, _, _ int, _ any) (int, error) {
+	return 0, nil
+}

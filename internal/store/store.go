@@ -25,11 +25,19 @@ type Port interface {
 	GetStruct(ctx context.Context, coll, id string, out any) error
 	// Delete 删除一个文档。不存在也返回 nil（幂等删除）。
 	Delete(ctx context.Context, coll, id string) error
-	// PutValue 写一段二进制值（KV）。evalfcore 的原子落盘用它：
-	// 运行状态与逐题结果同一个 key 一次写，被 kill 也不会半份。
+	// PutValue 写一段二进制值（KV）。**值要小**：评测档案的清单、学习
+	// 周期的记录走这里；逐题结果这种随题数增长的内容走文档集合
+	// （见 Query）。cumulite 的 KV 由 Badger 兜底，而 Badger 在
+	// in-memory 模式下单值上限是 maxValueThreshold = 1 MiB（没有 value
+	// log 可外溢）——整份档案塞一个值必然在题数上线性撞墙，实测 449 题
+	// × 9 窗 = 1.05 MB 就炸。内容分开存是引擎的模态划分，不是绕限。
 	PutValue(ctx context.Context, key string, value []byte) error
 	// GetValue 读回二进制值。不存在返回 error（errors.Is(err, cumulite.ErrNotFound)）。
 	GetValue(ctx context.Context, key string) ([]byte, error)
+	// Query 按等值过滤（字段间 AND）分页读结构体文档，稳定按文档键序
+	// ——顺序稳定是分页成立的前提（无稳定序的分页会重复与漏读）。
+	// 返回本页条数；调用方用它判断"还有没有下一页"。
+	Query(ctx context.Context, coll string, filter map[string]any, skip, limit int, out any) (int, error)
 	// Health 探活。
 	Health(ctx context.Context) error
 	// ListIDs 枚举集合内全部文档 id（分页）。语料面需要它：索引是语料
@@ -154,4 +162,21 @@ func (a *adapter) ListIDs(ctx context.Context, coll string, limit int) ([]string
 		}
 	}
 	return ids, nil
+}
+
+// Query 是等值过滤 + 分页的文档读。做的是存储形态（wire map）到进程内
+// 形态（调用方结构体）的转换，与 GetStruct 同一条边界纪律。
+func (a *adapter) Query(ctx context.Context, coll string, filter map[string]any, skip, limit int, out any) (int, error) {
+	res, err := a.engine.Query(ctx, coll, contract.Query{Filter: filter, Skip: skip, Limit: limit})
+	if err != nil {
+		return 0, fmt.Errorf("store: query %s: %w", coll, err)
+	}
+	buf, err := json.Marshal(res.Documents)
+	if err != nil {
+		return 0, fmt.Errorf("store: marshal query page %s: %w", coll, err)
+	}
+	if err := json.Unmarshal(buf, out); err != nil {
+		return 0, fmt.Errorf("store: decode query page %s: %w", coll, err)
+	}
+	return len(res.Documents), nil
 }

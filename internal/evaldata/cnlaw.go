@@ -104,8 +104,8 @@ func LoadCNLaw(path string, sampleN int) (*CNLawSet, error) {
 	return &CNLawSet{
 		Docs:      docs,
 		Items:     items,
-		CorpusSHA: hashDocs(docs),
-		ItemsSHA:  hashItems(items),
+		CorpusSHA: HashDocs(docs),
+		ItemsSHA:  HashItems(items),
 	}, nil
 }
 
@@ -128,7 +128,10 @@ func hash12(s string) string {
 	return hex.EncodeToString(sum[:])[:12]
 }
 
-func hashDocs(docs []retrieval.Document) string {
+// HashDocs 是语料的内容指纹（按文件首现顺序，确定性）。导出：内联语料
+// 与 learn 的演示集也要真指纹——占位串（"inline"）在打印处被 [:12] 一切
+// 就 panic（真跑踩过：不带 CUMULUS_REALDATA 的 `cumulus eval` 直接崩）。
+func HashDocs(docs []retrieval.Document) string {
 	h := sha256.New()
 	for _, d := range docs { // docs 已按文件首现顺序，确定性
 		fmt.Fprintf(h, "%s\x00%s\x00", d.ID, d.Body)
@@ -136,7 +139,8 @@ func hashDocs(docs []retrieval.Document) string {
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-func hashItems(items []evalfcore.Item) string {
+// HashItems 是题集的内容指纹（同上，导出给内联路径用）。
+func HashItems(items []evalfcore.Item) string {
 	h := sha256.New()
 	for _, it := range items {
 		fmt.Fprintf(h, "%s\x00%s\x00", it.ID, it.Question)

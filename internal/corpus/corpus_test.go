@@ -106,3 +106,10 @@ func TestImportFileJSONL(t *testing.T) {
 
 func jsonMarshal(v any) ([]byte, error)   { return json.Marshal(v) }
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// Query：语料面不用它（评测档案才用），测试替身给一个空实现即可——
+// 但**必须有**：端口加方法时替身要跟着长，漏了就是编译期红（这正是
+// 接口纪律的价值：加方法要负责）。
+func (m *memStore) Query(_ gocontext.Context, _ string, _ map[string]any, _, _ int, _ any) (int, error) {
+	return 0, nil
+}
