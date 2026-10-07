@@ -571,7 +571,7 @@ contract-gen / doc-fresh / file-size。
 
 **doc-fresh**（cmd/doc-fresh）：文档里反引号包裹的代码路径必须存在；
 docs/adr 编号从 001 连续。首跑就抓到一个真过期引用——architecture.md
-还在让人改 `internal/context/keys.go`（实际文件是 context.go），按图索骥
+还在让人改 internal/context/keys.go（实际文件是 context.go），按图索骥
 扑空的那种。修复后绿。
 
 **file-size**（scripts/check-file-size.sh）：单文件上限 600 行（当前最大
