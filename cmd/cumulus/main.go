@@ -79,11 +79,14 @@ func runSelftest(args []string) error {
 		{ID: "fin-1", Body: "财务报表：三季度收入增长，成本结构继续优化。"},
 		// 深循环演示用：三个词面沾边但不覆盖"部署端口"的干扰文档——
 		// 单轮 top-3 被它们占满，覆盖度不达标，循环必须展开第二轮
-		{ID: "noise-1", Body: "连接池端口巡检：连接池端口每季度巡检，端口状态记录在案。"},
-		{ID: "noise-2", Body: "连接池端口应急：连接池端口告警先扩容，端口变更需审批。"},
-		{ID: "noise-3", Body: "连接池端口基线：连接池端口默认策略，端口基线每月复核。"},
+		{ID: "noise-1", Body: "连接池巡检记录：连接池每季度检查一次，记录在案。"},
+		{ID: "noise-2", Body: "连接池应急演练：连接池告警时先扩容再排查。"},
+		{ID: "noise-3", Body: "连接池操作基线：连接池日常操作按基线执行。"},
 	})
 	selftestIdx = idx
+
+	// 升级贵路：充足性判了 escalate 才跑（BioHarness 级联）
+	escalateBackend := qaflow.BM25DeepEvidence(idx, 160, qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
 	r := qaflow.Runner("连接池最大连接数是多少", qaflow.BM25Evidence(idx, 3, 60), synthFn, qaflow.Options{
 		CorpusVersion:   "selftest",
 		ConfigVersion:   "selftest",
@@ -91,6 +94,7 @@ func runSelftest(args []string) error {
 		BeliefVersion:   "none",
 		Reuse:           reuse,
 		Session:         "selftest",
+		Escalate:        escalateBackend,
 	})
 	if err := r.Run(c); err != nil {
 		return err
@@ -106,6 +110,7 @@ func runSelftest(args []string) error {
 	}), synthFn, qaflow.Options{
 		CorpusVersion: "selftest", ConfigVersion: "selftest", StrategyVersion: "v0.1", BeliefVersion: "none",
 		Reuse: reuse, Session: "selftest",
+		Escalate: escalateBackend,
 		// 紧预算：深循环攒了 5 个窗口，预算只留 3 个——驱逐真实发生，
 		// 账目打出来（合成前最后一道上下文管理）
 		CtxBudget: ctxmgmt.Budget{MaxWindows: 3, PerSourceMax: 2, DedupCosine: 0.92},
@@ -132,6 +137,26 @@ func runSelftest(args []string) error {
 		for _, d := range ev.Dropped {
 			fmt.Printf("evict: dropped %s#%s (%s)\n", d.Window.SourceID, d.Window.Span, d.Reason)
 		}
+	}
+
+	// —— 级联演示：快路够就用快的；不够才升级（BioHarness）——
+	cEsc := context.New(context.Realm(*realm))
+	if err := qaflow.Runner("连接池的连接数和部署端口分别是多少", qaflow.BM25Evidence(idx, 1, 160), synthFn, qaflow.Options{
+		CorpusVersion: "selftest", ConfigVersion: "selftest", StrategyVersion: "v0.1", BeliefVersion: "none",
+		Reuse: reuse, Session: "selftest",
+		Escalate: escalateBackend,
+	}).Run(cEsc); err != nil {
+		return err
+	}
+	fmt.Println("--- cascade (fast + escalate)")
+	if rd, ok := context.Get(cEsc, qaflow.KeyRoute); ok {
+		fmt.Printf("route: %s — %s\n", rd.Action, rd.Reason)
+	}
+	if es, ok := context.Get(cEsc, qaflow.KeyEscalation); ok {
+		fmt.Printf("escalate: triggered=%v executed=%v %s→%s\n", es.Triggered, es.Executed, es.Before, es.After)
+	}
+	if tel, ok := context.Get(cEsc, qaflow.KeyDeep); ok {
+		fmt.Printf("escalation deep: rounds=%d coverage=%v stop=%s\n", tel.Rounds, tel.Coverage, tel.StopReason)
 	}
 
 	// 同一会话再问一次：复用命中，本轮不检索（"越问越快"的执行处）
@@ -172,6 +197,9 @@ func printAsk(label string, c *context.Context) {
 	}
 	if rd, ok := context.Get(c, qaflow.KeyRoute); ok {
 		fmt.Printf("route: %s — %s\n", rd.Action, rd.Reason)
+	}
+	if es, ok := context.Get(c, qaflow.KeyEscalation); ok {
+		fmt.Printf("escalate: triggered=%v executed=%v %s→%s %s\n", es.Triggered, es.Executed, es.Before, es.After, es.Reason)
 	}
 	if a, ok := context.Get(c, qaflow.KeyAnswer); ok {
 		state := "answered"

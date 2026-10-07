@@ -32,7 +32,13 @@ type bm25Executor struct {
 	embedder      embed.Embedder      // 可空：向量面（绑了才重排/才亮语义尺）
 	synthFn       qaflow.SynthFunc    // 合成面：offline 或 llm
 	groundingFlag bool                // semantic grounding scale (true=on)
-	deep          *qaflow.DeepOptions // 非空 = 走深循环（多轮取证）
+	deep          *qaflow.DeepOptions // 非空 = 首程就走深循环（多轮取证）
+	escalate      bool                // true = 快路首程 + 判 escalate 才升级（级联）
+}
+
+// escalateBackend 是级联的贵路（深循环）。
+func (e *bm25Executor) escalateBackend() func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error) {
+	return qaflow.BM25DeepEvidence(e.idx, e.width(), qaflow.DeepOptions{MaxRounds: 3, CoverageTarget: 1.0})
 }
 
 func (e *bm25Executor) topk() int {
@@ -89,12 +95,17 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 	if e.deep != nil {
 		retrieve = qaflow.BM25DeepEvidence(e.idx, e.width(), *e.deep)
 	}
+	var escalateFn func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error)
+	if e.escalate {
+		escalateFn = e.escalateBackend()
+	}
 	r := qaflow.Runner(question, retrieve, synthFn, qaflow.Options{
 		CorpusVersion:   "frozen",
 		ConfigVersion:   "eval",
 		StrategyVersion: "v0.1",
 		BeliefVersion:   "none",
 		GroundingFloor:  e.grounding(),
+		Escalate:        escalateFn,
 	})
 	if err := r.Run(c); err != nil {
 		return evalfcore.ItemOutcome{}, fmt.Errorf("qaflow: %w", err)
@@ -222,15 +233,15 @@ func runEval(ctx gocontext.Context) error {
 	}
 	ab := os.Getenv("CUMULUS_AB") == "1"
 	// execFor 组装执行面：embedder/信念都是可选件，由参数决定装不装
-	execFor := func(withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions) *bm25Executor {
-		ex := &bm25Executor{idx: idx, knobs: knobs, synthFn: synthFn, groundingFlag: grounding > 0, deep: deep}
+	execFor := func(withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions, escalate bool) *bm25Executor {
+		ex := &bm25Executor{idx: idx, knobs: knobs, synthFn: synthFn, groundingFlag: grounding > 0, deep: deep, escalate: escalate}
 		if withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
 		return ex
 	}
-	runOne := func(runID, arm string, withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions) (evalfcore.RunState, error) {
-		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, knobs, deep), j)
+	runOne := func(runID, arm string, withEmbed bool, knobs map[string]float64, deep *qaflow.DeepOptions, escalate bool) (evalfcore.RunState, error) {
+		runner := evalfcore.NewRunner(evalfcore.NewKVStore(st), fp, execFor(withEmbed, knobs, deep, escalate), j)
 		state, err := runner.Start(ctx, runID, ds.Items)
 		state.Arm = arm
 		if err != nil {
@@ -252,25 +263,29 @@ func runEval(ctx gocontext.Context) error {
 		k9 := knobsFromEnv(defaultKnobs())
 		k9["evidence.topk"] = 9
 		deepEnabled := os.Getenv("CUMULUS_DEEP") == "1"
-		a, err := runOne("run-ab-bm25", "bm25", false, knobsFromEnv(defaultKnobs()), nil)
+		a, err := runOne("run-ab-bm25", "bm25", false, knobsFromEnv(defaultKnobs()), nil, false)
 		if err != nil {
 			return err
 		}
 		arms := []evalfcore.RunState{a}
 		labels := []string{"bm25   "}
 		if deepEnabled {
-			k9Run, err := runOne("run-ab-k9", "bm25-k9", false, k9, nil)
+			k9Run, err := runOne("run-ab-k9", "bm25-k9", false, k9, nil, false)
 			if err != nil {
 				return err
 			}
-			deepRun, err := runOne("run-ab-deep", "deep", true, knobsFromEnv(defaultKnobs()), deepOpts)
+			deepRun, err := runOne("run-ab-deep", "deep", false, knobsFromEnv(defaultKnobs()), deepOpts, false)
 			if err != nil {
 				return err
 			}
-			arms = append(arms, k9Run, deepRun)
-			labels = append(labels, "bm25-k9", "deep    ")
+			cascRun, err := runOne("run-ab-cascade", "cascade", false, knobsFromEnv(defaultKnobs()), nil, true)
+			if err != nil {
+				return err
+			}
+			arms = append(arms, k9Run, deepRun, cascRun)
+			labels = append(labels, "bm25-k9", "deep    ", "cascade")
 		} else {
-			b, err := runOne("run-ab-rerank", "bm25+rerank", true, defaultKnobs(), nil)
+			b, err := runOne("run-ab-rerank", "bm25+rerank", true, defaultKnobs(), nil, false)
 			if err != nil {
 				return err
 			}
@@ -297,7 +312,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", knobsFromEnv(defaultKnobs()), nil)
+	state, err := runOne("run-selftest", "default", os.Getenv("CUMULUS_EMBED") == "minilm", knobsFromEnv(defaultKnobs()), nil, false)
 	if err != nil {
 		return err
 	}

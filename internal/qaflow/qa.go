@@ -464,6 +464,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		EvidenceStage{Retrieve: retrieve},
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{},
+		EscalateStage{Retrieve: opts.Escalate},
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
 		AccountStage{},
 	}
@@ -515,6 +516,10 @@ type Options struct {
 	Hypothetical string
 	// RewriteIdx 漂移闸用的索引（判语料内/外词）；nil = 闸不启动。
 	RewriteIdx *retrieval.Index
+	// Escalate 是升级（FAST→DEEP）的贵路取数函数：路由判 escalate 时
+	// 跑它再判一次（BioHarness 级联）。nil = 升级无执行处（死标签，
+	// 遥测里可见）。
+	Escalate func(*context.Context, Rewrite) ([]EvidenceWindow, error)
 	// CtxBudget 合成前的上下文预算（按源配额/语义近重合并/窗口预算）。
 	// 零值 = 默认预算（MaxWindows 8 / PerSource 2 / Dedup 0.92——
 	// 0.92 是 Volt 论文的合并阈值，不是我们拍的）。
