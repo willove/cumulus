@@ -35,7 +35,9 @@
         },
         "required": [
           "body",
-          "id"
+          "id",
+          "span_end",
+          "span_start"
         ],
         "type": "object"
       },

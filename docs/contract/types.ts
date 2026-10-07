@@ -105,8 +105,8 @@ export interface IngestResponse {
 export interface DocResponse {
   id: string;
   body: string;
-  span_start?: number;
-  span_end?: number;
+  span_start: number;
+  span_end: number;
 }
 
 

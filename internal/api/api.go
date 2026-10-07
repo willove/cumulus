@@ -335,10 +335,12 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 // DocResponse 是一篇文档的全文（点击引用看原文）。Span 把引用的 rune
 // 坐标带回来，前端据此高亮——“字符级可核”在界面上兑现。
 type DocResponse struct {
-	ID        string `json:"id"`
-	Body      string `json:"body"`
-	SpanStart int    `json:"span_start,omitempty"`
-	SpanEnd   int    `json:"span_end,omitempty"`
+	ID   string `json:"id"`
+	Body string `json:"body"`
+	// 位置数据的 0 是有意义的（区间常从 0 开始）——不许 omitempty，
+	// 否则前端 span_end > span_start 的判断直接废掉（真跑踩过）
+	SpanStart int `json:"span_start"`
+	SpanEnd   int `json:"span_end"`
 }
 
 func (s *Server) handleDoc(w http.ResponseWriter, r *http.Request) {
