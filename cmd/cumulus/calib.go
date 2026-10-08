@@ -11,6 +11,35 @@ import (
 	"github.com/willove/cumulus/internal/evalfcore"
 )
 
+// shouldRetrieveStats 打"该不该检索"维度的读数。**这一维是能力缺口的直接
+// 读数**：标注为"不该检索"的题里，系统仍然走了检索的比例越高，说明缺
+// "该不该检索"这一层越明显（外部语料量不出这一维——那些题几乎都该检索）。
+func shouldRetrieveStats(state evalfcore.RunState) string {
+	var annotated, shouldNoRet, retrieved, shouldRetMiss int
+	for _, r := range state.Results {
+		if r.ShouldRetrieve == nil {
+			continue
+		}
+		annotated++
+		if *r.ShouldRetrieve {
+			if !r.RetrievedAnyway {
+				shouldRetMiss++
+			}
+			continue
+		}
+		shouldNoRet++
+		if r.RetrievedAnyway {
+			retrieved++
+		}
+	}
+	if annotated == 0 {
+		return "should-retrieve(unannotated)"
+	}
+	return "should-retrieve(标注=" + itoa(annotated) +
+		" 不该检索却检索了=" + itoa(retrieved) + "/" + itoa(shouldNoRet) +
+		" 该检索没检索=" + itoa(shouldRetMiss) + ")"
+}
+
 // gateStats 汇总闸门状态并打印。**闸门跑没跑、拦没拦必须出现在读数里**：
 // 没生效与生效但没拦，是两回事，混在一起就等于没有可见性（真跑踩过：
 // 开关写错时读数与"闸门没装"完全一样）。

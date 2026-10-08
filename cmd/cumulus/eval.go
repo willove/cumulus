@@ -510,7 +510,7 @@ func printRun(arm string, state evalfcore.RunState) {
 		fmt.Printf("  [%s] %s rule=%.0f evidence=%v cites=%d/%d rerank=%v%s failure=%s\n",
 			arm, r.ItemID, r.RuleScore, r.EvidenceHit, r.CitationsResolved, r.CitationsTotal, r.RerankApplied, rr, f)
 	}
-	fmt.Printf("[%s] %s %s\n", arm, evalfcore.Summarize(state), gateStats(state))
+	fmt.Printf("[%s] %s %s %s\n", arm, evalfcore.Summarize(state), gateStats(state), shouldRetrieveStats(state))
 }
 
 func evalCorpus() []retrieval.Document {

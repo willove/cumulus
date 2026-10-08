@@ -43,6 +43,15 @@ type Summary struct {
 	TotalCompletionTokens int
 	TotalJudgeTokens      int // 判官花费：判官不是免费劳动力
 	CostUnknownItems      int // 上游不报 usage 的题数（计费诚实）
+	// "该不该检索"维度（只在题集标注了 ShouldRetrieve 的题上算）：
+	//   SRAnnotated     标注了"该/不该检索"的题数
+	//   SRShouldNoRet   其中"不该检索"的题数
+	//   SRRetrieved     其中系统仍然走了检索的题数 ← **该层缺口的直接读数**
+	//   SRShouldRetMiss "该检索"却没检索到的题数（闸门/路由拦过头了）
+	SRAnnotated     int
+	SRShouldNoRet   int
+	SRRetrieved     int
+	SRShouldRetMiss int
 }
 
 // Summarize 聚合一次运行。
@@ -60,6 +69,19 @@ func Summarize(s RunState) Summary {
 		}
 		if isEvalError(r.Failure) {
 			out.ItemErrors++
+		}
+		if r.ShouldRetrieve != nil {
+			out.SRAnnotated++
+			if *r.ShouldRetrieve {
+				if !r.RetrievedAnyway {
+					out.SRShouldRetMiss++
+				}
+			} else {
+				out.SRShouldNoRet++
+				if r.RetrievedAnyway {
+					out.SRRetrieved++
+				}
+			}
 		}
 		if r.JudgeOK == nil && r.JudgeErr != "" {
 			out.JudgeErrs++

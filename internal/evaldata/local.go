@@ -46,6 +46,9 @@ type LocalItemLine struct {
 	Question string   `json:"question"`
 	Answer   string   `json:"answer"`
 	GoldIDs  []string `json:"gold_ids"`
+	// ShouldRetrieve 是"该不该检索"维度的标注（true/false/省略=不参与）。
+	// 外部语料这一维全是 nil（那些题几乎都该检索），自有语料才有读数。
+	ShouldRetrieve *bool `json:"should_retrieve,omitempty"`
 }
 
 // LoadJSONL 读语料与题集两条 JSONL。
@@ -120,10 +123,11 @@ func LoadJSONL(corpusPath, itemsPath string) (*LocalSet, []string, error) {
 			id = hash12(il.Question)
 		}
 		items = append(items, evalfcore.Item{
-			ID:       id,
-			Question: il.Question,
-			Answer:   il.Answer,
-			GoldIDs:  il.GoldIDs,
+			ID:             id,
+			Question:       il.Question,
+			Answer:         il.Answer,
+			GoldIDs:        il.GoldIDs,
+			ShouldRetrieve: il.ShouldRetrieve,
 		})
 	}
 	if err := sc.Err(); err != nil {

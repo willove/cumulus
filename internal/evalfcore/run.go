@@ -75,6 +75,8 @@ type ItemResult struct {
 	DecisionReason   string  `json:"decision_reason,omitempty"`  // not-bound / error:… / ok
 	DecisionKind     string  `json:"decision_kind,omitempty"`    // gate/answerable | gate/relation
 	GateBlocked      bool    `json:"gate_blocked,omitempty"`     // 闸门是否真的拦下了这一题
+	ShouldRetrieve   *bool   `json:"should_retrieve,omitempty"`  // 题集标注：该不该检索（nil=未标注）
+	RetrievedAnyway  bool    `json:"retrieved_anyway,omitempty"` // 系统是否走了检索（答了非拒答即算）
 	DecisionNoul     float64 `json:"decision_noul,omitempty"`    // 闸门分
 	RouteTier        string  `json:"route_tier,omitempty"`       // 置信信号档位：logprob / retrieval
 	LatencyMS        int64   `json:"latency_ms"`
@@ -289,6 +291,8 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		DecisionKind:      out.DecisionKind,
 		DecisionNoul:      out.DecisionNoul,
 		GateBlocked:       out.GateBlocked,
+		ShouldRetrieve:    item.ShouldRetrieve,
+		RetrievedAnyway:   !out.Refused && out.Windows > 0,
 		LatencyMS:         latency,
 		PromptTokens:      out.PromptTokens,
 		CompletionTokens:  out.CompletionTokens,

@@ -1,0 +1,4 @@
+{"id":"k1","question":"专利法是为了什么制定的？","answer":"保护专利权人的合法权益，鼓励发明创造","gold_files":["专利法-第一条.md"],"should_retrieve":true,"tag":"法律"}
+{"id":"k2","question":"生产服务默认端口是多少？","answer":"8484","gold_files":["部署手册.md"],"should_retrieve":true,"tag":"技术"}
+{"id":"k3","question":"形容词怎么变副词？","answer":"一般加 -ly","gold_files":[],"should_retrieve":false,"tag":"常识"}
+{"id":"k4","question":"我的病要紧吗？","answer":"","gold_files":[],"should_retrieve":false,"tag":"该拒答"}

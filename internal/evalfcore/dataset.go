@@ -27,6 +27,17 @@ type Item struct {
 	Question string   `json:"question"`
 	Answer   string   `json:"answer"`
 	GoldIDs  []string `json:"gold_ids,omitempty"`
+	// ShouldRetrieve 是**该不该检索**这一维的标注：true = 答案应该在语料里
+	// （查得到），false = 这题**不该走检索**（通用常识、不该问、或该拒答）。
+	// nil = 未标注（不参与该维度统计）。
+	//
+	// 为什么单独一个维度：外部语料（CMRC/DuReader/DomainRAG）里几乎每一题
+	// 都"应该检索"，所以这一维**在那些数据上量不出来**；而真实个人知识库里
+	// 有相当比例的问句根本不需要检索——系统却会先检索再回答，于是自信地答错
+	// （真跑见过：问"形容词怎么变副词"，9 条窗口全是"潜伏期多久"这类同主题
+	// 噪声，答案照样编得很像样）。这一维是**能力缺口**（缺"该不该检索"的判断层），
+	// 不是准确率问题。
+	ShouldRetrieve *bool `json:"should_retrieve,omitempty"`
 }
 
 // ValidateItems 返回**致命**诊断：重复题号、空字段。坏题集不许进运行。
