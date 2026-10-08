@@ -87,6 +87,7 @@ func (p *Points) Judge(question, answer, gold string) (evalfcore.Verdict, error)
 	ratio := float64(covered) / float64(len(points))
 	v := evalfcore.Verdict{
 		OK:               ratio >= p.threshold(),
+		Coverage:         ratio,
 		PromptTokens:     resp.Usage.PromptTokens,
 		CompletionTokens: resp.Usage.CompletionTokens,
 		CostKnown:        resp.Usage.CostKnown,

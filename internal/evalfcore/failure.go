@@ -7,7 +7,13 @@ import (
 // Verdict 是判官裁决。Tokens 是判官自己的花费——判官不是免费劳动力，
 // 它的 token 要进账单（计费诚实：花过钱的调用都记账）。
 type Verdict struct {
-	OK               bool
+	OK bool
+	// Coverage 是**答案级验证信号**：分点判官量到的"要点命中比例"
+	// （0..1）。它不是判词，是可校准的数——检索侧信号（覆盖/边际/死路）
+	// 答的是"窗够不够"，这一项答的是"**这句答案有没有证据**"。能不能
+	// 撑起拒答阈值，正是研究线 post-answer verification 要验的事。
+	// 等义判官不产出它（留 0 = 无此信号，不假装有）。
+	Coverage         float64
 	Raw              string // 判词原文（校准要看得见模型说了什么，只留解析结果等于盲调）
 	PromptTokens     int
 	CompletionTokens int

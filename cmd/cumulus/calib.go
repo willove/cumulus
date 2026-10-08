@@ -39,6 +39,10 @@ func printCalibContest(state evalfcore.RunState, alpha float64) {
 		{"margin", func(r evalfcore.ItemResult) float64 { return r.Margin }},
 		{"support", func(r evalfcore.ItemResult) float64 { return r.Support }},
 		{"margin*support", func(r evalfcore.ItemResult) float64 { return r.Margin * r.Support }},
+		// 答案级验证信号：分点判官的要点命中比例。它答的是"这句答案有没有
+		// 证据"，前五个答的都是"窗够不够"——研究线 post-answer verification
+		// 要验的就是这个信号能不能预测正确性（AUC 列）。
+		{"verify(答案级)", func(r evalfcore.ItemResult) float64 { return r.JudgeCoverage }},
 	}
 	alphas := []float64{alpha, 0.20, 0.30}
 	if v := os.Getenv("CUMULUS_ALPHAS"); v != "" {
@@ -53,7 +57,12 @@ func printCalibContest(state evalfcore.RunState, alpha float64) {
 		}
 	}
 	fmt.Printf("signal contest[%s]（同一批标签，换信号不换事实；格 = 敢答题数/该集合风险）\n", state.Arm)
-	head := fmt.Sprintf("  %-16s %6s %9s", "signal", "n", "monotone")
+	// **两列 AUC，缺一不可**：AUC(judge) 对"答案级验证信号"是**循环的**
+	// ——verify 的命中比例就是判官判 YES/NO 用的那个数，拿它预测判官决定必
+	// 拿满分（真跑：AUC=1.000，看着像完美信号，其实是同义反复）。能回答
+	// "这个信号能不能预测正确"的是**独立标签**那列：evidence（金标 doc 有
+	// 没有被引用）。把循环口径和独立口径并排打出来，陷阱就藏不住。
+	head := fmt.Sprintf("  %-16s %6s %10s %10s %7s %9s", "signal", "n", "AUC(judge)", "AUC(证据)", "lift@20%", "monotone")
 	for _, a := range alphas {
 		head += fmt.Sprintf(" %14s", fmt.Sprintf("α=%.2f", a))
 	}
@@ -70,7 +79,16 @@ func printCalibContest(state evalfcore.RunState, alpha float64) {
 			samples = append(samples, s)
 		}
 		base := calib.Build(samples, skipped, alphas[0], 4)
-		row := fmt.Sprintf("  %-16s %6d %9v", c.name, base.Samples, base.BucketMono)
+		// 独立标签：证据命中（确定性，与判官口径无关）
+		var evSamples []calib.Sample
+		for _, r := range state.Results {
+			if sm, ok := calib.SampleOfOracle(r, c.value(r), calib.OracleEvidenceOpt); ok {
+				evSamples = append(evSamples, sm)
+			}
+		}
+		row := fmt.Sprintf("  %-16s %6d %10.3f %10.3f %7.2f %9v",
+			c.name, base.Samples, calib.AUC(samples), calib.AUC(evSamples),
+			calib.LiftAt(samples, 0.2), base.BucketMono)
 		for _, a := range alphas {
 			rep := base
 			if a != alphas[0] {
