@@ -59,11 +59,11 @@ func TestContentIDStable(t *testing.T) {
 func TestTextIdempotent(t *testing.T) {
 	ctx := gocontext.Background()
 	p := newMemPort()
-	id1, err := Text(ctx, p, "连接池默认为 100。", "paste")
+	id1, err := Text(ctx, p, "", "连接池默认为 100。", "paste")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, err := Text(ctx, p, "连接池默认为 100。", "paste")
+	id2, err := Text(ctx, p, "", "连接池默认为 100。", "paste")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestTextIdempotent(t *testing.T) {
 }
 
 func TestTextRejectsEmpty(t *testing.T) {
-	if _, err := Text(gocontext.Background(), newMemPort(), "   ", "x"); err == nil {
+	if _, err := Text(gocontext.Background(), newMemPort(), "", "   ", "x"); err == nil {
 		t.Fatal("empty body must be rejected")
 	}
 }
@@ -106,17 +106,17 @@ func TestWatchDirImportsFiles(t *testing.T) {
 	writeFile(t, dir, ".hidden.md", "隐藏文件不该收")
 
 	seen := map[string]string{}
-	n := scanOnce(ctx, p, dir, seen)
+	n := scanOnce(ctx, p, "", dir, seen)
 	if n != 2 {
 		t.Fatalf("want 2 imported (md+txt), got %d", n)
 	}
 	// 第二轮：没变化 → 0
-	if again := scanOnce(ctx, p, dir, seen); again != 0 {
+	if again := scanOnce(ctx, p, "", dir, seen); again != 0 {
 		t.Fatalf("unchanged files must not re-import, got %d", again)
 	}
 	// 文件变了 → 再收
 	writeFile(t, dir, "a.md", "# 甲改\n连接池默认为 200。")
-	if changed := scanOnce(ctx, p, dir, seen); changed != 1 {
+	if changed := scanOnce(ctx, p, "", dir, seen); changed != 1 {
 		t.Fatalf("changed file must re-import, got %d", changed)
 	}
 	if len(p.docs["documents"]) != 3 {

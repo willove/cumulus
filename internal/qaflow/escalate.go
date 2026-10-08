@@ -141,6 +141,10 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 	if s.Expand == nil || s.Weighted == nil || !thin {
 		return s.Retrieve(c, rw)
 	}
+	// 注意下面那条"加权 0 命中 → 退回朴素贵路"的兜底：桥扩偏时加权重取可能
+	// 一条都取不到，而**0 命中不等于语料里没有证据**——把它当成"不存在"就会
+	// 让本来答得上来的题被拒答（真跑踩过：单文档语料 margin=0 必升级，桥一扩偏
+	// 就 0 窗，于是 facts 有支撑、分数 12.8 仍然拒答）。
 	expanded, err := s.Expand.Expand(gocontext.Background(), rw.Original)
 	if err != nil || len(expanded) == 0 {
 		return s.Retrieve(c, rw) // 桥失败：退化贵路
@@ -161,7 +165,17 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 			weights[bg] = 2.0
 		}
 	}
-	return s.Weighted(weights)
+	ws, werr := s.Weighted(weights)
+	if werr != nil {
+		return s.Retrieve(c, rw) // 加权路出错：退化朴素贵路（不是"没证据"）
+	}
+	if len(ws) == 0 {
+		// **0 命中不等于不存在**。桥可能把问句扩到与语料毫无交集的方向
+		// （真跑教训："养狗叫得太吵"扩出噪声；这里的单文档问句同样被扩偏），
+		// 此时再给一次朴素机会：桥是**增强**，它失手不该等于系统失忆。
+		return s.Retrieve(c, rw)
+	}
+	return ws, nil
 }
 
 // mergeWindows 合并两个窗集：按 (SourceID,Span) 去重，按分降序，封顶

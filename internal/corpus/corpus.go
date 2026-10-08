@@ -19,8 +19,44 @@ import (
 	"github.com/willove/cumulus/internal/store"
 )
 
-// Collection 是语料在 store 里的集合名（realm 维度由 store 自己管）。
+// Collection 是**默认 realm** 的语料集合名。
+//
+// 为什么要按 realm 分集合（而不是给文档打个 realm 标签）：标签能过滤，
+// **忘记过滤的那条路径就漏**。集合是**物理分开**的——查错集合得到的是"没有"，
+// 不是"别人的数据"。多个项目/租户共用一个实例时，这是隔离的底线。
 const Collection = "documents"
+
+// CollectionFor 返回某 realm 的语料集合名。realm 为空 → 默认集合
+// （单机/本地开发的老路径一字不变）。
+func CollectionFor(realm string) string {
+	r := strings.TrimSpace(realm)
+	if r == "" {
+		return Collection
+	}
+	return Collection + "/" + sanitizeRealm(r)
+}
+
+// sanitizeRealm 把 realm 洗成安全片段：只留字母数字与 - _ .，其余换 _，
+// 长度封顶（集合名会进存储键，不能无限长也不能带路径分隔符）。
+func sanitizeRealm(r string) string {
+	var b strings.Builder
+	for _, r := range r {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "default"
+	}
+	return out
+}
 
 // Doc 是一篇语料文档（store 里的结构体形状）。
 type Doc struct {
@@ -38,14 +74,20 @@ type Port = store.Port
 
 // Load 从 store 读全量语料。空集合返回空切片（不报错——空库是合法状态）。
 func Load(ctx gocontext.Context, p Port) ([]retrieval.Document, error) {
-	ids, err := p.ListIDs(ctx, Collection, 0)
+	return LoadRealm(ctx, p, "")
+}
+
+// LoadRealm 只读**某 realm** 的语料。realm 为空 = 默认集合（单机老路径）。
+func LoadRealm(ctx gocontext.Context, p Port, realm string) ([]retrieval.Document, error) {
+	coll := CollectionFor(realm)
+	ids, err := p.ListIDs(ctx, coll, 0)
 	if err != nil {
 		return nil, fmt.Errorf("corpus: list: %w", err)
 	}
 	docs := make([]retrieval.Document, 0, len(ids))
 	for _, id := range ids {
 		var d Doc
-		if err := p.GetStruct(ctx, Collection, id, &d); err != nil {
+		if err := p.GetStruct(ctx, coll, id, &d); err != nil {
 			return nil, fmt.Errorf("corpus: get %s: %w", id, err)
 		}
 		if d.ID == "" {

@@ -30,7 +30,10 @@ import (
 
 // Text 存一段文本（粘贴/链接/看目录的单件入口）：过摄入管
 // （corpus.Prepare：解码→规范化→内容寻址），血缘随文档落库。
-func Text(ctx gocontext.Context, p corpus.Port, body, source string) (string, error) {
+// Text 摄入一段文本到 **realm 的集合**。realm 是显式参数而不是从 context 取：
+// 漏传 realm 的后果是**写进别人的集合**（静默的跨租户污染），编译器能抓的
+// 错误就不要留给人记。realm 为空 = 默认集合（单机老路径不变）。
+func Text(ctx gocontext.Context, p corpus.Port, realm, body, source string) (string, error) {
 	if strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf("ingest: empty body")
 	}
@@ -38,7 +41,7 @@ func Text(ctx gocontext.Context, p corpus.Port, body, source string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("ingest: prepare: %w", err)
 	}
-	if err := p.EnsureCollection(ctx, corpus.Collection); err != nil {
+	if err := p.EnsureCollection(ctx, corpus.CollectionFor(realm)); err != nil {
 		return "", err
 	}
 	doc := corpus.Doc{
@@ -49,7 +52,7 @@ func Text(ctx gocontext.Context, p corpus.Port, body, source string) (string, er
 		SrcBytes:  pre.SrcBytes,
 	}
 	_ = source // 来源留给调用方日志（id 是内容哈希，前缀不可行）
-	if err := p.PutStruct(ctx, corpus.Collection, pre.ID, doc); err != nil {
+	if err := p.PutStruct(ctx, corpus.CollectionFor(realm), pre.ID, doc); err != nil {
 		return "", fmt.Errorf("ingest: put %s: %w", pre.ID, err)
 	}
 	return pre.ID, nil
@@ -140,7 +143,7 @@ func StripHTML(s string) string {
 // WatchDir 轮询看目录：新文件（.txt/.md）或变化的文件入库，.jsonl 交给
 // corpus.ImportFile。轮询无外部依赖（fsnotify 是一颗依赖，个人库的
 // 摄入量级不需要事件精度）。每次回调 imported 增量。
-func WatchDir(ctx gocontext.Context, p corpus.Port, dir string, interval time.Duration, onChange func(imported int)) error {
+func WatchDir(ctx gocontext.Context, p corpus.Port, realm, dir string, interval time.Duration, onChange func(imported int)) error {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -152,7 +155,7 @@ func WatchDir(ctx gocontext.Context, p corpus.Port, dir string, interval time.Du
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			imported := scanOnce(ctx, p, dir, seen)
+			imported := scanOnce(ctx, p, realm, dir, seen)
 			if imported > 0 && onChange != nil {
 				onChange(imported)
 			}
@@ -160,7 +163,7 @@ func WatchDir(ctx gocontext.Context, p corpus.Port, dir string, interval time.Du
 	}
 }
 
-func scanOnce(ctx gocontext.Context, p corpus.Port, dir string, seen map[string]string) int {
+func scanOnce(ctx gocontext.Context, p corpus.Port, realm, dir string, seen map[string]string) int {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0 // 目录暂无/已删：等下一轮
@@ -194,7 +197,7 @@ func scanOnce(ctx gocontext.Context, p corpus.Port, dir string, seen map[string]
 			if strings.TrimSpace(body) == "" {
 				continue
 			}
-			if _, err := Text(ctx, p, body, name); err == nil {
+			if _, err := Text(ctx, p, realm, body, name); err == nil {
 				imported++
 			}
 		}

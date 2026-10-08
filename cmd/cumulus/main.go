@@ -13,6 +13,7 @@ import (
 
 	"github.com/willove/cumulus/internal/abstain"
 	"github.com/willove/cumulus/internal/api"
+	"github.com/willove/cumulus/internal/auth"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/ctxmgmt"
@@ -272,6 +273,9 @@ func runServe(args []string) error {
 	abstainOn := fs.Bool("abstain", false, "zero-LLM fail-prediction head (cumulus abstain: early refusal / forced escalation)")
 	topk := fs.Int("topk", 9, "retrieval top-k; 实测依据见 defaultKnobs")
 	width := fs.Int("width", 400, "evidence window width (runes); 实测下限见 defaultKnobs")
+	// realm = 语料集合的**物理分区**（集合名 documents/<realm>）。多项目共用一个
+	// 实例时用它隔开；空 = 默认集合（单机老路径不变）。
+	realmFlag := fs.String("realm", "", "corpus realm (collection namespace: documents/<realm>)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -311,7 +315,21 @@ func runServe(args []string) error {
 	}
 	// 摄入面装配：store 是语料的家，索引是它的投影（摄入后热重建）
 	srv := api.NewWithStore(st, synthFn, *topk, *width)
+	srv.Realm = *realmFlag
 	srv.StreamSynth = streamFn
+	// 凭证表：`CUMULUS_KEYS=realm=key,realm2=key2`（realm 由**凭证推导**，
+	// 不信请求体里的自称）。没配 = 宽容（本地开发），但会打印醒目提示——
+	// 多租户部署忘了配 key 是危险状态，不该静默。
+	keys, kerr := auth.ParseKeyringSpec(os.Getenv("CUMULUS_KEYS"))
+	if kerr != nil {
+		return fmt.Errorf("CUMULUS_KEYS: %w", kerr)
+	}
+	srv.Keys = keys
+	if keys.Empty() {
+		fmt.Println("serve: 未配 CUMULUS_KEYS —— 所有请求放行（仅限本地/单人使用）")
+	} else {
+		fmt.Printf("serve: 凭证表已启用，realm=%v（key 不回显）\n", keys.Realms())
+	}
 	if _, err := srv.Rebuild(ctx); err != nil {
 		return err
 	}
@@ -350,7 +368,17 @@ func runServe(args []string) error {
 	}
 	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排
 	// 与语义接地尺）——升级判了却没有执行处，等于级联半条腿
-	srv.Escalate = qaflow.BM25DeepEvidence(srv.Index(), *width, qaflow.DefaultDeep())
+	// 升级取数：**每次调用现取索引**，不能在启动时把 srv.Index() 的指针钉死——
+	// 那样摄入进来的新文档不在这个旧索引里，升级检索恒返回 0 窗口，于是
+	// "刚摄入的文档一问答就拒答"（真跑踩过：facts 显示答案有据、支撑得分 12.8，
+	// 但 escalation.windows=0 把好窗口换掉了）。
+	srv.Escalate = func(ctx *context.Context, rw qaflow.Rewrite) ([]qaflow.EvidenceWindow, error) {
+		idx, err := srv.EscalateIndexFor(ctx)
+		if err != nil || idx == nil {
+			return nil, fmt.Errorf("escalate: index unavailable")
+		}
+		return qaflow.BM25DeepEvidence(idx, *width, qaflow.DefaultDeep())(ctx, rw)
+	}
 	if *embedFlag == "minilm" {
 		embFn, _, err := pickEmbed(*embedFlag)
 		if err != nil {
@@ -361,7 +389,7 @@ func runServe(args []string) error {
 	// 看目录：文件落进去即入库（零摩擦摄入的第三条路）
 	if *watchDir != "" {
 		go func() {
-			_ = ingest.WatchDir(ctx, st, *watchDir, 2*time.Second, func(n int) {
+			_ = ingest.WatchDir(ctx, st, *realmFlag, *watchDir, 2*time.Second, func(n int) {
 				if _, err := srv.Rebuild(gocontext.Background()); err == nil {
 					fmt.Printf("watch: +%d docs, index rebuilt\n", n)
 				}

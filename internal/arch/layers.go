@@ -72,6 +72,7 @@ var packages = map[string]Layer{
 	"store":  LayerPorts,
 	"decide": LayerPorts,
 	// capabilities：能力件
+	"auth":              LayerCapabilities, // 凭证 → realm（鉴权网关；不依赖任何上层）
 	"abstain":           LayerCapabilities,
 	"calib":             LayerCapabilities,
 	"corpus":            LayerCapabilities,

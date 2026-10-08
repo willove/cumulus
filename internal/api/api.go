@@ -20,6 +20,7 @@ import (
 
 	gocontext "context"
 
+	"github.com/willove/cumulus/internal/auth"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
 	embedPkg "github.com/willove/cumulus/internal/embed"
@@ -52,8 +53,15 @@ type Server struct {
 	// 实现、换阈值程序都要改它——两次运行的策略不同，数字就不可比。
 	StrategyVersion string
 
+	// Keys 是凭证表（nil/空 = 默认放行，单机开发的老路径不变）。
+	// realm 由**凭证推导**，不信客户端声明——声明就是自己说我是谁。
+	Keys *auth.Keyring
+
 	mu    sync.RWMutex
 	index *retrieval.Index
+	// indexes 是**按 realm 分开的索引**：多租户共用一个实例时，检索面也必须
+	// 分开。只在集合上分开、索引还共用着，等于门锁上了窗户开着。
+	indexes map[string]*retrieval.Index
 }
 
 // DefaultStrategyVersion 是本装配的策略版本。改路由/检索策略时改这里
@@ -117,10 +125,43 @@ func (s *Server) committedVersions() (corpus, config, strategy, belief string) {
 func (s *Server) Index() *retrieval.Index {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if len(s.indexes) > 0 {
+		// 启用了多租户：单数索引不再可信（它只装某个 realm 的语料）
+		return s.indexes[s.Realm]
+	}
 	return s.index
 }
 
-// Rebuild 从 store 重建索引。摄入（粘贴/链接/看目录）后调用。
+// IndexFor 取某 realm 的索引（按需重建）。
+func (s *Server) IndexFor(ctx gocontext.Context, realm string) (*retrieval.Index, error) {
+	// 没挂 store 的服务（`New(idx, …)` 直接喂索引的那种构造）**没有集合可查**：
+	// 回落到单数索引，而不是崩在这里——缺席是合法状态。
+	if s.Store == nil {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.index, nil
+	}
+	s.mu.RLock()
+	if idx, ok := s.indexes[realm]; ok && idx != nil {
+		s.mu.RUnlock()
+		return idx, nil
+	}
+	s.mu.RUnlock()
+	docs, err := corpus.LoadRealm(ctx, s.Store, realm)
+	if err != nil {
+		return nil, err
+	}
+	idx := retrieval.Build(docs)
+	s.mu.Lock()
+	if s.indexes == nil {
+		s.indexes = map[string]*retrieval.Index{}
+	}
+	s.indexes[realm] = idx
+	s.mu.Unlock()
+	return idx, nil
+}
+
+// Rebuild 从 store 重建**默认 realm** 的索引。摄入（粘贴/链接/看目录）后调用。
 func (s *Server) Rebuild(ctx gocontext.Context) (int, error) {
 	docs, err := corpus.Load(ctx, s.Store)
 	if err != nil {
@@ -237,7 +278,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/ingest", s.handleIngest)
 	mux.HandleFunc("/v1/doc/", s.handleDoc)
 	mux.HandleFunc("/", s.handlePage)
-	return mux
+	// 鉴权网关：**health 放行**（探活不该要凭证），其余按凭证表判 realm。
+	// 没配 Keys 时整体放行（单机开发的老路径一字不变）。
+	return s.authGate(mux)
+}
+
+// authGate 是 HTTP 面的鉴权中间层。realm 由**凭证推导**并写进 request context；
+// handler 用 realmOf(r) 取，**不用**客户端请求体里的任何自称。
+func (s *Server) authGate(next http.Handler) http.Handler {
+	if s.Keys.Empty() {
+		return next // 没配凭证表 = 宽容（单机/本地开发）
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/health" {
+			next.ServeHTTP(w, r) // 探活不鉴权：否则负载均衡会把实例判死
+			return
+		}
+		realm, err := s.Keys.Authenticate(r)
+		if err != nil {
+			auth.WriteAuthError(w, err)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(WithRealm(r.Context(), realm)))
+	})
 }
 
 func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +317,7 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "question is required")
 		return
 	}
-	c := context.New(context.Realm(s.Realm))
+	c := context.New(context.Realm(s.realmOf(r)))
 	if s.Embedder != nil {
 		if err := qaflow.BindEmbedder(c, s.Embedder); err != nil {
 			writeErr(w, http.StatusInternalServerError, "bind embedder: "+err.Error())
@@ -271,7 +334,12 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 	// 语料版本是内容摘要，配置版本是生效装配的形状，策略是标签，信念
 	// 已退役记 none。语料在长，答案必须能说明"这是针对哪一版给的"。
 	opts.CorpusVersion, opts.ConfigVersion, opts.StrategyVersion, opts.BeliefVersion = s.committedVersions()
-	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index(), s.TopK, s.Width), s.Synth, opts)
+	idx, ierr := s.IndexFor(r.Context(), s.realmOf(r))
+	if ierr != nil || idx == nil {
+		writeErr(w, http.StatusInternalServerError, "index: "+realmErr(ierr))
+		return
+	}
+	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(idx, s.TopK, s.Width), s.Synth, opts)
 	if err := runner.Run(c); err != nil {
 		writeErr(w, http.StatusInternalServerError, "flow: "+err.Error())
 		return
@@ -429,12 +497,13 @@ func (s *Server) handleIngest(w http.ResponseWriter, r *http.Request) {
 		}
 		body = fetched
 	}
-	id, err := ingest.Text(ctx, s.Store, body, req.URL)
+	id, err := ingest.Text(ctx, s.Store, s.realmOf(r), body, req.URL)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "ingest: "+err.Error())
 		return
 	}
 	n, err := s.Rebuild(ctx)
+	s.InvalidateRealm(s.realmOf(r)) // 多租户：作废该 realm 的缓存索引（写后作废）
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "rebuild: "+err.Error())
 		return
@@ -471,7 +540,7 @@ func (s *Server) handleDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d corpus.Doc
-	if err := s.Store.GetStruct(gocontext.Background(), corpus.Collection, id, &d); err != nil {
+	if err := s.Store.GetStruct(gocontext.Background(), corpus.CollectionFor(s.realmOf(r)), id, &d); err != nil {
 		writeErr(w, http.StatusNotFound, "doc not found: "+id)
 		return
 	}
@@ -513,4 +582,12 @@ func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(webPage)
+}
+
+// realmErr 把索引错误压成一句（不泄露路径与内部结构）。
+func realmErr(err error) string {
+	if err == nil {
+		return "empty realm"
+	}
+	return "realm index unavailable"
 }

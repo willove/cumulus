@@ -244,3 +244,43 @@ func TestEscalationKeepsCalibrationProvenance(t *testing.T) {
 		t.Fatalf("committed view must keep the calibration of an escalated answer: %+v", views)
 	}
 }
+
+// 桥失手不得被当成"语料里没有证据"。
+//
+// 真跑踩过：单文档语料 margin=0 必升级，而 LLM 词汇桥一扩偏，加权重取就 0 命中；
+// 系统据此拒答——可 facts 明明显示首程有支撑、得分 12.8。加权 0 命中时退回朴素
+// 贵路（桥是增强，它失手不该等于系统失忆）。
+func TestEscalateFallsBackWhenWeightedRetrievalMisses(t *testing.T) {
+	weightedCalled := 0
+	opts := Options{
+		CorpusVersion: "test", ConfigVersion: "test", StrategyVersion: "test", BeliefVersion: "test",
+		// 首程覆盖 0.3 → 必升级
+		Escalate: coverageStub(winDeep(), 0.9), // 朴素贵路：真能取到窗
+		Expander: &stubExpander{terms: []string{"完全无关的扩展词"}},
+		WeightedRetrieve: func(map[string]float64) ([]EvidenceWindow, error) {
+			weightedCalled++
+			return nil, nil // 桥扩偏：加权重取一条都取不到
+		},
+	}
+	c := context.New("esc-fallback")
+	if err := Runner("q", coverageStub(win1(), 0.3), offlineStub, opts).Run(c); err != nil {
+		t.Fatal(err)
+	}
+	if weightedCalled == 0 {
+		t.Fatal("weighted retrieval should have been tried first")
+	}
+	esc, _ := context.Get(c, KeyEscalation)
+	if !esc.Executed {
+		t.Fatalf("escalation must run: %+v", esc)
+	}
+	if esc.After == "refuse" {
+		t.Fatalf("加权 0 命中退回朴素贵路后不该拒答（桥失手≠没证据）: %+v", esc)
+	}
+}
+
+// stubExpander 是固定返回的桥（真桥要 LLM）。
+type stubExpander struct{ terms []string }
+
+func (s *stubExpander) Expand(_ gocontext.Context, _ string) ([]string, error) {
+	return s.terms, nil
+}

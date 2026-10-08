@@ -71,7 +71,7 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c := context.New(context.Realm(s.Realm))
+	c := context.New(context.Realm(s.realmOf(r)))
 	if s.Embedder != nil {
 		if err := qaflow.BindEmbedder(c, s.Embedder); err != nil {
 			emit(mustFailed(runID, err))
@@ -90,7 +90,13 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 	opts.RunID = runID
 	opts.StreamSynth = s.StreamSynth
 
-	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index(), s.TopK, s.Width), s.Synth, opts)
+	idx, ierr := s.IndexFor(r.Context(), s.realmOf(r))
+	if ierr != nil || idx == nil {
+		emit(mustFailed(runID, fmt.Errorf("index: %s", realmErr(ierr))))
+		stream.Done()
+		return
+	}
+	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(idx, s.TopK, s.Width), s.Synth, opts)
 	if err := runner.Run(c); err != nil {
 		// 失败也是**一等事件**：发 error 再收尾（客户端据此停进度条）。
 		emit(mustFailed(runID, err))
