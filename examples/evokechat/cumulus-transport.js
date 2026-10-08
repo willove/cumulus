@@ -2,42 +2,46 @@
  * cumulus ↔ @wil-works/evoke-chat 的 transport（宿主侧胶水，零依赖）。
  *
  * 放这个文件的原因：Go 里的 internal/harness/evokechat 是**同一套映射的 Go 版**
- * （服务端与测试用）。前端跑不了 Go，所以这里有一份 JS 镜像。两侧必须同步改——
+ * （服务端与测试用）。前端跑不了 Go，所以这里是一份 JS 镜像。两侧必须同步改——
  * 事件词表变了，两边都要动；harness.Kinds() 那条测试守的是服务端那份。
  *
  * 接入方式（三行）：
  *
  *   import { createCumulusTransport } from './cumulus-transport'
- *   const engine = useChatEngine({ onSend: createCumulusTransport({ engine, baseURL: '' }) })
+ *   const engine = useChatEngine({ onSend: createCumulusTransport({ engine }) })
  *
  * onSend 的契约（@wil-works/evoke-chat 的硬规则）：
- *   **必须返回 Promise 直到流结束**——引擎的 loading 挂在这一刻，生成中发送钮才会
- *   变停止钮（stoppable）。提前 resolve 会让 loading 立刻回落、停止钮不出现。
- *   （这条在 examples/ebui-example-ai/src/pages/AiWorkbench.vue 的注释里也写了。）
+ *   **必须返回 Promise 直到流结束**——引擎的 loading 挂到这一刻，生成中发送钮才会
+ *   变停止钮（stoppable）。提前 resolve 会让 loading 立刻回落，停止钮不出现。
  *
- * 映射总表（与 Go adapter 一一对应）：
+ * ── 对 0.5.0 新 API 的用法（本次核对过的）────────────────────────────
+ *
+ *   阶段进度 → engine.appendProgress(msg.id, {label, detail, elapsedMs, percent})
+ *              内部流水线时间线（progressLog），收尾 engine.clearProgress。
+ *              0.4.x 没有它 → 自动退回 setProgress（单行当前态），行为不丢。
+ *   行内引用 → anchorSource(refId, text) 生成 `source:` 锚点，配合 EbChatSources
+ *              高亮（refId 必须与 refs[].sourceId 一一对应）。
+ *   流式入参 → engine.appendToolCallArgs(msg.id, callId, chunk)
+ *              0.4.x 没有它 → 入参一次给全量（仍然能跑，只是看不到参数在流）。
+ *   结构化结果 → engine.completeToolCall(msg.id, callId, result, {resultType})
+ *
+ * ── 映射总表 ────────────────────────────────────────────────────────
  *
  *   started    → createAssistantMessage
- *   stage      → engine.setProgress(msg.id, { label, detail, elapsedMs })
- *                （组件本来就渲染 message.progress.{label,detail,elapsedMs}，
- *                  契约要求阶段进度走这里、**别拼进 think 文本**；收尾态引擎会清掉）
- *   file       → 同上（检索日志一行）或 工具卡：startToolCall/appendToolCallResult/
- *                completeToolCall（filesAsToolCards: true）
- *   reasoning  → engine.appendThinkContent   ← 思考与正文必须两个 API，混写会串行渲染
- *   content    → engine.appendContent（增量）/ engine.updateMessage({content})（replace）
- *   citations  → onCitations(refs)（**引擎没有引用 setter**：引用面板由宿主落，
- *                通常是 EbChatSources 或 addArtifact）
+ *   stage      → appendProgress（阶段时间线）
+ *   file       → appendProgress（检索日志一行）/ 工具卡（filesAsToolCards）
+ *   reasoning  → appendThinkContent   ← 思考与正文必须两个 API，混写会串行渲染
+ *   content    → appendContent（增量）/ updateMessage({content})（replace 整段替换）
+ *   citations  → onCitations(refs) + 行内锚点脚注（anchorFooter: true）
  *   related    → onRelated（**不要混进 citations**，否则变成"引用了但没引"）
- *   done       → engine.completeMessage + engine.setUsage
- *   error      → engine.setMessageError
+ *   done       → completeMessage + clearProgress + setUsage
+ *   error      → setMessageError
  *
- * 下面用到的引擎方法**逐个核过存在性**（v0.4.1 的 useChatEngine 返回值）：
- *   createAssistantMessage / appendContent / appendThinkContent / updateMessage /
- *   completeMessage / setMessageError / cancelMessage / setProgress / setUsage /
- *   startToolCall / appendToolCallResult / completeToolCall / addArtifact。
- *   **没有** setContent / setSources——想整段替换用 updateMessage({ content })。
+ * 下面用到的引擎方法**逐个核过存在性**（v0.5.0 useChatEngine 返回值）：无虚构调用。
+ * 引擎**没有** setContent / setSources——整段替换用 updateMessage({content}），
+ * 引用面板由宿主落（EbChatSources 插槽 / addArtifact / onCitations）。
  *
- * 未知事件：**记录并跳过**，不要静默丢，也不要抛（服务端加新事件不该弄崩旧界面）。
+ * 未知事件：**记录并跳过**，不静默丢、不抛（服务端加新事件不该弄崩旧界面）。
  */
 
 /**
@@ -46,13 +50,13 @@
  * @param {string} [opts.baseURL] 后端地址，空 = 同源
  * @param {string} [opts.endpoint] 流式端点（默认 /v1/qa/stream）
  * @param {boolean} [opts.filesAsToolCards] 检索命中走工具调用卡（重但可回看原文）
- * @param {(s: {label:string, detail?:string, percent?:number, ms?:number, kind:string}) => void} [opts.onStage]
+ * @param {boolean} [opts.anchorFooter] 收尾时给答案补一行行内引用锚点（默认 true）
+ * @param {(entry: object) => void} [opts.onStage] 自绘进度条时用（percent 组件不画）
  * @param {(refs: Array) => void} [opts.onCitations]
  * @param {(items: Array) => void} [opts.onRelated]
  * @param {(info: object) => void} [opts.onDone]
  * @param {(ev: object) => void} [opts.onFrame] 逐帧观察（调试/自检用）
  * @param {(err: Error) => void} [opts.onError]
- * @returns {(content: string, signal: AbortSignal) => Promise<void>}
  */
 export function createCumulusTransport(opts) {
   const {
@@ -60,13 +64,21 @@ export function createCumulusTransport(opts) {
     baseURL = "",
     endpoint = "/v1/qa/stream",
     filesAsToolCards = false,
+    anchorFooter = true,
     onStage, onCitations, onRelated, onDone, onFrame, onError,
   } = opts || {};
+
+  // 能力探测：**缺席是合法状态**（0.4.x 没有新 API 也要能跑，退回旧通道）。
+  const has = (name) => typeof engine[name] === "function";
+  const canProgressLog = has("appendProgress") && has("clearProgress");
+  const canStreamArgs = has("appendToolCallArgs");
+  const anchorSource = anchorSourceImpl;
 
   return async function onSend(content, signal) {
     const msg = engine.createAssistantMessage();
     let thinkText = "";
     let answerText = "";
+    const refs = [];
     const toolIds = new Map();   // docId → toolCallId（工具卡模式）
     const unknown = [];          // 没处理的事件（可见，不静默）
 
@@ -87,10 +99,7 @@ export function createCumulusTransport(opts) {
 
           case "stage": {
             const s = ev.stage || {};
-            // 契约：结构化进度走 progress 事件，**别把阶段进度拼进 think 文本**。
-            // setProgress 是引擎真实 API，组件直接渲染 label/detail/elapsedMs；
-            // percent（0..100）组件不画（它只有一行读数），要进度条就用 onStage 自绘。
-            const stage = {
+            const entry = {
               label: s.label || s.name,
               detail: s.detail || "",
               elapsedMs: s.duration_ms || 0,
@@ -98,10 +107,10 @@ export function createCumulusTransport(opts) {
               name: s.name,
               phase: s.phase,
             };
-            engine.setProgress(msg.id, {
-              label: stage.label, detail: stage.detail, elapsedMs: stage.elapsedMs,
-            });
-            if (onStage) onStage(Object.assign({ kind: "stage" }, stage));
+            // 0.5.0：进时间线；0.4.x：退回单行当前态（行为不丢，只是没有历史）
+            if (canProgressLog) engine.appendProgress(msg.id, entry);
+            else engine.setProgress(msg.id, { label: entry.label, detail: entry.detail, elapsedMs: entry.elapsedMs });
+            if (onStage) onStage(Object.assign({ kind: "stage" }, entry));
             break;
           }
 
@@ -116,6 +125,12 @@ export function createCumulusTransport(opts) {
                   args: { rank: f.rank, docId: f.doc_id, score: f.score, span: f.span },
                 });
                 toolIds.set(f.doc_id, id);
+                // 长参数可以在流里逐片拼（0.5.0）：这里把 docId/span 分两片演示，
+                // 0.4.x 没有这个 API → 跳过（入参已在 startToolCall 给全量）。
+                if (canStreamArgs && f.span) {
+                  engine.appendToolCallArgs(msg.id, id, '{"docId":"' + f.doc_id + '","span":');
+                  engine.appendToolCallArgs(msg.id, id, JSON.stringify(f.span) + "}");
+                }
               }
               if (f.preview) engine.appendToolCallResult(msg.id, id, f.preview);
             } else {
@@ -124,7 +139,8 @@ export function createCumulusTransport(opts) {
                 detail: "#" + f.rank + " 得分 " + Number(f.score || 0).toFixed(2),
                 elapsedMs: 0, percent: 0,
               };
-              engine.setProgress(msg.id, hit);
+              if (canProgressLog) engine.appendProgress(msg.id, hit);
+              else engine.setProgress(msg.id, hit);
               if (onStage) onStage(Object.assign({ kind: "hit" }, hit));
             }
             break;
@@ -152,16 +168,17 @@ export function createCumulusTransport(opts) {
           }
 
           case "citations": {
-            const refs = (ev.citations || []).map((c) => ({
-              sourceId: c.doc_id,
-              title: c.title || c.doc_id,
-              text: c.text || "",
-              url: "/v1/doc/" + encodeURIComponent(c.doc_id),
-              resolved: !!c.resolved,
-              span: c.span || "",
-            }));
-            // 引擎**没有**引用 setter：引用面板由宿主落（EbChatSources 插槽 /
-            // addArtifact / 自定义卡片）。没给 onCitations 就只留在逐帧记录里。
+            for (const c of ev.citations || []) {
+              refs.push({
+                id: c.doc_id,
+                sourceId: c.doc_id,
+                title: c.title || c.doc_id,
+                text: c.text || "",
+                url: "/v1/doc/" + encodeURIComponent(c.doc_id),
+                resolved: !!c.resolved,
+                span: c.span || "",
+              });
+            }
             if (onCitations) onCitations(refs);
             break;
           }
@@ -186,8 +203,22 @@ export function createCumulusTransport(opts) {
 
           case "done": {
             const d = ev.done || {};
+            // 行内引用脚注：答案正文补一行"根据 [1](source:doc-1)…"，
+            // 点上标联动 EbChatSources 高亮（anchorSource 的 refId 要与
+            // citations[].id 一一对应——这里用的就是 doc_id）。
+            let content = answerText;
+            if (anchorFooter && refs.length && anchorSource) {
+              content += "\n\n根据 " +
+                refs.map((r, i) => anchorSource(r.id, i + 1)).join("、") +
+                " 篇文档。";
+            }
+            if (content !== answerText) {
+              engine.updateMessage(msg.id, { content });
+              answerText = content;
+            }
             engine.completeMessage(msg.id);
-            engine.setProgress(msg.id, null);   // 收尾清掉进度行（组件的约定）
+            if (canProgressLog) engine.clearProgress(msg.id);
+            else engine.setProgress(msg.id, null);
             engine.setUsage(msg.id, {
               promptTokens: d.prompt_tokens || 0,
               completionTokens: d.completion_tokens || 0,
@@ -203,9 +234,11 @@ export function createCumulusTransport(opts) {
         }
       });
 
-      // 工具卡模式：收尾把每张卡结掉（省略 result = 保留流出的输出）
+      // 工具卡收尾：结掉每张卡（省略 result = 保留流出的输出），并声明结果形态
       if (filesAsToolCards) {
-        for (const id of toolIds.values()) engine.completeToolCall(msg.id, id);
+        for (const id of toolIds.values()) {
+          engine.completeToolCall(msg.id, id, undefined, { resultType: "text" });
+        }
       }
       if (unknown.length && onError) {
         onError(new Error("收到未处理事件：" + unknown.join(",")));
@@ -227,6 +260,19 @@ export function createCumulusTransport(opts) {
 }
 
 /**
+ * 行内引用锚点：`[序号](source:<refId>)`，正文渲染成可点上标，点击联动
+ * EbChatSources 高亮对应卡片。
+ *
+ * 为什么内联一份而不是 import：`@wil-works/evoke-chat` 的 utils 不是公开入口
+ * （exports 里只有组件与 composables），而这份只依赖两个字符串规则——
+ * **等它进公开 API 后，换成 import 即可，行为一致**。
+ */
+function anchorSourceImpl(refId, text) {
+  const id = String(refId ?? "").replace(/[\s()]/g, "");
+  return `[${text ?? ""}](source:${id})`;
+}
+
+/**
  * SSE 解析（fetch + ReadableStream）。
  * 为什么不用 EventSource：它只能 GET，不能 POST 也不带自定义头。
  * 为什么自己按 \n\n 切：SSE 允许注释行与多行 data；切错就会把半帧当整帧。
@@ -243,9 +289,9 @@ async function readSSE(resp, onEvent) {
     while ((i = buf.indexOf("\n\n")) >= 0) {
       const frame = buf.slice(0, i);
       buf = buf.slice(i + 2);
-      const data = frame.split("\n").find((l) => l.startsWith("data: "));
-      if (!data) continue;                       // event: 行/注释行/心跳：忽略
-      const payload = data.slice(6);
+      const line = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;                       // event: 行/注释行/心跳：忽略
+      const payload = line.slice(6);
       if (payload === "[DONE]") return;           // 终止哨兵（与 OpenAI 同惯例）
       try { onEvent(JSON.parse(payload)); } catch (err) { console.warn("帧不是 JSON", payload); }
     }

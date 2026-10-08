@@ -27,9 +27,25 @@ const engine = useChatEngine({ onSend: createCumulusTransport({ engine }) })
 `onSend` **必须返回 Promise 直到流结束**——引擎的 loading 挂在这一刻，生成中发送钮
 才会变停止钮（stoppable）；提前 resolve 会让 loading 立刻回落、停止钮不出现。
 
-**真跑验证**（真模型 + 真 SSE 流 + 假引擎记录调用）：进度行 22 条（首「理解问题与检索
-意图」末 `null`＝收尾清掉）、答案写入 17 次、工具卡 1 开 1 合、`completeMessage`/
-`setUsage` 各 1 次、思考 0 段（该模型不吐 `reasoning_content`）。
+**已升级到 evoke-chat 0.5.0**（`ce832c8`）并真跑验证：
+
+```
+引擎 0.5.0：appendProgress 22 · appendToolCallArgs 2 · startToolCall 1 ·
+            appendToolCallResult 1 · appendContent 13 · updateMessage 1 ·
+            completeMessage 1 · clearProgress 1 · setUsage 1 · completeToolCall 1
+            parts 顺序 = tool → text · 行内锚点 ✓
+引擎 0.4.1：setProgress 23（自动退回单行）· 其余一致 ← **缺席是合法状态**
+```
+交错验收（P0-1 的验收项）用合成帧跑通：`text → tool → text` **按到达顺序**渲染，
+锚点脚注 `
+
+根据 [1](source:d1) 篇文档。` 正确追加。
+
+**新发现的问题（对方需处理）**：`clearProgress(msgId)` 把 `progressLog` **一起清空**
+（`useChatEngine.js:350`），于是"系统轨迹"在答案出来后**不可回看**——它只是个
+存活期面板。而"这次查了什么、为什么这么答"恰恰是用户事后最想看的（我们的 viewer
+就是靠逐帧记录留存下来的）。建议：`clearProgress` 只清 `progress`（当前行），
+`progressLog` 作为**可折叠的历史**留存，或加 `keepLog` 选项。
 
 ## 事件浏览器（viewer）：自证事件词表够用
 
