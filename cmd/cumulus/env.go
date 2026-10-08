@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/willove/cumulus/internal/decide"
 	"github.com/willove/cumulus/internal/deepcore"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/facts"
-	"github.com/willove/cumulus/internal/judge"
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/qaflow"
@@ -26,34 +26,6 @@ type llmCompleter = llm.Completer
 
 func llmFromEnvImpl() (*llm.OpenAICompleter, error) {
 	return llm.FromEnv(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_CHAT_MODEL"))
-}
-
-// judgeFromEnv 装配判官：
-//
-//	CUMULUS_JUDGE=llm    等义判官（默认口径：答案是否被金标支持）
-//	CUMULUS_JUDGE=points 分点覆盖判官（金标拆要点，逐条命中比例过阈）
-//
-// 两者读数不可混用：points 口径下"判对"= 覆盖了大部分要点，llm 口径下=
-// 整段被支持。多跳/长金标任务上 points 才是对的那个口径（真跑：DomainRAG
-// multidoc 等义判官 6.8%，而答案与金标常几乎逐字一致）。
-func judgeFromEnv(which string) (judge.Judge, error) {
-	if which != "llm" && which != "points" {
-		return nil, nil
-	}
-	c, err := llmFromEnvImpl()
-	if err != nil {
-		return nil, err
-	}
-	if which == "points" {
-		thr := 0.0
-		if v := os.Getenv("CUMULUS_JUDGE_TAU"); v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
-				thr = f
-			}
-		}
-		return &judge.Points{Client: c, Threshold: thr}, nil
-	}
-	return &judge.LLM{Client: c}, nil
 }
 
 // loadDotEnv 把 .env 里的 KEY=VALUE 补进进程环境（不覆盖已设置的变量）。
@@ -168,6 +140,22 @@ func selectorFromEnv() deepcore.Selector {
 		return nil
 	}
 }
+
+// decideFromEnv 装决策模型客户端（DASHSCOPE_API_KEY）。密钥只从环境读，
+// .env 已 gitignore——**任何情况下不把密钥写进仓库**。
+func decideFromEnv() (*decide.Client, error) {
+	if vc == nil {
+		var err error
+		vc, err = decide.FromEnv()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return vc, nil
+}
+
+// vc 是决策模型客户端的单例（建一次、复用连接；客户端本身并发安全）。
+var vc *decide.Client
 
 // coordFromEnv 返回检索协调因子指数（0 = 关，默认）。
 // CUMULUS_COORD=1 启用 (命中词数/查询词数)^lambda：多实体问句里，"覆盖了

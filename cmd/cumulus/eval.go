@@ -3,14 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/embed"
-	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/failure"
@@ -38,6 +36,7 @@ type bm25Executor struct {
 	deep          *qaflow.DeepOptions // 非空 = 首程就走深循环（多轮取证）
 	escalate      bool                // true = 快路首程 + 判 escalate 才升级（级联）
 	bare          bool                // true = 哑臂：零改写、零管理（v0.2 §三.7）
+	decide        bool                // true = 合成后跑决策模型做答案级验证（CUMULUS_DECIDE=1）
 	route         qaflow.RouteConfig  // 路由阈值与校准来源
 }
 
@@ -86,7 +85,7 @@ func (e *bm25Executor) synth() qaflow.SynthFunc {
 	}
 }
 
-func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.ItemOutcome, error) {
+func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore.ItemOutcome, error) {
 	c := context.New("eval-sandbox")
 	if e.embedder != nil {
 		if err := qaflow.BindEmbedder(c, e.embedder); err != nil {
@@ -143,6 +142,20 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 	// 信号——只能在答案出来之后算，因此进不了路由，但进得了校准比较，
 	// 以及之后"验证后再决定升级/拒答"的环节）。
 	out.Support, out.SupportN = qaflow.AnswerSupport(answer.Text, windows)
+	// 决策模型的答案级验证（CUMULUS_DECIDE=1）：合成之后问"答案有没有依据"。
+	// 与检索侧信号正交，且与合成器不同家族——本项目唯一可作独立评估的候选。
+	if e.decide {
+		if vc, err := decideFromEnv(); err == nil {
+			noul, choice, conf, reason := verifyWithDecision(vc).Verify(ctx, question, windows, answer.Text)
+			if reason != "" {
+				fmt.Printf("  decide: %s\n", reason) // 失败如实留痕，不静默当 0
+			} else {
+				out.VerifyNoul, out.VerifyChoice, out.VerifyConf = noul, choice, conf
+			}
+		} else {
+			fmt.Printf("  decide: %v（不验，信号留空）\n", err)
+		}
+	}
 	// 底物信号交给归因（不在评审器的签名里加东西，执行面顺手报）：
 	// 窗里有没有数、查询的实体语料里有没有。
 	texts := make([]string, 0, len(windows))
@@ -212,67 +225,10 @@ func runEval(ctx gocontext.Context) error {
 		itemsSHA  string
 		err       error
 	)
-	corpus = evalCorpus()
-	rawItems = evalItems()
-	// 内联小样也给真指纹：占位串会在 [:12] 截断处炸（且"同样内容同指纹"
-	// 的纪律对演示路径同样成立）。
-	corpusSHA = evaldata.HashDocs(corpus)
-	itemsSHA = evaldata.HashItems(rawItems)
-	if os.Getenv("CUMULUS_REALDATA") == "cnlaw" {
-		path := os.Getenv("CNLAW_DIR")
-		if path == "" {
-			path = filepath.Join(os.Getenv("HOME"), "datasets/cn-law-rag/finetune_dataset.jsonl")
-		}
-		// cnlaw 自带采样参数：这里给 -1（全量；0 是"取 0 条"），统一采样
-		// 交给下面的公共块——两处采样会让"先切分再采样"的顺序无法保证。
-		set, err := evaldata.LoadCNLaw(path, -1)
-		if err != nil {
-			return err
-		}
-		corpus, rawItems = set.Docs, set.Items
-		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
-		fmt.Printf("realdata: %s sample=%d corpus=%d docs\n", path, len(rawItems), len(corpus))
-	}
-	// local：任意来源裁剪好的小语料（ModelScope 拉的 CMRC、自裁领域语料、
-	// 按块切的校准集）。目录里放 corpus.jsonl + items.jsonl，见
-	// scripts/prep_cmrc.py；也可用 CUMULUS_LOCAL_CORPUS / CUMULUS_LOCAL_ITEMS
-	// 分别指定两条文件。
-	if os.Getenv("CUMULUS_REALDATA") == "local" {
-		dir := os.Getenv("CUMULUS_LOCAL_DIR")
-		if dir == "" {
-			return fmt.Errorf("CUMULUS_REALDATA=local needs CUMULUS_LOCAL_DIR (dir with corpus.jsonl + items.jsonl)")
-		}
-		corpusPath, itemsPath := evaldata.DefaultLocalPaths(dir)
-		if v := os.Getenv("CUMULUS_LOCAL_CORPUS"); v != "" {
-			corpusPath = v
-		}
-		if v := os.Getenv("CUMULUS_LOCAL_ITEMS"); v != "" {
-			itemsPath = v
-		}
-		set, warnings, err := evaldata.LoadJSONL(corpusPath, itemsPath)
-		if err != nil {
-			return err
-		}
-		corpus, rawItems = set.Docs, set.Items
-		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
-		fmt.Printf("local: corpus=%s items=%s docs=%d items=%d\n", corpusPath, itemsPath, len(corpus), len(rawItems))
-		// 数据诊断必须看得见：金标不在语料里是"该拒答"的合法构造，但要
-		// 显式选择，不能默默跑（否则把数据错当成检索失败）。
-		for _, w := range warnings {
-			fmt.Printf("  warn: %s\n", w)
-		}
-	}
-	rawItems, err = applySplitAndSample(rawItems)
+	corpus, rawItems, corpusSHA, itemsSHA, err = resolveDataset()
 	if err != nil {
 		return err
 	}
-
-	// 协议警告要看得见（超长金标、无金标 docid）：不拦运行，但会改变
-	// 哪些指标可读——规则臂恒判 0 不是检索失败。
-	for _, w := range evalfcore.WarnItems(rawItems) {
-		fmt.Printf("  warn: %s\n", w)
-	}
-
 	dset, err := evalfcore.NewDataset(rawItems)
 	ds = dset
 	if err != nil {
@@ -343,10 +299,11 @@ func runEval(ctx gocontext.Context) error {
 		deep      *qaflow.DeepOptions
 		escalate  bool
 		bare      bool
+		decide    bool
 	}
 	execFor := func(sp execSpec) *bm25Executor {
 		ex := &bm25Executor{idx: idx, knobs: sp.knobs, synthFn: synthFn, groundingFlag: grounding > 0,
-			deep: sp.deep, escalate: sp.escalate, bare: sp.bare, route: routeCfg}
+			deep: sp.deep, escalate: sp.escalate, bare: sp.bare, decide: sp.decide, route: routeCfg}
 		if sp.withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
@@ -392,18 +349,18 @@ func runEval(ctx gocontext.Context) error {
 		}
 		arms := []evalfcore.Arm{
 			{ID: "bm25-bare", Dumb: true, Note: "纯 BM25 top-3、零改写、零管理（哑基线）",
-				Run: armRun("run-ab-bm25-bare", execSpec{knobs: knobsFromEnv(defaultKnobs()), bare: true})},
+				Run: armRun("run-ab-bm25-bare", execSpec{knobs: knobsFromEnv(defaultKnobs()), bare: true, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
 			{ID: "bm25", Note: "全管线快路 k=3",
-				Run: armRun("run-ab-bm25", execSpec{knobs: knobsFromEnv(defaultKnobs())})},
+				Run: armRun("run-ab-bm25", execSpec{knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
 		}
 		if deepEnabled {
 			arms = append(arms,
 				evalfcore.Arm{ID: "bm25-k9", Note: "k=9 单轮（预算对齐）",
 					Run: armRun("run-ab-k9", execSpec{knobs: k9})},
 				evalfcore.Arm{ID: "deep", Note: "覆盖度驱动深循环",
-					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: &deepOpts})},
+					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: &deepOpts, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
 				evalfcore.Arm{ID: "cascade", Note: "快路 + escalate 才升级",
-					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true})},
+					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
 			)
 		} else {
 			arms = append(arms, evalfcore.Arm{ID: "bm25+rerank", Note: "语义重排（需 embedder）",
@@ -459,7 +416,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", execSpec{withEmbed: os.Getenv("CUMULUS_EMBED") == "minilm", knobs: knobsFromEnv(defaultKnobs())})
+	state, err := runOne("run-selftest", "default", execSpec{withEmbed: os.Getenv("CUMULUS_EMBED") == "minilm", knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1"})
 	if err != nil {
 		return err
 	}

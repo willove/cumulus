@@ -67,6 +67,9 @@ type ItemResult struct {
 	Margin           float64 `json:"margin,omitempty"`        // (top1-top2)/top1：候选区分度
 	Support          float64 `json:"support,omitempty"`       // 答案的词面支持（SLC 离线代理，post-answer）
 	SupportN         int     `json:"support_terms,omitempty"` // 支持度分母（答案内容词数；0 = 无可验证断言）
+	VerifyNoul       float64 `json:"verify_noul,omitempty"`   // 决策模型：答案事实点有依据（0..1）
+	VerifyChoice     string  `json:"verify_choice,omitempty"` // 决策模型：窗口四级 ANSWER/RELATED/OUTDATED/UNKNOWN
+	VerifyConf       float64 `json:"verify_conf,omitempty"`   // 决策模型对该判断的置信度
 	RouteTier        string  `json:"route_tier,omitempty"`    // 置信信号档位：logprob / retrieval
 	LatencyMS        int64   `json:"latency_ms"`
 	PromptTokens     int     `json:"prompt_tokens"`
@@ -83,16 +86,20 @@ type Citation struct {
 
 // ItemOutcome 是 executor 对一道题的产出。看不到金标（见包注释）。
 type ItemOutcome struct {
-	Answer           string
-	RerankApplied    bool   // 语义重排是否真的生效（可选组件审计）
-	RerankReason     string // 没生效的原因（留痕：degraded 必须可见）
-	Cited            []Citation
-	Refused          bool
-	RouteAction      string
-	Coverage         float64 // 检索覆盖度（候选信号）
-	Margin           float64 // 候选区分度（候选信号）
-	Support          float64 // 答案词面支持（候选信号；post-answer）
-	SupportN         int     // 支持度分母（0 = 答案没有可验证的内容词）
+	Answer        string
+	RerankApplied bool   // 语义重排是否真的生效（可选组件审计）
+	RerankReason  string // 没生效的原因（留痕：degraded 必须可见）
+	Cited         []Citation
+	Refused       bool
+	RouteAction   string
+	Coverage      float64 // 检索覆盖度（候选信号）
+	Margin        float64 // 候选区分度（候选信号）
+	Support       float64 // 答案词面支持（候选信号；post-answer）
+	SupportN      int     // 支持度分母（0 = 答案没有可验证的内容词）
+	// 决策模型的答案级判断（另一家族，天然非循环）：
+	VerifyNoul       float64 // 答案事实点是否都在窗口原文里有依据（0..1）
+	VerifyChoice     string  // 窗口与问题的关系（GaRAGe 四级）
+	VerifyConf       float64
 	Windows          int
 	LatencyMS        int64
 	PromptTokens     int
@@ -259,6 +266,9 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		Margin:            out.Margin,
 		Support:           out.Support,
 		SupportN:          out.SupportN,
+		VerifyNoul:        out.VerifyNoul,
+		VerifyChoice:      out.VerifyChoice,
+		VerifyConf:        out.VerifyConf,
 		LatencyMS:         latency,
 		PromptTokens:      out.PromptTokens,
 		CompletionTokens:  out.CompletionTokens,

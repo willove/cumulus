@@ -42,7 +42,10 @@ func printCalibContest(state evalfcore.RunState, alpha float64) {
 		// 答案级验证信号：分点判官的要点命中比例。它答的是"这句答案有没有
 		// 证据"，前五个答的都是"窗够不够"——研究线 post-answer verification
 		// 要验的就是这个信号能不能预测正确性（AUC 列）。
-		{"verify(答案级)", func(r evalfcore.ItemResult) float64 { return r.JudgeCoverage }},
+		{"verify(判官)", func(r evalfcore.ItemResult) float64 { return r.JudgeCoverage }},
+		// 决策模型的答案级判断：**与合成器不同家族**，所以它在"独立标签"那列
+		// 上是真信号（判官 verify 那列是循环的，见 docs/research）。
+		{"verify(决策模型)", func(r evalfcore.ItemResult) float64 { return r.VerifyNoul }},
 	}
 	alphas := []float64{alpha, 0.20, 0.30}
 	if v := os.Getenv("CUMULUS_ALPHAS"); v != "" {
