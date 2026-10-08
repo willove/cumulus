@@ -52,6 +52,7 @@ type ItemResult struct {
 	RerankApplied     bool     `json:"rerank_applied,omitempty"` // 语义重排是否生效
 	RerankReason      string   `json:"rerank_reason,omitempty"`  // 未生效原因
 	CitedDocs         []string `json:"cited_docs,omitempty"`     // 信念观测的原料：哪些文档被引用了
+	CitedSpans        []string `json:"cited_spans,omitempty"`    // "<docID>#<span>"：人工/复核要拿到证据原文，只有 docid 不够
 	Refused           bool     `json:"refused,omitempty"`        // 系统拒答（合法结局，不是崩溃）
 	JudgeOK           *bool    `json:"judge_ok,omitempty"`
 	JudgeCoverage     float64  `json:"judge_coverage,omitempty"` // 答案级验证信号（分点命中比例）
@@ -239,10 +240,11 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		latency = time.Since(start).Milliseconds()
 	}
 
-	var citedIDs []string
+	var citedIDs, citedSpans []string
 	resolvedCount := 0
 	for _, c := range out.Cited {
 		citedIDs = append(citedIDs, c.DocID)
+		citedSpans = append(citedSpans, c.DocID+"#"+c.Span)
 		if c.Resolved {
 			resolvedCount++
 		}
@@ -254,6 +256,7 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		RerankApplied:     out.RerankApplied,
 		RerankReason:      out.RerankReason,
 		CitedDocs:         citedIDs,
+		CitedSpans:        citedSpans,
 		Answer:            out.Answer,
 		RuleScore:         RuleScore(out.Answer, item.Answer),
 		EvidenceHit:       EvidenceHit(citedIDs, item.GoldIDs),

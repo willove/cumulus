@@ -239,7 +239,9 @@ func runEval(ctx gocontext.Context) error {
 	if c := coordFromEnv(); c > 0 {
 		idx.Coord = c
 	}
-	st, err := store.Open("", true)
+	// 存储：默认内存（隔离、跑完即弃）；给 CUMULUS_STORE_DIR 就落盘——
+	// **研究工作流需要它**（跑一次、反复分析；标注批次也从档案里出）。
+	st, err := store.Open(os.Getenv("CUMULUS_STORE_DIR"), os.Getenv("CUMULUS_STORE_DIR") == "")
 	if err != nil {
 		return err
 	}
