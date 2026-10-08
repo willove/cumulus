@@ -95,9 +95,20 @@ func TestValidateWarnsLongGold(t *testing.T) {
 	for i := range long {
 		long[i] = '法'
 	}
-	diags := ValidateItems([]Item{{ID: "q1", Question: "x", Answer: string(long)}})
-	if len(diags) != 1 {
-		t.Fatalf("long gold must warn once, got %v", diags)
+	items := []Item{{ID: "q1", Question: "x", Answer: string(long), GoldIDs: []string{"d1"}}}
+	if diags := ValidateItems(items); len(diags) != 0 {
+		t.Fatalf("long gold must not block the run, got %v", diags)
+	}
+	if warns := WarnItems(items); len(warns) != 1 {
+		t.Fatalf("long gold must warn once, got %v", warns)
+	}
+	// 无金标 docid → 证据神谕不可用（警告，不是致命）
+	if warns := WarnItems([]Item{{ID: "q2", Question: "x", Answer: "y"}}); len(warns) != 1 {
+		t.Fatalf("missing gold ids must warn once, got %v", warns)
+	}
+	// 真致命的是重复题号与空字段
+	if diags := ValidateItems([]Item{{ID: "a", Question: "x", Answer: "y"}, {ID: "a", Question: "x", Answer: "y"}}); len(diags) != 1 {
+		t.Fatalf("duplicate id must stay fatal, got %v", diags)
 	}
 }
 

@@ -2,6 +2,7 @@ package deepcore
 
 import (
 	gocontext "context"
+	"fmt"
 	"testing"
 )
 
@@ -201,5 +202,60 @@ func TestRunBudgetModeStopsWhenPoolExhausted(t *testing.T) {
 	}
 	if tele.StopReason != "pool-exhausted" || tele.Rounds != 2 {
 		t.Fatalf("must stop as soon as the pool dries up: %+v", tele)
+	}
+}
+
+// 注入的选择器优先于默认的覆盖贪心——"选谁"是策略，不是循环内建。
+func TestRunUsesInjectedSelector(t *testing.T) {
+	band := []Window{}
+	for i := 0; i < 9; i++ {
+		band = append(band, Window{SourceID: fmt.Sprintf("d%d", i), Span: "s", Text: fmt.Sprintf("t%d", i), Score: float64(9 - i)})
+	}
+	picked, _, err := Run(gocontext.Background(), "q",
+		Options{MaxRounds: 3, PageSize: 3, Budget: 3},
+		bandAcquire(band),
+		func(string, []Window) float64 { return 0 },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(picked) != 3 {
+		t.Fatalf("selector output must honour the budget, got %d", len(picked))
+	}
+	// 覆盖函数对所有窗口一视同仁（增益全 0）⇒ 同增益按分数降序
+	if picked[0].SourceID != "d0" {
+		t.Fatalf("ties must fall back to the higher BM25 score, got %s", picked[0].SourceID)
+	}
+
+	// 注入选择器：故意挑最高分的两条 + 一条中间的
+	sel := func(_ gocontext.Context, _ string, pool []Window, budget int) ([]Window, error) {
+		return []Window{pool[0], pool[1], pool[2]}, nil
+	}
+	got, _, err := Run(gocontext.Background(), "q",
+		Options{MaxRounds: 3, PageSize: 3, Budget: 3, Selector: sel},
+		bandAcquire(band), func(string, []Window) float64 { return 0 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].SourceID != "d0" || got[2].SourceID != "d2" {
+		t.Fatalf("injected selector must win: %v %v %v", got[0].SourceID, got[1].SourceID, got[2].SourceID)
+	}
+}
+
+// 选择器失败必须显性报错（带已取窗口），不许悄悄退回默认选择。
+func TestRunSelectorErrorSurfaces(t *testing.T) {
+	band := []Window{
+		{SourceID: "a", Span: "s", Text: "x"},
+		{SourceID: "b", Span: "s", Text: "y"},
+		{SourceID: "c", Span: "s", Text: "z"},
+	}
+	_, _, err := Run(gocontext.Background(), "q",
+		Options{MaxRounds: 3, PageSize: 1, Budget: 1,
+			Selector: func(gocontext.Context, string, []Window, int) ([]Window, error) {
+				return nil, gocontext.Canceled
+			}},
+		bandAcquire(band), func(string, []Window) float64 { return 0 })
+	if err == nil {
+		t.Fatal("selector error must surface, not silently degrade")
 	}
 }

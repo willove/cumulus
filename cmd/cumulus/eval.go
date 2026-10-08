@@ -257,6 +257,12 @@ func runEval(ctx gocontext.Context) error {
 		return err
 	}
 
+	// 协议警告要看得见（超长金标、无金标 docid）：不拦运行，但会改变
+	// 哪些指标可读——规则臂恒判 0 不是检索失败。
+	for _, w := range evalfcore.WarnItems(rawItems) {
+		fmt.Printf("  warn: %s\n", w)
+	}
+
 	dset, err := evalfcore.NewDataset(rawItems)
 	ds = dset
 	if err != nil {

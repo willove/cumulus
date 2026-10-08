@@ -44,6 +44,15 @@ type Acquire func(ctx gocontext.Context, offset, limit int) ([]Window, error)
 // Coverage 覆盖度函数：查询在这批窗口原文上的词面覆盖（由调用方定义）。
 type Coverage func(query string, windows []Window) float64
 
+// Selector 是**选择器**：预算有限时，池子里留下哪几条。
+//
+// 它与 Coverage 的分工：覆盖度答"这批窗口覆盖了查询的哪些词"（可以离线、
+// 便宜、确定），选择器答"给定预算，留下谁最值"（要判断相关性，贵但有信息）。
+// 深循环唯一的真优势在**选择**上——加轮次只把池子变大，选不出对的那条，
+// 池子里的金标就永远兑现不了（DuReader 实测：池 92.2%、兑现 70.8%；
+// DomainRAG 合并集：池 85.2%、兑现 15% 风险）。
+type Selector func(ctx gocontext.Context, query string, pool []Window, budget int) ([]Window, error)
+
 // Options 是深循环的预算。
 type Options struct {
 	MaxRounds      int     // 轮数预算（默认 3；1 = 退回单轮检索）
@@ -59,6 +68,10 @@ type Options struct {
 	// 与单轮臂的条件完全相同，差异全部来自"后面又取了几轮"）。池子
 	// （PageSize×MaxRounds）大于 Budget 才有"选哪几条"的余地。
 	PageSize int
+	// Selector 覆盖默认的覆盖贪心选择（nil = 覆盖贪心）。**选择器失败不许
+	// 静默降级**：出错就返回错误并带上已取到的窗口，由调用方决定是降级
+	// （记原因）还是整条流程失败。
+	Selector Selector
 }
 
 func (o *Options) withDefaults() {
@@ -172,7 +185,15 @@ func Run(ctx gocontext.Context, query string, opts Options, acquire Acquire, cov
 	}
 	tele.Pooled = len(windows)
 	if opts.Budget > 0 && len(windows) > opts.Budget {
-		windows = selectByCoverage(query, windows, opts.Budget, cover)
+		if opts.Selector != nil {
+			sel, err := opts.Selector(ctx, query, windows, opts.Budget)
+			if err != nil {
+				return windows, tele, fmt.Errorf("deepcore: select: %w", err)
+			}
+			windows = sel
+		} else {
+			windows = selectByCoverage(query, windows, opts.Budget, cover)
+		}
 	}
 	tele.Selected = len(windows)
 	return windows, tele, nil

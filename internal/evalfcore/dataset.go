@@ -29,9 +29,7 @@ type Item struct {
 	GoldIDs  []string `json:"gold_ids,omitempty"`
 }
 
-// ValidateItems 返回诊断列表：重复题号、空字段、超长金标。
-// 超长金标（>200 字）只警告不拒绝——LENS 式整段引用会被规则臂恒判 0，
-// 那是协议不匹配，不是检索失败，必须在跑之前让人看见。
+// ValidateItems 返回**致命**诊断：重复题号、空字段。坏题集不许进运行。
 func ValidateItems(items []Item) []string {
 	var out []string
 	seen := make(map[string]bool, len(items))
@@ -50,8 +48,25 @@ func ValidateItems(items []Item) []string {
 		if strings.TrimSpace(it.Answer) == "" {
 			out = append(out, fmt.Sprintf("item %s: empty answer", it.ID))
 		}
+	}
+	return out
+}
+
+// WarnItems 返回**协议警告**（不拦运行，但必须让人看见）。
+//
+// 分级是这一版才补上的：ValidateItems 以前把"超长金标"也算致命，于是
+// multidoc 这种"答案本来就是一段综合"的题集整批跑不起来（DomainRAG
+// 接入时撞到：48 题里 7 题金标 >200 字 → 全批拒绝）。而规则臂按子串匹配
+// 本来就评不了长答案——那是**协议不匹配，不是检索失败**，该警告该照跑，
+// 该看的是证据命中与判官。真要拦请用 ValidateItems。
+func WarnItems(items []Item) []string {
+	var out []string
+	for _, it := range items {
 		if len([]rune(it.Answer)) > 200 {
 			out = append(out, fmt.Sprintf("item %s: answer is %d runes (>200); rule arm will score 0 by protocol", it.ID, len([]rune(it.Answer))))
+		}
+		if len(it.GoldIDs) == 0 {
+			out = append(out, fmt.Sprintf("item %s: no gold doc ids; evidence oracle unavailable", it.ID))
 		}
 	}
 	return out

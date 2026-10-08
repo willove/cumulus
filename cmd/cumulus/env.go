@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	gocontext "context"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/willove/cumulus/internal/deepcore"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/evaldata"
 	"github.com/willove/cumulus/internal/evalfcore"
@@ -15,6 +17,7 @@ import (
 	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/minilm"
 	"github.com/willove/cumulus/internal/qaflow"
+	"github.com/willove/cumulus/internal/rerank"
 	"github.com/willove/cumulus/internal/synth"
 )
 
@@ -119,6 +122,37 @@ func pickEmbed(which string) (func() embed.Embedder, string, error) {
 	}
 }
 
+// selectorFromEnv 按 CUMULUS_RERANK 装窗口选择器。
+//
+//	CUMULUS_RERANK=off（默认）  覆盖贪心（零成本，可离线复现）
+//	CUMULUS_RERANK=llm         清单式交叉编码器（一次调用处理整池）
+//
+// 它只在**池子大于预算**时才有意义：单轮 k9 的池子就是 9 条预算 9 条，
+// 选择器无事可做（rerank.Select 会直接返回，不花钱）。所以想验证选择器
+// 就要跑深循环臂（池 27 → 留 9）。
+func selectorFromEnv() deepcore.Selector {
+	switch os.Getenv("CUMULUS_RERANK") {
+	case "llm":
+		c, err := llmFromEnvImpl()
+		if err != nil {
+			// 装配失败要早报：静默退回覆盖贪心会让"重排没生效"变成
+			// 一个测不出来的读数（真跑踩过这类哑退化）。
+			fmt.Printf("selector: CUMULUS_RERANK=llm 但提供方不可用：%v（退回覆盖贪心，重排不发生）\n", err)
+			return nil
+		}
+		r := &rerank.LLM{Client: c}
+		return func(ctx gocontext.Context, query string, pool []deepcore.Window, budget int) ([]deepcore.Window, error) {
+			sel, err := r.Select(ctx, query, pool, budget)
+			if r.Reason != "" {
+				fmt.Printf("  rerank: %s（池 %d → 选 %d）\n", r.Reason, len(pool), len(sel))
+			}
+			return sel, err
+		}
+	default:
+		return nil
+	}
+}
+
 // deepFromEnv 从默认档出发按环境微调深循环（实验旋钮：池子大小与预算
 // 决定"选择阶段有没有余量"）。
 //
@@ -127,6 +161,7 @@ func pickEmbed(which string) (func() embed.Embedder, string, error) {
 //	CUMULUS_DEEP_ROUNDS  轮数（默认 3，池子 = PAGE×ROUNDS）
 func deepFromEnv() qaflow.DeepOptions {
 	d := qaflow.DefaultDeep()
+	d.Selector = selectorFromEnv()
 	if v, ok := envInt("CUMULUS_DEEP_BUDGET"); ok {
 		d.Budget = v
 	}
