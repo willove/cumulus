@@ -2,7 +2,10 @@ module github.com/willove/cumulus
 
 go 1.27.0
 
-require github.com/willove/cumulite v0.2.1
+require (
+	github.com/willove/cumulite v0.2.1
+	golang.org/x/text v0.29.0
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -18,6 +21,5 @@ require (
 	go.opentelemetry.io/otel/metric v1.41.0 // indirect
 	go.opentelemetry.io/otel/trace v1.41.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
 )
