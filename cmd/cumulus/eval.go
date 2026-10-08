@@ -97,26 +97,7 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 	if synthFn == nil {
 		synthFn = e.synth()
 	}
-	retrieve := qaflow.BM25Evidence(e.idx, e.topk(), e.width())
-	// 自适应预算（实验档）：第一页覆盖不够就整页加宽。诊断指向的是"给得够"
-	// 而不是"选得准"——multidoc evidence@k3=27.1%、@k9=70.8%。
-	if os.Getenv("CUMULUS_ADAPTIVE") == "1" {
-		big := e.topk() * 3
-		if v := os.Getenv("CUMULUS_TOPK"); v == "" {
-			big = 9
-		}
-		thr := 0.6
-		if v := os.Getenv("CUMULUS_ADAPTIVE_COV"); v != "" {
-			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
-				thr = f
-			}
-		}
-		idx := e.idx
-		retrieve = qaflow.AdaptiveK(idx, e.width(), e.topk(), big, thr,
-			func(q string, ws []qaflow.EvidenceWindow) float64 {
-				return qaflow.LexicalCoverageFor(idx, q, ws)
-			})
-	}
+	retrieve := e.retrievalFor()
 	if e.deep != nil {
 		retrieve = qaflow.BM25DeepEvidence(e.idx, e.width(), *e.deep)
 	}
@@ -205,12 +186,22 @@ func knobsFromEnv(knobs map[string]float64) map[string]float64 {
 	return out
 }
 
-// defaultKnobs 默认旋钮。width=160 不是拍的：真实运行（cn-law-rag，
-// MiniMax 真合成）发现 60 字宽把法条拦腰截断（“为了保护专利权人的合法权”
-// 就断了），模型对碎片证据全部正确拒答——judge 一度只有 6%。法条平均
-// 长度决定宽度下限；换语料要重测（这正是旋钮该干的事）。
+// defaultKnobs 默认旋钮。**k9/w400 是实测定的，不是拍的**（DomainRAG 五类任务
+// + cn-law，全部零 token 复现）：
+//
+//	页宽 3→9（找到更多）：multidoc evidence 27.1→70.8%、time_sensitive
+//	  70.8→93.8%、faithful 81.6→91.8%；cn-law 74.0→88.3%。五个任务无一
+//	  回退（basic/structured 同步小涨）。
+//	窗宽 160→400（拿到能答的片段）：量的是"金标答案词项落在取回窗口原文里
+//	  的比例"——faithful 46.9→65.3%、time_sensitive 78.5→89.2%、basic
+//	  56.7→65.6%、structured 92.6→98.9%；端到端规则臂同向（time_sensitive
+//	  61.5→73.8）。multidoc 提升有限——答案跨多文档，是任务性质不是切分 bug。
+//
+// 两个都是确定性旋钮，代价只是提示词变长（每题多几百 token），对个人知识库值。
+// width 的下限仍由法条长度决定（60 字宽会把法条拦腰截断，模型对碎片证据正确
+// 拒答——judge 曾只有 6%）；换语料要重测，这正是旋钮该干的事。
 func defaultKnobs() map[string]float64 {
-	return map[string]float64{"evidence.topk": 3, "evidence.width": 160}
+	return map[string]float64{"evidence.topk": 9, "evidence.width": 400}
 }
 
 func runEval(ctx gocontext.Context) error {
@@ -232,9 +223,9 @@ func runEval(ctx gocontext.Context) error {
 		if path == "" {
 			path = filepath.Join(os.Getenv("HOME"), "datasets/cn-law-rag/finetune_dataset.jsonl")
 		}
-		// cnlaw 自带采样参数：这里给 0（全量），统一采样交给下面的公共块
-		// ——两处采样会让"先切分再采样"的顺序无法保证。
-		set, err := evaldata.LoadCNLaw(path, 0)
+		// cnlaw 自带采样参数：这里给 -1（全量；0 是"取 0 条"），统一采样
+		// 交给下面的公共块——两处采样会让"先切分再采样"的顺序无法保证。
+		set, err := evaldata.LoadCNLaw(path, -1)
 		if err != nil {
 			return err
 		}

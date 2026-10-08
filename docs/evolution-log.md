@@ -1426,6 +1426,37 @@ multidoc 的天花板是**任务性质**：它的金标答案是跨多篇文档�
 
 **候选质量 = 页宽 × 窗宽**，两个都是确定性旋钮，不需要"更聪明的打分"。
 
+### 三补四十·续二、把两个实测旋钮落进默认（k3/w160 → k9/w400）
+
+两个正收益旋钮不该只活在环境变量里——**默认就该是实测值**。落默认前先验证**其他
+语料不回退**（否则就是拿一个语料的成绩换另一个语料的成绩）：
+
+```
+cn-law（历史基线，22,132 段）  k3/w160: evidence 74.0%  rule 72.7%
+                              k9/w400: evidence 88.3%  rule 86.7%
+```
+
+**六个语料/任务全部提升，无一回退**：
+
+```
+basic           rule 46.7→60.0   evidence 93.3→96.7
+multidoc        rule  4.2→ 6.2   evidence 27.1→70.8
+structured      rule 84.0→98.9   evidence 94.7→100.0
+faithful        rule 10.2→22.4   evidence 81.6→91.8
+time_sensitive  rule 55.4→73.8   evidence 70.8→93.8
+cn-law          rule 72.7→86.7   evidence 74.0→88.3
+```
+
+默认从 k3/w160 改成 **k9/w400**（eval 的 defaultKnobs + serve 的 -topk/-width）。
+代价是提示词变长（每题多几百 token），换 multidoc +43.7pp、cn-law +14.3pp——对个人
+知识库值。旋钮保留（环境变量仍可覆盖），换语料要重测。
+
+顺带抓到一个**自己引入的回退**：早先把 cn-law 采样统一时把 `LoadCNLaw(path, 0)`
+当成"全量"传，实际 0 的语义是"取 0 条"，导致 cn-law 直接跑不出题（真跑踩到
+"no items"才发现）。已改 -1（该函数文档里写的"样本号小于 0 = 全量"）。
+
+file-size 门照旧按职责拆（取数装配 → cmd/cumulus/retrieval_cfg.go），不是硬切。
+
 ## 四、现在的样子（2026-10-08）
 
 ```

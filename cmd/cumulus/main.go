@@ -270,8 +270,8 @@ func runServe(args []string) error {
 	watchDir := fs.String("watch", "", "directory to watch for new files (txt/md/jsonl)")
 	priorOn := fs.Bool("prior", false, "document-level multi-signal rerank (cumulus prior: lexical without length norm + title + article struct)")
 	abstainOn := fs.Bool("abstain", false, "zero-LLM fail-prediction head (cumulus abstain: early refusal / forced escalation)")
-	topk := fs.Int("topk", 3, "retrieval top-k")
-	width := fs.Int("width", 160, "evidence window width (runes)")
+	topk := fs.Int("topk", 9, "retrieval top-k; 实测依据见 defaultKnobs")
+	width := fs.Int("width", 400, "evidence window width (runes); 实测下限见 defaultKnobs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
