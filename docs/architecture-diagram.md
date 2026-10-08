@@ -4,6 +4,21 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 宿主侧胶水的两份副本（保持字节一致）
+
+| 副本 | 位置 | 用途 |
+|---|---|---|
+| 上游示例 | `evoke-ui-project/examples/ebui-example-ai/src/cumulus-transport.js` | 给别人看"自研后端怎么接"的活例子（已随 PR 提交） |
+| 本仓 | `examples/evokechat/cumulus-transport.js` | 服务端侧留一份，便于对照 Go adapter 与前端映射 |
+
+**两份必须字节一致**（真跑接出来的一处坑：console 的
+`transport(content, attachments, context)` 是三个参数，第二个是**附件数组不是
+AbortSignal**——按位置假设会把它当 signal 用。现在按**形状**判断（`typeof
+arg2.aborted === "boolean"`），并自带 `cancel()` 供 `@stop` 调，因为 console
+根本不传 signal，中止只能靠宿主自己的句柄）。
+
+---
+
 ## 宿主侧胶水：examples/evokechat/cumulus-transport.js
 
 Go 里的 `internal/harness/evokechat` 是同一套映射的 **Go 版**（服务端与测试用）；

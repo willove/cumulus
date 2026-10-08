@@ -74,7 +74,16 @@ export function createCumulusTransport(opts) {
   const canStreamArgs = has("appendToolCallArgs");
   const anchorSource = anchorSourceImpl;
 
-  return async function onSend(content, signal) {
+  // 兼容两种调用形态：
+  //   直连 useChatEngine({ onSend }) → (content, signal)
+  //   经 EbAiConsole 的 transport prop → (content, attachments, context)
+  // 第二个参数**可能是 AbortSignal，也可能是附件数组**——按形状判断，不靠约定。
+  let currentAbort = null;
+
+  async function onSend(content, arg2, arg3) {
+    const signal = (arg2 && typeof arg2.aborted === "boolean") ? arg2
+      : (arg3 && typeof arg3.aborted === "boolean") ? arg3 : null;
+    currentAbort = new AbortController();
     const msg = engine.createAssistantMessage();
     let thinkText = "";
     let answerText = "";
@@ -87,7 +96,7 @@ export function createCumulusTransport(opts) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question: content, session: msg.id }),
-        signal,
+        signal: currentAbort.signal,
       });
       if (!resp.ok) throw new Error("HTTP " + resp.status + " " + (await resp.text()));
 
@@ -248,15 +257,25 @@ export function createCumulusTransport(opts) {
         engine.setMessageError(msg.id, "响应流已截断：没有收到任何内容帧");
       }
     } catch (e) {
-      if (e && e.name === "AbortError") {
+      const aborted = (e && e.name === "AbortError") || signal?.aborted || currentAbort?.signal.aborted;
+      if (aborted) {
         // 用户主动停止 = cancelled，不是 error（契约：不要用 setMessageError 表达停止）
         engine.cancelMessage(msg.id);
       } else {
         engine.setMessageError(msg.id, String((e && e.message) || e));
         if (onError) onError(e);
       }
+    } finally {
+      currentAbort = null;
     }
+  }
+
+  /** 宿主停止按钮调用（EbAiConsole 的 @stop）。中止当前那一轮。 */
+  onSend.cancel = () => {
+    if (currentAbort) currentAbort.abort();
   };
+  onSend.isStreaming = () => !!currentAbort;
+  return onSend;
 }
 
 /**
