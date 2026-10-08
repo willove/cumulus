@@ -11,6 +11,7 @@ import (
 	"github.com/willove/cumulus/internal/ctxmgmt"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/flow"
+	"github.com/willove/cumulus/internal/harness"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -105,6 +106,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	return &flow.Runner{
 		Flow:   "qa",
 		Stages: stages,
+		Trace:  traceFunc(opts.Emitter, opts.RunID),
 		View: context.CommittedView{
 			CorpusVersion:   opts.CorpusVersion,
 			ConfigVersion:   opts.ConfigVersion,
@@ -211,6 +213,11 @@ type Options struct {
 	// 没有答案却合出了很像样的答案"（真跑见过：9 条窗口全讲潜伏期长短，
 	// 答案写的是抗病毒治疗建议）只能在合成前拦。
 	Decision *DecisionDecider
+	// Emitter 是**对外事件流**（§architecture 输出面）。nil = 不发任何事件，
+	// 流程与响应逐字段不变（harness 契约 1：观测面缺席不许改变行为）。
+	Emitter *harness.Emitter
+	// RunID 进每一帧事件（外部按它对账/回放）。空 = 不带（一次性问答无编号）。
+	RunID string
 	// CtxBudget 合成前的上下文预算（按源配额/语义近重合并/窗口预算）。
 	// 零值 = 默认预算（MaxWindows 8 / PerSource 2 / Dedup 0.92——
 	// 0.92 是 Volt 论文的合并阈值，不是我们拍的）。
@@ -222,4 +229,13 @@ type Options struct {
 	// 合成→记账。评测的哑对照臂用它；Bare 时上列可选件一律被忽略
 	// （StrategyVersion 自动带 "+bare" 后缀，忽略是可见的）。
 	Bare bool
+}
+
+// traceFunc 返回挂到 flow.Runner 上的观测钩子。emitter 为 nil 时返回 nil
+// （flow 那边 nil = 不观测）——**可选面缺席不留空壳**（见文件头约定）。
+func traceFunc(em *harness.Emitter, runID string) flow.TraceFunc {
+	if em == nil {
+		return nil
+	}
+	return NewTrace(em, runID).Stage
 }

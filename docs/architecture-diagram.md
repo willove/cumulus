@@ -4,6 +4,46 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 埋点与流式端点（/v1/qa/stream）
+
+事件词表落地成**两处接点**：
+
+**1. 阶段观测（kernel 的洞，不认识上层词表）**
+`flow.TraceFunc` = `func(c *Context, name string, phase TracePhase, durMS int64)`，phase ∈
+`start/done/fail`。flow 是 kernel，**不许依赖 harness**（反向依赖被 boundary 拦），所以
+它只给一个"你可以观测我"的**纯函数洞**；由 `qaflow.Trace`（pipeline→capabilities，合法边）
+把相位翻译成事件，并在**证据阶段结束时把窗集发成 `file` 事件**。
+
+为什么窗口挂在 evidence 上：检索是"取到一个就能讲一个"的动作（玩家想看的就是检索
+日志）。但 BM25 是一次性返回有序列表，所以事件是**有序批量**发出，**不假装成流式**。
+
+**2. HTTP 端点（可选增强）**
+`POST /v1/qa/stream` → `text/event-stream`，帧形状继承旧 cumulus。`/v1/qa` **逐字节
+不变**（既有脚本/服务读的是一次性 JSON，改形状等于破坏兼容）。
+
+终态四类事件的顺序有意义：**先引用（证据面）再答案（交付面）**——消费者据此知道
+"答案里每条断言都能对上前面那几条引用"。空引用**不发帧**（半截事件比不发更坏，
+"有没有引用"在 `done.counts` 里可查）。
+
+**读数（真模型 + 真语料，`/v1/qa/stream`）**：
+```
+file      #1 6859a9806bda score=5.65 「# 专利法第一条 …」
+citations → 6859a9806bda resolved=True 「# 专利法第一条 …」
+content   「# 专利法第一条 …制定本法。」
+done      route=fast cov=1 counts={'citations':1,'delivered':26,'dropped':0,'windows':1}
+data: [DONE]
+```
+26 帧全部落地（阶段时间线 → 检索日志 → 引用 → 答案 → 收尾），`dropped=0`。
+
+**降级与诚实**：sink 写失败不阻断问答（`Health.Dropped` 记在 `done.counts` 里）；
+不能流的服务器（无 `http.Flusher`）**明说 500**，不给"看起来在流其实全缓冲"的端点；
+参数错误在**开流之前**就报（否则客户端先收到半截历史）；阶段失败也**收尾**（只有
+start 的阶段会让 UI 永远转圈）。
+
+**还没做**：`reasoning`/`content` 的**真增量**需要 `internal/llm` 加 `Stream()`
+（provider 层当前是非流式 `Complete()`）。当前 `content` 是整段 `replace=true`——
+**诚实的形状**：伪增量比整段更坏。
+
 ## 对外输出面：internal/harness（事件流）
 
 harness 的职责是"让人看见系统在干什么"。旧 cumulus 有过一套输出流（OpenAI chat 帧 +

@@ -221,6 +221,24 @@ func (s *SSEStream) Write(ev Event) error {
 	return nil
 }
 
+// Done 收尾：发 `data: [DONE]` 并结束流。与 OpenAI chat 协议同惯例——
+// 通用客户端靠这一行知道流结束了（而不是靠连接关闭，那太被动）。
+func (s *SSEStream) Done() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed != nil {
+		return s.failed
+	}
+	if _, err := s.w.Write([]byte("data: [DONE]\n\n")); err != nil {
+		s.failed = err
+		return err
+	}
+	if s.flusher != nil {
+		s.flusher()
+	}
+	return nil
+}
+
 // KeepAlive 发一个 SSE 注释帧（心跳）。流式客户端靠它判活。
 func (s *SSEStream) KeepAlive() error {
 	s.mu.Lock()

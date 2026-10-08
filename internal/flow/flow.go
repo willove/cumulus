@@ -8,12 +8,32 @@ package flow
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/willove/cumulus/internal/context"
 )
 
 // Stage 是一次迁移中的一步。Reads/Writes 是契约：Reads 供查阅与静态核对，
 // Writes 由 runner 强制执行（写声明之外的 key 会直接失败）。
+// TracePhase 是阶段观测的相位。
+type TracePhase string
+
+// 相位取值：开始、正常结束、失败结束。
+const (
+	TraceStart TracePhase = "start"
+	TraceDone  TracePhase = "done"
+	TraceFail  TracePhase = "fail"
+)
+
+// TraceFunc 是**阶段观测钩子**：kernel 只声明形状，不认识上层的事件词表。
+//
+// 为什么在 kernel 里放这个类型：flow 是底座，它**不许依赖** harness（输出面在
+// capabilities 层，反向依赖会被 boundary 门禁拦住）。所以这里用**纯函数类型**，
+// 由上层（qaflow/api）负责把相位翻译成事件。底座给一个"你可以观测我"的洞，
+// 而不是让它知道谁在观测。
+type TraceFunc func(c *context.Context, name string, phase TracePhase, durMS int64)
+
+// Stage 是一个步骤的契约：能读什么、能写什么、怎么跑、跑完怎么自检。
 type Stage interface {
 	Name() string
 	Reads() []string
@@ -27,6 +47,9 @@ type Stage interface {
 
 // Runner 按顺序跑一组 stage。
 type Runner struct {
+	// Trace 非 nil 时逐阶段回调（开始/结束/失败 + 耗时）。**可选**：不设时
+	// Run 逐字段不变——观测面缺席不许改变流程行为（harness 契约 1）。
+	Trace  TraceFunc
 	Flow   string
 	Stages []Stage
 	// View 是本次迁移要记录的提交视图（四版本由调用方填）。
@@ -42,19 +65,33 @@ type Runner struct {
 func (r *Runner) Run(c *context.Context) error {
 	mark := c.Mark()
 	for _, st := range r.Stages {
-		c.BeginStage(st.Name(), st.Writes())
+		name := st.Name()
+		stStart := time.Now()
+		if r.Trace != nil {
+			r.Trace(c, name, TraceStart, 0)
+		}
+		c.BeginStage(name, st.Writes())
 		err := st.Run(c)
 		c.EndStage()
 		if err != nil {
 			notes := c.UnwindTo(mark)
-			return fmt.Errorf("flow %s: stage %s: %w (unwound %d)", r.Flow, st.Name(), err, len(notes))
+			if r.Trace != nil {
+				r.Trace(c, name, TraceFail, time.Since(stStart).Milliseconds())
+			}
+			return fmt.Errorf("flow %s: stage %s: %w (unwound %d)", r.Flow, name, err, len(notes))
 		}
-		c.BeginStage(st.Name(), st.Writes())
+		c.BeginStage(name, st.Writes())
 		verr := st.Verify(c)
 		c.EndStage()
 		if verr != nil {
 			notes := c.UnwindTo(mark)
-			return fmt.Errorf("flow %s: stage %s verify: %w (unwound %d)", r.Flow, st.Name(), verr, len(notes))
+			if r.Trace != nil {
+				r.Trace(c, name, TraceFail, time.Since(stStart).Milliseconds())
+			}
+			return fmt.Errorf("flow %s: stage %s verify: %w (unwound %d)", r.Flow, name, verr, len(notes))
+		}
+		if r.Trace != nil {
+			r.Trace(c, name, TraceDone, time.Since(stStart).Milliseconds())
 		}
 	}
 	r.View.Flow = r.Flow
