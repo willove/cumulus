@@ -29,15 +29,16 @@ import (
 // 语料原话，不是生成。生产把这里换成 synth.LLM 即可，别处不动。
 type bm25Executor struct {
 	idx           *retrieval.Index
-	knobs         map[string]float64  // evidence.topk / evidence.width
-	embedder      embed.Embedder      // 可空：向量面（绑了才重排/才亮语义尺）
-	synthFn       qaflow.SynthFunc    // 合成面：offline 或 llm
-	groundingFlag bool                // semantic grounding scale (true=on)
-	deep          *qaflow.DeepOptions // 非空 = 首程就走深循环（多轮取证）
-	escalate      bool                // true = 快路首程 + 判 escalate 才升级（级联）
-	bare          bool                // true = 哑臂：零改写、零管理（v0.2 §三.7）
-	decide        bool                // true = 合成后跑决策模型做答案级验证（CUMULUS_DECIDE=1）
-	route         qaflow.RouteConfig  // 路由阈值与校准来源
+	knobs         map[string]float64      // evidence.topk / evidence.width
+	embedder      embed.Embedder          // 可空：向量面（绑了才重排/才亮语义尺）
+	synthFn       qaflow.SynthFunc        // 合成面：offline 或 llm
+	groundingFlag bool                    // semantic grounding scale (true=on)
+	deep          *qaflow.DeepOptions     // 非空 = 首程就走深循环（多轮取证）
+	escalate      bool                    // true = 快路首程 + 判 escalate 才升级（级联）
+	bare          bool                    // true = 哑臂：零改写、零管理（v0.2 §三.7）
+	decide        bool                    // CUMULUS_DECIDE=1：合成后跑答案级验证
+	gate          *qaflow.DecisionDecider // 非 nil：接合成前闸门（CUMULUS_GATE=1）
+	route         qaflow.RouteConfig      // 路由阈值与校准来源
 }
 
 // envInt 读一个整数环境变量（未设置或非法 → ok=false，用默认值）。
@@ -111,6 +112,7 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 		BeliefVersion:   "none",
 		GroundingFloor:  e.grounding(),
 		Escalate:        escalateFn,
+		Decision:        e.gate,
 		Bare:            e.bare,
 		Route:           e.route,
 	})
@@ -142,6 +144,14 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 	// 信号——只能在答案出来之后算，因此进不了路由，但进得了校准比较，
 	// 以及之后"验证后再决定升级/拒答"的环节）。
 	out.Support, out.SupportN = qaflow.AnswerSupport(answer.Text, windows)
+	// 闸门/决策留痕进每题输出："有没有真决策"必须看得见（没记录与"决策说不行"
+	// 在读数里是两回事）。
+	if rec, ok := qaflow.DecisionRecordOf(c); ok {
+		out.DecisionApplied, out.DecisionReason, out.DecisionNoul = rec.Applied, rec.Reason, rec.Noul
+		if reason, ok := context.Get(c, qaflow.KeyRefusalReason); ok && reason == "decision-gate" {
+			out.GateBlocked = true
+		}
+	}
 	// 决策模型的答案级验证（CUMULUS_DECIDE=1）：合成之后问"答案有没有依据"。
 	// 与检索侧信号正交，且与合成器不同家族——本项目唯一可作独立评估的候选。
 	if e.decide {
@@ -302,10 +312,14 @@ func runEval(ctx gocontext.Context) error {
 		escalate  bool
 		bare      bool
 		decide    bool
+		gate      bool
 	}
 	execFor := func(sp execSpec) *bm25Executor {
 		ex := &bm25Executor{idx: idx, knobs: sp.knobs, synthFn: synthFn, groundingFlag: grounding > 0,
 			deep: sp.deep, escalate: sp.escalate, bare: sp.bare, decide: sp.decide, route: routeCfg}
+		if sp.gate {
+			ex.gate = qaflow.DecideFromEnv("answerable")
+		}
 		if sp.withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
@@ -351,18 +365,18 @@ func runEval(ctx gocontext.Context) error {
 		}
 		arms := []evalfcore.Arm{
 			{ID: "bm25-bare", Dumb: true, Note: "纯 BM25 top-3、零改写、零管理（哑基线）",
-				Run: armRun("run-ab-bm25-bare", execSpec{knobs: knobsFromEnv(defaultKnobs()), bare: true, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
+				Run: armRun("run-ab-bm25-bare", execSpec{knobs: knobsFromEnv(defaultKnobs()), bare: true, decide: os.Getenv("CUMULUS_DECIDE") == "1", gate: os.Getenv("CUMULUS_GATE") == "1"})},
 			{ID: "bm25", Note: "全管线快路 k=3",
-				Run: armRun("run-ab-bm25", execSpec{knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
+				Run: armRun("run-ab-bm25", execSpec{knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1", gate: os.Getenv("CUMULUS_GATE") == "1"})},
 		}
 		if deepEnabled {
 			arms = append(arms,
 				evalfcore.Arm{ID: "bm25-k9", Note: "k=9 单轮（预算对齐）",
 					Run: armRun("run-ab-k9", execSpec{knobs: k9})},
 				evalfcore.Arm{ID: "deep", Note: "覆盖度驱动深循环",
-					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: &deepOpts, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
+					Run: armRun("run-ab-deep", execSpec{knobs: knobsFromEnv(defaultKnobs()), deep: &deepOpts, decide: os.Getenv("CUMULUS_DECIDE") == "1", gate: os.Getenv("CUMULUS_GATE") == "1"})},
 				evalfcore.Arm{ID: "cascade", Note: "快路 + escalate 才升级",
-					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true, decide: os.Getenv("CUMULUS_DECIDE") == "1"})},
+					Run: armRun("run-ab-cascade", execSpec{knobs: knobsFromEnv(defaultKnobs()), escalate: true, decide: os.Getenv("CUMULUS_DECIDE") == "1", gate: os.Getenv("CUMULUS_GATE") == "1"})},
 			)
 		} else {
 			arms = append(arms, evalfcore.Arm{ID: "bm25+rerank", Note: "语义重排（需 embedder）",
@@ -418,7 +432,7 @@ func runEval(ctx gocontext.Context) error {
 		return nil
 	}
 
-	state, err := runOne("run-selftest", "default", execSpec{withEmbed: os.Getenv("CUMULUS_EMBED") == "minilm", knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1"})
+	state, err := runOne("run-selftest", "default", execSpec{withEmbed: os.Getenv("CUMULUS_EMBED") == "minilm", knobs: knobsFromEnv(defaultKnobs()), decide: os.Getenv("CUMULUS_DECIDE") == "1", gate: os.Getenv("CUMULUS_GATE") == "1"})
 	if err != nil {
 		return err
 	}
@@ -495,7 +509,7 @@ func printRun(arm string, state evalfcore.RunState) {
 		fmt.Printf("  [%s] %s rule=%.0f evidence=%v cites=%d/%d rerank=%v%s failure=%s\n",
 			arm, r.ItemID, r.RuleScore, r.EvidenceHit, r.CitationsResolved, r.CitationsTotal, r.RerankApplied, rr, f)
 	}
-	fmt.Printf("[%s] %s\n", arm, evalfcore.Summarize(state))
+	fmt.Printf("[%s] %s %s\n", arm, evalfcore.Summarize(state), gateStats(state))
 }
 
 func evalCorpus() []retrieval.Document {

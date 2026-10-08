@@ -100,10 +100,17 @@ func (d *DecisionDecider) Decide(ctx gocontext.Context, kind, question string, w
 	return rec.Noul >= thr, rec.Noul, rec
 }
 
-// DecideFromEnv 装配可降级决策器（CUMULUS_DECIDE=1 开）。没配 key 就返回
-// nil ——**nil 就是"这一层没接上"，是合法状态，不是错误**。
+// DecideFromEnv 装配可降级决策器。没配 key 就返回 nil ——**nil 就是"这一层
+// 没接上"，是合法状态，不是错误**。
+//
+// 两个开关都认（真跑踩过：只认 CUMULUS_DECIDE 时，单独开 CUMULUS_GATE 会被
+// 静默当成"没接"，闸门压根不注册，读数却看不出任何区别——**开关不生效比
+// 开关报错更坏**）：
+//
+//	CUMULUS_GATE=1    合成前闸门（GateStage）
+//	CUMULUS_DECIDE=1  合成后答案级验证（评测里的 verify 信号）
 func DecideFromEnv(kind string) *DecisionDecider {
-	if os.Getenv("CUMULUS_DECIDE") != "1" {
+	if os.Getenv("CUMULUS_GATE") != "1" && os.Getenv("CUMULUS_DECIDE") != "1" {
 		return nil
 	}
 	c, err := decide.FromEnv()
@@ -118,3 +125,73 @@ func DecideFromEnv(kind string) *DecisionDecider {
 func DecisionRecordOf(c *context.Context) (DecisionRecord, bool) {
 	return context.Get(c, KeyDecision)
 }
+
+// GateStage 是**合成前闸门**：问决策面"这些窗口里有没有答案"，没有就把
+// 答案置为拒答（而不是合出一个很像样的答案）。
+//
+// 它的位置在**路由之前**——路由决定"够不够、要不要升级"，闸门答的是另一件事
+// "手上这批窗口到底答不答得了这个问题"。两者不互相替代：
+//   - 覆盖度/边际回答"**够不够**"（词法侧，能算但常常答错题——三·补四十实测
+//     在多跳任务上与正确性**反向**）；
+//   - 闸门回答"**答不答得了**"（判断侧，便宜、与合成器不同家族）。
+//
+// 拒答口径：闸门说不行 → 拒答（Reason=decision-gate，**不是**沉默的短答案）。
+// 缺席/失败 → 放行（§三·八 三条不变式）。
+type GateStage struct {
+	Decision *DecisionDecider
+	Query    string
+}
+
+func (GateStage) Name() string { return "decision-gate" }
+
+func (GateStage) Reads() []string { return []string{KeyWindows.String()} }
+
+func (g GateStage) Writes() []string {
+	return []string{KeyDecision.String(), KeyRoute.String(), KeyAnswer.String(), KeyRefusalReason.String()}
+}
+
+// Verify 是跑完后的便宜信号检查：闸门要么放行、要么把拒答原因写清楚。
+// 两头都要有记录——"闸门没跑"与"闸门跑了但放行"在遥测里分得开。
+func (GateStage) Verify(c *context.Context) error {
+	rec, ok := DecisionRecordOf(c)
+	if !ok {
+		return fmt.Errorf("qaflow: decision-gate ran without leaving a record")
+	}
+	if !rec.Applied {
+		return nil // 缺席或失败：放行是契约内的行为（§三·八）
+	}
+	route, _ := context.Get(c, KeyRoute)
+	if route.Action == "refuse" {
+		if reason, ok := context.Get(c, KeyRefusalReason); !ok || reason == "" {
+			return fmt.Errorf("qaflow: decision-gate refused without a reason")
+		}
+	}
+	return nil
+}
+
+func (g GateStage) Run(ctx *context.Context) error {
+	ws, _ := context.Get(ctx, KeyWindows)
+	ok, noul, rec := g.Decision.Decide(gocontext.Background(), "answerable", g.Query, ws)
+	if err := context.Set(ctx, KeyDecision, rec); err != nil {
+		return err
+	}
+	if ok {
+		return nil // 放行：路由与合成照常
+	}
+	// 闸门判不行：把路由结论改成拒答，并写明拒答原因。
+	route, _ := context.Get(ctx, KeyRoute)
+	route.Action = "refuse"
+	route.Signals.Threshold = noul // 阈值位复用为"闸门分"，留痕可查
+	if err := context.Set(ctx, KeyRoute, route); err != nil {
+		return err
+	}
+	ans, _ := context.Get(ctx, KeyAnswer)
+	ans.Text, ans.Refused = "", true
+	if err := context.Set(ctx, KeyAnswer, ans); err != nil {
+		return err
+	}
+	return context.Set(ctx, KeyRefusalReason, "decision-gate")
+}
+
+// KeyRefusalReason 记拒答原因（拒答必须是可解释的结局，不是沉默）。
+var KeyRefusalReason = context.NewKey[string]("refusal.reason")

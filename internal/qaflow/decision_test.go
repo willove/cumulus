@@ -9,6 +9,8 @@ import (
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/decide"
+	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/retrieval"
 )
 
 func demoWindows() []EvidenceWindow {
@@ -114,5 +116,135 @@ func TestDecisionGateThresholdFallsBackToHalf(t *testing.T) {
 	ok2, _, _ := d2.Decide(gocontext.Background(), "answerable", "q", demoWindows())
 	if !ok2 {
 		t.Fatal("explicit 0.4 gate must pass 0.45")
+	}
+}
+
+// 闸门不接进产品路径（nil）时，**stage 列表与行为都不变**——这是"可选件"
+// 的全部意义：一次外部服务缺席不许改变问答结果。
+func TestGateAbsentLeavesStageListUnchanged(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "d1", Body: "连接池最大连接数默认为 100，超过需调整配置。"},
+		{ID: "d2", Body: "部署手册：先改配置，再重启服务；服务端口默认 8484。"},
+	})
+	retrieve := BM25Evidence(idx, 3, 60)
+	// 合成面必须给引用（"每个断言都要能映射回窗口"是合成阶段的纪律），
+	// 否则跑不到闸门断言就会被 Verify 先拦下——测试的失败姿势也得对。
+	answer := func(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
+		a := Answer{Text: "最大连接数是 100"}
+		if len(ws) > 0 {
+			a.Citations = []string{ws[0].SourceID + "#" + ws[0].Span}
+		}
+		return a, Usage{}, nil
+	}
+	// 不绑闸门
+	off := Runner("连接池最大连接数是多少", retrieve, answer, Options{})
+	cOff := context.New("t-off")
+	if err := off.Run(cOff); err != nil {
+		t.Fatal(err)
+	}
+	// 绑了闸门但**决策面缺席**（DecisionDecider 的 Client 为 nil）
+	degraded := Runner("连接池最大连接数是多少", retrieve, answer, Options{
+		Decision: &DecisionDecider{}, // Client=nil → 缺席
+	})
+	cDeg := context.New("t-deg")
+	if err := degraded.Run(cDeg); err != nil {
+		t.Fatal(err)
+	}
+
+	ansOff, _ := context.Get(cOff, KeyAnswer)
+	ansDeg, _ := context.Get(cDeg, KeyAnswer)
+	if ansOff.Text != ansDeg.Text || ansOff.Refused != ansDeg.Refused {
+		t.Fatalf("absent gate must not change the answer: off=%+v degraded=%+v", ansOff, ansDeg)
+	}
+	routeDeg, _ := context.Get(cDeg, KeyRoute)
+	if routeDeg.Action == "refuse" {
+		t.Fatalf("absent gate must not refuse: %+v", routeDeg)
+	}
+	// 但缺席必须留痕（"有没有在决策"是可查询事实）
+	rec, ok := DecisionRecordOf(cDeg)
+	if !ok {
+		t.Fatal("degraded gate must leave a record")
+	}
+	if rec.Applied || rec.Reason != "not-bound" {
+		t.Fatalf("absence must be recorded honestly: %+v", rec)
+	}
+	// 不绑闸门的那次**不该**有决策留痕（压根没注册这个 stage）
+	if _, ok := DecisionRecordOf(cOff); ok {
+		t.Fatal("no gate configured → no decision record (stage was never registered)")
+	}
+}
+
+// 闸门判不行 → 拒答且带原因（拒答是可解释结局，不是沉默）。
+func TestGateRefusesWithReason(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{"answerable":{"type":"noul","noul":0.1}}}`))
+	}))
+	defer bad.Close()
+	idx := retrieval.Build([]retrieval.Document{{ID: "d1", Body: "财务报表：三季度收入增长，成本结构继续优化。"}})
+	d := &DecisionDecider{Client: decide.New(bad.URL, "k", "m")}
+	r := Runner("连接池最大连接数是多少", BM25Evidence(idx, 3, 60),
+		func(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
+			a := Answer{Text: "不该被合成出来的答案"}
+			if len(ws) > 0 {
+				a.Citations = []string{ws[0].SourceID + "#" + ws[0].Span}
+			}
+			return a, Usage{}, nil
+		},
+		Options{Decision: d})
+	c := context.New("t-refuse")
+	if err := r.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	ans, _ := context.Get(c, KeyAnswer)
+	if !ans.Refused || ans.Text != "" {
+		t.Fatalf("gate must refuse and suppress the answer: %+v", ans)
+	}
+	reason, ok := context.Get(c, KeyRefusalReason)
+	if !ok || reason != "decision-gate" {
+		t.Fatalf("refusal must carry a reason: %q", reason)
+	}
+}
+
+// 端到端：真客户端（假端点）→ 闸门判"有答案" → 放行且留痕为 applied。
+// 真跑踩过：接线看起来都在（Options.Decision 有值、stage 注册了），但
+// ItemResult.DecisionApplied 恒为 false——留痕没有从 flow 的 context 流到
+// 结果里。这条测试就是钉这个交接点的。
+func TestGateLiveClientLeavesAppliedRecord(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth == "" {
+			t.Error("decision request must carry the key")
+		}
+		_, _ = w.Write([]byte(`{"answers":{"answerable":{"type":"noul","noul":0.95,"confidence":0.9}}}`))
+	}))
+	defer srv.Close()
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "d1", Body: "连接池最大连接数默认为 100，超过需调整配置。"},
+	})
+	c := context.New("t-live")
+	r := Runner("连接池最大连接数是多少", BM25Evidence(idx, 3, 60),
+		func(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
+			a := Answer{Text: "100"}
+			if len(ws) > 0 {
+				a.Citations = []string{ws[0].SourceID + "#" + ws[0].Span}
+			}
+			return a, Usage{}, nil
+		},
+		Options{Decision: &DecisionDecider{Client: decide.New(srv.URL, "k", "decision-model-preview")}})
+	if err := r.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := DecisionRecordOf(c)
+	if !ok {
+		t.Fatal("live gate must leave a record in the flow context")
+	}
+	if !rec.Applied || rec.Reason != "ok" || rec.Source != "decision-model-preview" {
+		t.Fatalf("live gate record wrong: %+v", rec)
+	}
+	if rec.Noul < 0.9 {
+		t.Fatalf("gate score must be recorded: %+v", rec)
+	}
+	route, _ := context.Get(c, KeyRoute)
+	if route.Action == "refuse" {
+		t.Fatalf("noul 0.95 must pass the gate: %+v", route)
 	}
 }

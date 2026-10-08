@@ -64,14 +64,18 @@ type ItemResult struct {
 	Confidence        float64  `json:"confidence,omitempty"`   // 路由实际用的置信代理（校准分桶用）
 	// 候选信号：校准要能**比较**信号，不能只有一个复合值。一次付费跑动
 	// 同时收齐，之后在同一批结果上比单调性与 α 可行性（见 internal/calib）。
-	Coverage         float64 `json:"coverage,omitempty"`      // 查询词覆盖度（语料内可达词口径）
-	Margin           float64 `json:"margin,omitempty"`        // (top1-top2)/top1：候选区分度
-	Support          float64 `json:"support,omitempty"`       // 答案的词面支持（SLC 离线代理，post-answer）
-	SupportN         int     `json:"support_terms,omitempty"` // 支持度分母（答案内容词数；0 = 无可验证断言）
-	VerifyNoul       float64 `json:"verify_noul,omitempty"`   // 决策模型：答案事实点有依据（0..1）
-	VerifyChoice     string  `json:"verify_choice,omitempty"` // 决策模型：窗口四级 ANSWER/RELATED/OUTDATED/UNKNOWN
-	VerifyConf       float64 `json:"verify_conf,omitempty"`   // 决策模型对该判断的置信度
-	RouteTier        string  `json:"route_tier,omitempty"`    // 置信信号档位：logprob / retrieval
+	Coverage         float64 `json:"coverage,omitempty"`         // 查询词覆盖度（语料内可达词口径）
+	Margin           float64 `json:"margin,omitempty"`           // (top1-top2)/top1：候选区分度
+	Support          float64 `json:"support,omitempty"`          // 答案的词面支持（SLC 离线代理，post-answer）
+	SupportN         int     `json:"support_terms,omitempty"`    // 支持度分母（答案内容词数；0 = 无可验证断言）
+	VerifyNoul       float64 `json:"verify_noul,omitempty"`      // 决策模型：答案事实点有依据（0..1）
+	VerifyChoice     string  `json:"verify_choice,omitempty"`    // 决策模型：窗口四级 ANSWER/RELATED/OUTDATED/UNKNOWN
+	VerifyConf       float64 `json:"verify_conf,omitempty"`      // 决策模型对该判断的置信度
+	DecisionApplied  bool    `json:"decision_applied,omitempty"` // 闸门/决策层是否真的跑了
+	DecisionReason   string  `json:"decision_reason,omitempty"`  // not-bound / error:… / ok
+	GateBlocked      bool    `json:"gate_blocked,omitempty"`     // 闸门是否真的拦下了这一题
+	DecisionNoul     float64 `json:"decision_noul,omitempty"`    // 闸门分
+	RouteTier        string  `json:"route_tier,omitempty"`       // 置信信号档位：logprob / retrieval
 	LatencyMS        int64   `json:"latency_ms"`
 	PromptTokens     int     `json:"prompt_tokens"`
 	CompletionTokens int     `json:"completion_tokens"`
@@ -98,9 +102,15 @@ type ItemOutcome struct {
 	Support       float64 // 答案词面支持（候选信号；post-answer）
 	SupportN      int     // 支持度分母（0 = 答案没有可验证的内容词）
 	// 决策模型的答案级判断（另一家族，天然非循环）：
-	VerifyNoul       float64 // 答案事实点是否都在窗口原文里有依据（0..1）
-	VerifyChoice     string  // 窗口与问题的关系（GaRAGe 四级）
-	VerifyConf       float64
+	VerifyNoul   float64 // 答案事实点是否都在窗口原文里有依据（0..1）
+	VerifyChoice string  // 窗口与问题的关系（GaRAGe 四级）
+	VerifyConf   float64
+	// 闸门/决策层留痕：有没有真决策、为什么、闸门分多少。没跑与
+	// "跑了但判不行"在读数里必须分得开（§三·八 降级可见）。
+	DecisionApplied  bool
+	DecisionReason   string
+	DecisionNoul     float64
+	GateBlocked      bool // 闸门是否真的拦下了这一题
 	Windows          int
 	LatencyMS        int64
 	PromptTokens     int
@@ -272,6 +282,10 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		VerifyNoul:        out.VerifyNoul,
 		VerifyChoice:      out.VerifyChoice,
 		VerifyConf:        out.VerifyConf,
+		DecisionApplied:   out.DecisionApplied,
+		DecisionReason:    out.DecisionReason,
+		DecisionNoul:      out.DecisionNoul,
+		GateBlocked:       out.GateBlocked,
 		LatencyMS:         latency,
 		PromptTokens:      out.PromptTokens,
 		CompletionTokens:  out.CompletionTokens,

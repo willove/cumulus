@@ -48,6 +48,18 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		}
 	}
 	stages = rerun
+	// 合成前闸门只在**绑了决策面**时注册（可选件的启用必须是显式的，
+	// 见文件头"不留空壳注册"）。缺席时 stage 列表逐字段不变。
+	if opts.Decision != nil {
+		withGate := make([]flow.Stage, 0, len(stages)+1)
+		for _, st := range stages {
+			if st.Name() == (RouteStage{}).Name() {
+				withGate = append(withGate, GateStage{Decision: opts.Decision, Query: query})
+			}
+			withGate = append(withGate, st)
+		}
+		stages = withGate
+	}
 	if opts.Abstain != nil {
 		withAbstain := make([]flow.Stage, 0, len(stages)+1)
 		for _, st := range stages {
@@ -191,6 +203,14 @@ type Options struct {
 	// 跑它再判一次（BioHarness 级联）。nil = 升级无执行处（死标签，
 	// 遥测里可见）。
 	Escalate func(*context.Context, Rewrite) ([]EvidenceWindow, error)
+	// Decision 是**合成前闸门**（§三·八）：问"这些窗口里到底有没有答案"，
+	// 没有就不合成、改为拒答。nil = 这一层没接决策面（**合法状态**，
+	// 此时行为与不启用闸门逐字段相同——TestGateAbsentIsNoop 钉死）。
+	//
+	// 为什么放合成前而不是合成后：事后判分时答案已经出笼；而"窗口里根本
+	// 没有答案却合出了很像样的答案"（真跑见过：9 条窗口全讲潜伏期长短，
+	// 答案写的是抗病毒治疗建议）只能在合成前拦。
+	Decision *DecisionDecider
 	// CtxBudget 合成前的上下文预算（按源配额/语义近重合并/窗口预算）。
 	// 零值 = 默认预算（MaxWindows 8 / PerSource 2 / Dedup 0.92——
 	// 0.92 是 Volt 论文的合并阈值，不是我们拍的）。

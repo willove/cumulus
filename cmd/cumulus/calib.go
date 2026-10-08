@@ -3,12 +3,55 @@ package main
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/willove/cumulus/internal/calib"
 	"github.com/willove/cumulus/internal/evalfcore"
 )
+
+// gateStats 汇总闸门状态并打印。**闸门跑没跑、拦没拦必须出现在读数里**：
+// 没生效与生效但没拦，是两回事，混在一起就等于没有可见性（真跑踩过：
+// 开关写错时读数与"闸门没装"完全一样）。
+func gateStats(state evalfcore.RunState) string {
+	decided, blocked := 0, 0
+	for _, r := range state.Results {
+		if r.DecisionApplied {
+			decided++
+		}
+		if r.GateBlocked {
+			blocked++
+		}
+	}
+	// 原因直方图：只报"decided=0"是不够的——**没接上 / 调用失败 / 判了放行**
+	// 三种"没拦下"必须分得开，否则读数里看不出闸门到底有没有在干活。
+	reasons := map[string]int{}
+	for _, r := range state.Results {
+		if r.DecisionReason != "" {
+			reasons[r.DecisionReason]++
+		}
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		label := k
+		if len(label) > 18 {
+			label = label[:18] + "…"
+		}
+		parts = append(parts, label+":"+itoa(reasons[k]))
+	}
+	if len(parts) == 0 {
+		return "gate(off)"
+	}
+	return "gate(decided=" + itoa(decided) + " blocked=" + itoa(blocked) + " {" + strings.Join(parts, ",") + "})"
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
 
 // alphaFromEnv 读目标错误率上限（CUMULUS_ALPHA，默认 0.10）。
 func alphaFromEnv() float64 {
