@@ -562,10 +562,14 @@ func evalItems() []evalfcore.Item {
 // 金标 fin-1（topk=3 时金标在窗外）。
 
 func judgeLabel(which string) string {
-	if which == "llm" {
-		return "llm"
+	switch which {
+	case "llm":
+		return "llm(等义)"
+	case "points":
+		return "points(分点覆盖)"
+	default:
+		return "none (N/A)"
 	}
-	return "none (N/A)"
 }
 
 // truncateRunes 截断到 n 个字符（eval 明细打印用）。
