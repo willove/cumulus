@@ -49,7 +49,18 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 
 	runID := streamRunID(req)
 	stream := harness.NewSSE(w, flusher.Flush)
-	em := harness.NewEmitter(stream)
+	// **边发边录**：同一份事件既推给 live 客户端，也落库供回放/断线恢复。
+	// 两处消费的是同一批事件，所以不可能不一致（回放不是"另一条链路"）。
+	var sink harness.Sink = stream
+	if s.Store != nil && strings.TrimSpace(req.Session) != "" {
+		if log, err := harness.OpenSession(r.Context(), s.Store, req.Session); err == nil {
+			sink = harness.NewRecording(stream, log)
+		} else {
+			// 落库是**增强**：接不上就照常发流（契约 1），只在日志里说一句。
+			fmt.Printf("session: 落库未启用（%v）\n", err)
+		}
+	}
+	em := harness.NewEmitter(sink)
 
 	emit := func(ev harness.Event) { _ = em.Emit(ev) }
 	if ev, err := harness.Started(runID, req.Question); err == nil {

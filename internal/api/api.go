@@ -228,6 +228,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/qa", s.handleQA)
 	mux.HandleFunc("/v1/qa/stream", s.handleQAStream)
+	mux.HandleFunc("/v1/sessions", s.handleSession)
+	mux.HandleFunc("/v1/sessions/", s.handleSession)
 	mux.HandleFunc("/v1/signal", s.handleSignal)
 	mux.HandleFunc("/v1/signals", s.handleSignals)
 	mux.HandleFunc("/v1/health", s.handleHealth)

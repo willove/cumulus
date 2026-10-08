@@ -306,10 +306,3 @@ func TestRecorderAssemblesAnswer(t *testing.T) {
 		t.Fatalf("replace must override: %q", got)
 	}
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
