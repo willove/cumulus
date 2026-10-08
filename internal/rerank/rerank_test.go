@@ -7,6 +7,7 @@ import (
 
 	"github.com/willove/cumulus/internal/deepcore"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/marks"
 )
 
 // stub 是假补全器：按提示词里的关键片段回指定文本，并记账。
@@ -114,13 +115,13 @@ func TestSelectSkipsCallWhenPoolFitsBudget(t *testing.T) {
 	}
 }
 
-func TestParseVerdictsCountsJudgements(t *testing.T) {
-	ys, judged := parseVerdicts("1:Y 2:N 3:是 4:否 5:y")
-	if judged != 5 {
-		t.Fatalf("must count every judgement, got %d", judged)
-	}
-	if len(ys) != 3 || ys[0] != 1 || ys[1] != 3 || ys[2] != 5 {
-		t.Fatalf("Y picks wrong: %v", ys)
+// 真模型的回包形状由 marks 包的测试统一钉住；这里钉"重排读得出"。
+func TestRerankUsesSharedVerdictParser(t *testing.T) {
+	for _, shape := range []string{"1:Y\n2:N", "1:Y 2:N", "[1]:Y [2]:N", "1 - 是  2 - 否"} {
+		got := marks.Parse(shape)
+		if got.Judged != 2 || len(got.Yes) != 1 || got.Yes[0] != 1 {
+			t.Fatalf("shape %q must parse via marks: %+v", shape, got)
+		}
 	}
 }
 

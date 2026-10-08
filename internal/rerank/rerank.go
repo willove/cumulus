@@ -18,13 +18,13 @@ package rerank
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/deepcore"
 	"github.com/willove/cumulus/internal/llm"
+	"github.com/willove/cumulus/internal/marks"
 )
 
 // LLM 是清单式交叉编码器（逐条 Y/N 判定）。
@@ -77,7 +77,8 @@ func (l *LLM) Select(ctx gocontext.Context, query string, pool []deepcore.Window
 	if err != nil {
 		return nil, fmt.Errorf("rerank: complete: %w", err)
 	}
-	ys, judged := parseVerdicts(resp.Text)
+	parsed := marks.Parse(resp.Text)
+	ys, judged := parsed.Yes, parsed.Judged
 	// 回退判据是"**没干活**"（judged 太少），不是"判 Y 少"。
 	// 真跑踩过：模型逐条判完 12 条、只给 1 条 Y，而那条恰好就是含答案的
 	// ——这是**精确**而非偷懒；用 yes<budget/2 当懒会把它误杀成回退（40/40
@@ -141,64 +142,6 @@ func (l *LLM) complete(ctx gocontext.Context, prompt string, cands int) (llm.Res
 		last = err
 	}
 	return llm.Response{}, last
-}
-
-// splitVerdict 把 "1:Y" / "3:否" 拆成 (编号, 1=Y / 0=N)；不像判定返回 -1。
-func splitVerdict(tok string) (int, int) {
-	runes := []rune(tok)
-	if len(runes) < 2 {
-		return 0, -1
-	}
-	var isY bool
-	switch runes[len(runes)-1] {
-	case 'Y', 'y', '是':
-		isY = true
-	case 'N', 'n', '否':
-	default:
-		return 0, -1
-	}
-	head := strings.Trim(string(runes[:len(runes)-1]), ":-—\u3000 ")
-	head = strings.Trim(head, "[]【】.、")
-	n, err := strconv.Atoi(head)
-	if err != nil {
-		return 0, -1
-	}
-	if isY {
-		return n, 1
-	}
-	return n, 0
-}
-
-// parseVerdicts 解析逐条判定，回 (判 Y 的编号, 实际判了几条)。
-//
-// 容忍的形状（都是模型真会给的）："1:Y" "1:Y 2:N" "1:Y\n2:N" "1:Y，2:N"
-// "[1]:Y" "1 - Y"。**编号与判定之间的分隔符不限于冒号**——真跑踩过：
-// 模型回 "1:Y\n2:N\n3:N" 完全正确，而解析器按 ":：" 找分隔符找不到，
-// 于是 judged=0，全部回退分数序（40/40 题），重排等于没跑。
-func parseVerdicts(text string) ([]int, int) {
-	var ys []int
-	judged := 0
-	for _, raw := range strings.FieldsFunc(text, func(r rune) bool {
-		return r == ' ' || r == '\n' || r == '\t' || r == ',' || r == '，' || r == ';' ||
-			r == '；' || r == '|' || r == '\r'
-	}) {
-		tok := strings.TrimSpace(raw)
-		tok = strings.Trim(tok, "[]【】.。、")
-		if tok == "" {
-			continue
-		}
-		// 尾部就是判定（ASCII 字母或中文"是/否"）；前面是编号（可夹 - : 空格）。
-		// 按 rune 切：中文判定是多字节，按字节切会编译不过也更易切错。
-		n, verdict := splitVerdict(tok)
-		if verdict < 0 {
-			continue
-		}
-		if verdict == 1 {
-			ys = append(ys, n)
-		}
-		judged++
-	}
-	return ys, judged
 }
 
 // topByScore 取分数前 k 条（回退口径，确定序：同分保原序）。

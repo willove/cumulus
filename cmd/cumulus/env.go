@@ -28,14 +28,30 @@ func llmFromEnvImpl() (*llm.OpenAICompleter, error) {
 	return llm.FromEnv(os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_API_KEY"), os.Getenv("LLM_CHAT_MODEL"))
 }
 
-// judgeFromEnv 装配判官：CUMULUS_JUDGE=llm 时用真提供方，否则 nil（N/A）。
+// judgeFromEnv 装配判官：
+//
+//	CUMULUS_JUDGE=llm    等义判官（默认口径：答案是否被金标支持）
+//	CUMULUS_JUDGE=points 分点覆盖判官（金标拆要点，逐条命中比例过阈）
+//
+// 两者读数不可混用：points 口径下"判对"= 覆盖了大部分要点，llm 口径下=
+// 整段被支持。多跳/长金标任务上 points 才是对的那个口径（真跑：DomainRAG
+// multidoc 等义判官 6.8%，而答案与金标常几乎逐字一致）。
 func judgeFromEnv(which string) (judge.Judge, error) {
-	if which != "llm" {
+	if which != "llm" && which != "points" {
 		return nil, nil
 	}
 	c, err := llmFromEnvImpl()
 	if err != nil {
 		return nil, err
+	}
+	if which == "points" {
+		thr := 0.0
+		if v := os.Getenv("CUMULUS_JUDGE_TAU"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
+				thr = f
+			}
+		}
+		return &judge.Points{Client: c, Threshold: thr}, nil
 	}
 	return &judge.LLM{Client: c}, nil
 }
