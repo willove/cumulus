@@ -4,6 +4,33 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 事件浏览器（viewer）：自证事件词表够用
+
+`internal/api/web/index.html`（embed 在 `/`，**零构建**：改它不需要 npm，一个二进制全带走）。
+
+它的职责不是"做个好看的界面"，而是**自证 harness 交出的信息是完整的**：
+一个只消费 SSE 的最简 UI 能显示进度、思考、引用、关联文档与收尾，说明事件词表够用；
+显示不出来的地方就是 **harness 的缺口**，而不是界面的锅。
+
+**显示的东西**：进度条（percent 是事件给的，UI 不自己编）+ 阶段时间线（中文标签 /
+这一步干了什么 / 耗时）+ 思考区（流式期间自动展开，收尾收成一行可再展开）+ 答案
+（增量 + 光标，`replace` 整段替换）+ 引用卡片（标题/原文/坐标/已回溯标记/打开原文）
++ 关联文档（带 why）+ 收尾（路由/覆盖/提交视图/事件数/丢失数）+ **逐帧记录表**。
+
+**契约自检是它的重点**：页面底部列出事件词表每一类的计数，并标红**没有处理分支**
+的类。加一条测试（`TestViewerHandlesEveryEventKind`）拿 `harness.Kinds()` 逐一对照
+源码里的 `case "xxx"`——**新增 Kind 忘了更新界面，这儿直接红**。这类漂移以前靠人记
+（然后某天新事件到了界面上一声不响）。
+
+**真跑读数**（真模型 + 真语料，`GET /` → 200 / 16.5KB）：
+```
+帧统计: started 1 · stage 22 · file 1 · content 18 · citations 1 · done 1 · [DONE] 1
+```
+`reasoning` 与 `related` 是 0 帧——**这是真实情况不是渲染缺口**：前者是该模型不吐
+`reasoning_content`，后者是本次只检索到 1 篇且被引用了（**没有未引用的**，也就不存在
+"关联文档"）。这两条正好说明为什么自检要**分开"没事件"与"没分支"**：前者是事实，
+后者是缺口。
+
 ## 对接 invoke-chat（@wil-works/evoke-chat）：adapter，不是 UI
 
 **harness 不做 UI**，界面已经有了：`@wil-works/evoke-chat`（v0.4.1，Vite/Vue）。

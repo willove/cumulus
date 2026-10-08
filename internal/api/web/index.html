@@ -3,138 +3,406 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cumulus</title>
+<title>cumulus · 事件浏览器</title>
+<!--
+  事件浏览器（viewer）：harness 事件流的**最简消费端**。
+
+  它的职责不是"做个好看的界面"，而是**自证事件词表够用**：
+  一个只消费 SSE 的最简 UI 能显示进度、思考、引用、关联文档与收尾，
+  说明 harness 交出的信息是完整的；显示不出来的，就是 harness 的缺口。
+
+  零构建：一个文件，随二进制 embed 走（go:embed）。改它不需要 npm。
+-->
 <style>
-  :root { --line:#e2e2e2; --dim:#666; --bg:#fafafa; }
+  :root {
+    --line:#e3e3e6; --dim:#6b6b76; --bg:#fafafc; --panel:#fff;
+    --accent:#2f6feb; --ok:#1a7f4b; --warn:#a8620a; --bad:#b3261e;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
   * { box-sizing:border-box; }
-  body { font:15px/1.6 -apple-system,"PingFang SC",sans-serif; margin:0; background:var(--bg); }
-  main { max-width:760px; margin:0 auto; padding:24px 16px 64px; }
-  h1 { font-size:18px; font-weight:600; }
-  .box { background:#fff; border:1px solid var(--line); border-radius:8px; padding:12px; margin:12px 0; }
-  input[type=text],textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
-  textarea { min-height:64px; resize:vertical; }
-  button { border:1px solid var(--line); background:#fff; border-radius:6px; padding:6px 14px; cursor:pointer; }
-  button:hover { background:#f0f0f0; }
+  body { margin:0; background:var(--bg); color:#1b1b1f;
+         font:15px/1.65 -apple-system,"PingFang SC","Microsoft Yahei",sans-serif; }
+  main { max-width:880px; margin:0 auto; padding:20px 16px 72px; }
+  h1 { font-size:18px; font-weight:650; margin:0 0 4px; }
+  h2 { font-size:14px; font-weight:600; margin:0 0 8px; color:var(--dim); letter-spacing:.02em; }
+  .sub { color:var(--dim); font-size:13px; margin:0 0 16px; }
+  .box { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+         padding:12px 14px; margin:12px 0; }
   .row { display:flex; gap:8px; align-items:center; }
-  .row > * { flex:0 0 auto; } .row > input { flex:1; }
-  .meta { color:var(--dim); font-size:13px; }
-  .cite { color:#0b5fff; cursor:pointer; text-decoration:underline; }
-  .sig { display:inline-block; background:#f2f2f2; border-radius:4px; padding:1px 6px; margin:1px 2px; font-size:12px; color:#333; }
-  .win { border-left:3px solid var(--line); padding:2px 8px; margin:4px 0; font-size:13px; }
-  .refused { color:#a33; }
-  #docview { white-space:pre-wrap; font-size:14px; }
-  mark { background:#fff3a3; }
-  details { margin-top:8px; } summary { cursor:pointer; color:var(--dim); font-size:13px; }
+  .row > input { flex:1; }
+  input[type=text] { width:100%; border:1px solid var(--line); border-radius:7px;
+                     padding:9px 11px; font:inherit; background:#fff; }
+  input[type=text]:focus { outline:2px solid rgba(47,111,235,.25); border-color:var(--accent); }
+  button { border:1px solid var(--line); background:#fff; border-radius:7px;
+           padding:8px 16px; cursor:pointer; font:inherit; }
+  button:hover:not(:disabled) { background:#f2f3f7; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover:not(:disabled) { background:#2a62d4; }
+
+  /* 进度条：percent 是事件给的，UI 不自己编 */
+  .bar { height:6px; background:#eceef4; border-radius:99px; overflow:hidden; margin:8px 0 4px; }
+  .bar > i { display:block; height:100%; width:0; background:var(--accent);
+             border-radius:99px; transition:width .25s ease; }
+  .bar.done > i { background:var(--ok); }
+  .pct { font-variant-numeric:tabular-nums; font-size:12px; color:var(--dim); }
+
+  ul.stages { list-style:none; margin:6px 0 0; padding:0; font-size:13px; }
+  ul.stages li { display:flex; gap:8px; padding:2px 0; border-bottom:1px dashed #eee; }
+  ul.stages li:last-child { border-bottom:0; }
+  ul.stages .nm { flex:0 0 172px; color:var(--dim); }
+  ul.stages .dt { flex:1; }
+  ul.stages .ms { flex:0 0 auto; color:var(--dim); font-variant-numeric:tabular-nums; }
+  li.now .nm { color:var(--accent); font-weight:600; }
+
+  .think { background:#fbfbfd; border-left:3px solid #d9dbe4; padding:8px 12px;
+           white-space:pre-wrap; font-size:13.5px; color:#3a3a44; max-height:320px; overflow:auto; }
+  .think.empty { color:var(--dim); }
+  details.sum > summary { cursor:pointer; color:var(--dim); font-size:13px; user-select:none; }
+  details.sum[open] > summary { margin-bottom:6px; }
+
+  .answer { white-space:pre-wrap; font-size:16px; }
+  .caret { display:inline-block; width:2px; height:1.05em; vertical-align:-2px;
+           background:var(--accent); animation:blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity:0 } }
+
+  .refs { display:grid; gap:8px; }
+  .ref { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13.5px; }
+  .ref b { font-weight:600; }
+  .ref .meta { color:var(--dim); font-size:12px; margin-top:2px; }
+  .ref a { color:var(--accent); text-decoration:none; }
+  .ref a:hover { text-decoration:underline; }
+  .tag { display:inline-block; font-size:11px; color:var(--dim); border:1px solid var(--line);
+         border-radius:5px; padding:0 5px; margin-left:6px; }
+
+  table.frames { width:100%; border-collapse:collapse; font:12px/1.5 var(--mono); }
+  table.frames td { padding:2px 6px; border-bottom:1px solid #f0f0f3; vertical-align:top; }
+  table.frames td.k { color:var(--accent); white-space:nowrap; }
+  table.frames td.s { color:var(--dim); text-align:right; white-space:nowrap; }
+  .counts { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .counts span { font:12px var(--mono); border:1px solid var(--line); border-radius:6px; padding:1px 6px; }
+  .counts span.zero { color:#b9b9c2; }
+  .bad { color:var(--bad); }
+  .kv { font:12px var(--mono); color:var(--dim); word-break:break-all; }
 </style>
 </head>
 <body>
 <main>
-  <h1>cumulus</h1>
+  <h1>cumulus · 事件浏览器</h1>
+  <p class="sub">最简消费端：只读 <code>/v1/qa/stream</code> 的 SSE 帧。它能显示的东西，就是 harness 已经交出的东西。</p>
+
   <div class="box">
     <div class="row">
-      <input id="q" type="text" placeholder="问点什么（回车即问）">
-      <button onclick="ask()">问</button>
+      <input id="q" type="text" placeholder="问一个问题（回车即问）" value="专利法是为了什么制定的？">
+      <button id="go" class="primary">提问</button>
+      <button id="stop" disabled>停止</button>
     </div>
+    <div class="bar" id="bar"><i></i></div>
+    <div class="pct" id="pct">未开始</div>
   </div>
-  <div id="answer"></div>
+
   <div class="box">
-    <div class="row">
-      <input id="url" type="text" placeholder="贴一个链接，或下面粘文本">
-      <button onclick="ingestUrl()">存链接</button>
-    </div>
-    <textarea id="body" placeholder="或粘贴一段文本"></textarea>
-    <div class="row" style="margin-top:8px">
-      <button onclick="ingestText()">存文本</button>
-      <span id="ingestmsg" class="meta"></span>
-    </div>
+    <h2>阶段时间线</h2>
+    <ul class="stages" id="stages"><li style="color:var(--dim)">还没有运行</li></ul>
   </div>
-  <div id="docview" class="box" style="display:none"></div>
-  <div class="meta" style="margin-top:24px">答案带引用；点引用看原文高亮。上面的信号是“当时为什么这么答”。</div>
+
+  <div class="box">
+    <details class="sum" id="thinkWrap" open>
+      <summary id="thinkSum">思考过程</summary>
+      <div class="think empty" id="think">（等待思考输出）</div>
+    </details>
+  </div>
+
+  <div class="box">
+    <h2>答案</h2>
+    <div class="answer" id="ans"><span style="color:var(--dim)">还没有答案。</span></div>
+  </div>
+
+  <div class="box" id="refsBox" style="display:none">
+    <h2>引用（可回溯）</h2>
+    <div class="refs" id="refs"></div>
+  </div>
+
+  <div class="box" id="relBox" style="display:none">
+    <h2>关联文档（取回但未引用）</h2>
+    <div class="refs" id="rel"></div>
+  </div>
+
+  <div class="box" id="doneBox" style="display:none">
+    <h2>收尾</h2>
+    <div class="kv" id="done"></div>
+  </div>
+
+  <div class="box">
+    <details class="sum">
+      <summary>事件契约自检：逐帧记录与词表覆盖</summary>
+      <div class="counts" id="counts"></div>
+      <div class="kv" id="contract" style="margin:6px 0"></div>
+      <table class="frames"><tbody id="frames"></tbody></table>
+    </details>
+  </div>
 </main>
+
 <script>
+// 事件词表（与 internal/harness 的 Kind 一一对应）。**每种都要有处理分支**——
+// 漏一种，底部自检会把那一行标红。这正是这个页面存在的意义。
+const KINDS = ["started","stage","file","reasoning","content","citations","related","error","done"];
+const seen = Object.fromEntries(KINDS.map(k => [k, 0]));
+const handled = Object.fromEntries(KINDS.map(k => [k, false]));
+
 const $ = id => document.getElementById(id);
-const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let ctrl = null;
+let ansBuf = "";
 
-async function ask() {
-  const q = $('q').value.trim(); if (!q) return;
-  const r = await fetch('/v1/qa', {method:'POST', headers:{'Content-Type':'application/json'},
-    lastQuestion = q;
-    body: JSON.stringify({question:q, session:'web'})});
-  const d = await r.json();
-  render(d);
+$("go").onclick = () => { const q = $("q").value.trim(); if (q) run(q); };
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") $("go").click(); });
+$("stop").onclick = () => { if (ctrl) ctrl.abort(); };
+
+function reset() {
+  const ul = $("stages");
+  ul.innerHTML = '<li style="color:var(--dim)">运行中…</li>';
+  ul.dataset.init = "";
+  $("think").textContent = "（等待思考输出）";
+  $("think").classList.add("empty");
+  $("thinkWrap").open = true;
+  $("thinkSum").textContent = "思考过程";
+  $("ans").innerHTML = '<span style="color:var(--dim)">等待答案…</span>';
+  ansBuf = "";
+  ["refsBox", "relBox", "doneBox"].forEach(id => $(id).style.display = "none");
+  $("frames").innerHTML = "";
+  $("bar").classList.remove("done");
+  $("bar").firstElementChild.style.width = "0%";
+  $("pct").textContent = "运行中…";
+  for (const k of KINDS) { seen[k] = 0; handled[k] = false; }
 }
 
-function render(d) {
-  const a = $('answer');
-  if (d.refused) {
-    a.innerHTML = '<div class="box refused">不知道：' + esc(d.refusal_reason || '证据不足') + '</div>' + meta(d);
-  } else {
-    const cites = (d.citations||[]).map(c => '<span class="cite" onclick="showDoc(\'' + c + '\')">' + esc(c) + '</span>').join(' ');
-    a.innerHTML = '<div class="box"><div>' + esc(d.answer) + '</div><div class="meta" style="margin-top:6px">引用：' + cites + '</div></div>' + meta(d);
+async function run(question) {
+  reset();
+  $("go").disabled = true; $("stop").disabled = false;
+  ctrl = new AbortController();
+  try {
+    const resp = await fetch("/v1/qa/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, session: "viewer" }),
+      signal: ctrl.signal
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status + " " + (await resp.text()));
+    await readSSE(resp);
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      $("pct").textContent = "已停止";
+    } else {
+      handle({ kind: "error", error: String((e && e.message) || e) });
+    }
+  } finally {
+    $("go").disabled = false; $("stop").disabled = true;
+    renderCounts();
   }
-  window.scrollTo(0,0);
 }
 
-function meta(d) {
-  const r = d.route || {}, s = r.signals || {};
-  const chips = [
-    '路由:' + r.action,
-    '覆盖:' + (s.coverage??0).toFixed(2),
-    '区分:' + (s.margin??0).toFixed(2),
-    '置信:' + (s.confidence??0).toFixed(2),
-  ];
-  if (d.escalation && d.escalation.executed) chips.push('已升级');
-  if (d.reuse && d.reuse.hit) chips.push('复用命中');
-  if (d.eviction && (d.eviction.merged + d.eviction.dropped) > 0)
-    chips.push('驱逐:合' + d.eviction.merged + '/丢' + d.eviction.dropped);
-  if (d.prior && d.prior.length)
-    chips.push('prior×' + d.prior.length + ' 置顶' + (d.prior[0].score).toFixed(2));
-  const wins = (d.windows||[]).map(w =>
-    '<div class="win">' + esc(w.title || w.source_id) + ' · ' + esc(w.span) + ' · ' + w.score.toFixed(2) +
-    '<br><span class="meta">' + esc((w.text||'').slice(0,80)) + '</span></div>').join('');
-  return '<div class="box"><div>' + chips.map(c=>'<span class="sig">'+esc(c)+'</span>').join('') +
-    '<div class="meta" style="margin-top:4px">' + esc(r.reason||'') + '</div>' +
-    '<details><summary>证据窗口 ' + (d.windows||[]).length + ' 个</summary>' + wins + '</details></div>';
+// SSE 解析：fetch + ReadableStream（EventSource 不能 POST，所以用不了它）。
+async function readSSE(resp) {
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const frame = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const line = frame.split("\n").find(l => l.startsWith("data: "));
+      if (!line) continue;
+      const payload = line.slice(6);
+      if (payload === "[DONE]") return;
+      try { handle(JSON.parse(payload)); } catch (err) { console.warn("帧不是 JSON", payload); }
+    }
+  }
 }
 
-let lastQuestion = "";
-
-async function showDoc(cite) {
-  const [id, span] = cite.split('#');
-  // 引用点击 = 使用信号（"长"的地基）：这条证据被真看了。fire-and-forget，
-  // 失败不影响看文档。
-  fetch('/v1/signal', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({session:'web', kind:'cite', target: cite, question: lastQuestion})}).catch(()=>{});
-  const r = await fetch('/v1/doc/' + encodeURIComponent(id) + '?span=' + encodeURIComponent(span||''));
-  const d = await r.json();
-  const box = $('docview');
-  if (d.error) { box.style.display='block'; box.textContent = d.error; return; }
-  const body = d.body || '';
-  let html;
-  if (d.span_end > d.span_start) {
-    html = esc(body.slice(0, d.span_start)) + '<mark>' + esc(body.slice(d.span_start, d.span_end)) + '</mark>' + esc(body.slice(d.span_end));
-  } else { html = esc(body); }
-  box.style.display = 'block';
-  box.innerHTML = '<div class="meta">' + esc(id) + (span?' · '+esc(span):'') + '</div>' + html;
-  box.scrollIntoView({behavior:'smooth'});
+function row(kind, seq, at, note) {
+  const tr = document.createElement("tr");
+  tr.innerHTML = '<td class="k">' + escapeHTML(kind) + "</td><td>" + escapeHTML(note || "") +
+    '</td><td class="s">#' + seq + " " + at + "ms</td>";
+  $("frames").appendChild(tr);
 }
 
-async function ingestText() {
-  const body = $('body').value.trim(); if (!body) return;
-  await doIngest({body});
-}
-async function ingestUrl() {
-  const url = $('url').value.trim(); if (!url) return;
-  await doIngest({url});
-}
-async function doIngest(payload) {
-  const r = await fetch('/v1/ingest', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-  const d = await r.json();
-  $('ingestmsg').textContent = d.error ? ('失败：' + d.error) : ('已存 · 库内 ' + d.corpus_docs + ' 篇 · ' + d.bytes + ' 字');
-  if (!d.error) { $('body').value=''; $('url').value=''; }
+function handle(ev) {
+  if (ev.kind) seen[ev.kind] = (seen[ev.kind] || 0) + 1;
+  switch (ev.kind) {
+    case "started":
+      handled.started = true;
+      row("started", ev.seq, ev.at_ms, ev.question);
+      break;
+
+    case "stage":
+      handled.stage = true;
+      if ((ev.stage || {}).phase === "done") stageDone(ev.stage, ev);
+      else stageStart(ev.stage, ev);
+      break;
+
+    case "file":
+      handled.file = true;
+      stageHit(ev.file || {}, ev);
+      break;
+
+    case "reasoning": {
+      handled.reasoning = true;
+      const t = (ev.reasoning || {}).text || "";
+      const el = $("think");
+      el.classList.remove("empty");
+      el.textContent += t;
+      $("thinkWrap").open = true;   // 流式期间自动展开
+      $("thinkSum").textContent = "思考过程（" + el.textContent.length + " 字）";
+      row("reasoning", ev.seq, ev.at_ms, t.slice(0, 60));
+      break;
+    }
+
+    case "content": {
+      handled.content = true;
+      const c = ev.content || {};
+      // replace = 整段替换（合成器改写答案时）；否则追加
+      ansBuf = c.replace ? (c.text || "") : ansBuf + (c.text || "");
+      $("ans").innerHTML = escapeHTML(ansBuf) + '<span class="caret"></span>';
+      row("content", ev.seq, ev.at_ms, (c.text || "").slice(0, 60));
+      break;
+    }
+
+    case "citations":
+      handled.citations = true;
+      $("refs").innerHTML = (ev.citations || []).map(function (c) {
+        return '<div class="ref"><b>' + escapeHTML(c.title || c.doc_id) + "</b>" +
+          '<span class="tag">' + (c.resolved ? "已回溯" : "未回溯") + "</span>" +
+          "<div>" + escapeHTML(c.text || "") + "</div>" +
+          '<div class="meta">' + escapeHTML(c.doc_id) + (c.span ? " · " + escapeHTML(c.span) : "") +
+          ' · <a href="/v1/doc/' + encodeURIComponent(c.doc_id) + '" target="_blank">打开原文</a></div></div>';
+      }).join("");
+      $("refsBox").style.display = "block";
+      row("citations", ev.seq, ev.at_ms, (ev.citations || []).length + " 条");
+      break;
+
+    case "related":
+      handled.related = true;
+      $("rel").innerHTML = (ev.related || []).map(function (r) {
+        return '<div class="ref"><b>' + escapeHTML(r.title || r.doc_id) + "</b>" +
+          '<span class="tag">' + escapeHTML(r.why || "related") + "</span>" +
+          "<div>" + escapeHTML(r.preview || "") + "</div>" +
+          '<div class="meta">' + escapeHTML(r.doc_id) +
+          ' · <a href="/v1/doc/' + encodeURIComponent(r.doc_id) + '" target="_blank">打开原文</a></div></div>';
+      }).join("");
+      $("relBox").style.display = "block";
+      row("related", ev.seq, ev.at_ms, (ev.related || []).length + " 条");
+      break;
+
+    case "error":
+      handled.error = true;
+      $("pct").textContent = "错误";
+      row("error", ev.seq, ev.at_ms, ev.error || "");
+      break;
+
+    case "done": {
+      handled.done = true;
+      const d = ev.done || {};
+      const bits = [];
+      if (d.route_action) bits.push("路由 " + d.route_action);
+      if (d.coverage != null) bits.push("覆盖 " + d.coverage);
+      if (d.refused) bits.push("拒答：" + (d.refusal_reason || ""));
+      if (d.committed) bits.push("提交视图 " + d.committed);
+      $("done").textContent = bits.join(" · ");
+      $("doneBox").style.display = "block";
+      $("bar").classList.add("done");
+      $("bar").firstElementChild.style.width = "100%";
+      $("pct").textContent = "完成 · 事件 " + ((d.counts || {}).delivered || "?") +
+        " · 丢失 " + ((d.counts || {}).dropped || 0);
+      // 收尾后思考区收成一行，可再展开
+      $("thinkWrap").open = false;
+      $("thinkSum").textContent = "思考过程（" + $("think").textContent.length + " 字，点击展开）";
+      row("done", ev.seq, ev.at_ms, d.counts ? JSON.stringify(d.counts) : "");
+      break;
+    }
+
+    default:
+      row(ev.kind || "?", ev.seq, ev.at_ms, "**未处理**");
+  }
+  renderCounts();
 }
 
-$('q').addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
+function stageList() {
+  const ul = $("stages");
+  if (ul.dataset.init !== "1") { ul.innerHTML = ""; ul.dataset.init = "1"; }
+  return ul;
+}
+
+function stageStart(s, ev) {
+  s = s || {};
+  const li = document.createElement("li");
+  li.id = "st-" + s.name;
+  li.className = "now";
+  li.innerHTML = '<span class="nm">' + escapeHTML(s.label || s.name) + "</span>" +
+    '<span class="dt">' + escapeHTML(s.detail || "…") + "</span>" +
+    '<span class="ms"></span>';
+  stageList().appendChild(li);
+  row("stage", ev.seq, ev.at_ms, s.name + " start");
+}
+
+function stageDone(s, ev) {
+  s = s || {};
+  const li = document.getElementById("st-" + s.name);
+  if (li) {
+    li.classList.remove("now");
+    li.querySelector(".dt").textContent = s.detail || "";
+    li.querySelector(".ms").textContent = s.duration_ms ? s.duration_ms + "ms" : "";
+  }
+  if (s.percent) {
+    $("bar").firstElementChild.style.width = Math.min(100, s.percent) + "%";
+    $("pct").textContent = (s.label || s.name) + " · " + Math.round(s.percent) + "%";
+  }
+  row("stage", ev.seq, ev.at_ms, s.name + " done" + (s.duration_ms ? " " + s.duration_ms + "ms" : ""));
+}
+
+function stageHit(f, ev) {
+  let li = document.getElementById("st-evidence-supply");
+  if (!li) {
+    stageStart({ name: "evidence-supply", label: "检索证据窗口", detail: "" }, ev);
+    li = document.getElementById("st-evidence-supply");
+  }
+  li.classList.remove("now");
+  li.querySelector(".dt").textContent = "命中 #" + f.rank + " " + (f.title || f.doc_id) +
+    "（" + Number(f.score || 0).toFixed(2) + "）";
+  row("file", ev.seq, ev.at_ms, f.doc_id + " #" + f.rank + " " + Number(f.score || 0).toFixed(2));
+}
+
+// 自检：每种事件是否都有处理分支（没分支 → 标红，等于界面漏了新事件）。
+function renderCounts() {
+  const box = $("counts");
+  box.innerHTML = "";
+  const missing = [];
+  for (const k of KINDS) {
+    const el = document.createElement("span");
+    const n = seen[k] || 0;
+    el.textContent = k + ":" + n;
+    if (n === 0) el.className = "zero";
+    if (!handled[k]) { el.className += " bad"; missing.push(k); }
+    box.appendChild(el);
+  }
+  const note = document.createElement("span");
+  note.textContent = missing.length ? "未处理：" + missing.join(",") : "词表全覆盖";
+  if (missing.length) note.className = "bad";
+  box.appendChild(note);
+  $("contract").textContent = missing.length
+    ? "标红 = 事件到了但界面没分支：请在源码里补 case \"" + missing[0] + "\"。"
+    : "所有事件类型都有处理分支——事件流是完整的。";
+}
+
+function escapeHTML(s) {
+  return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+renderCounts();
 </script>
 </body>
 </html>

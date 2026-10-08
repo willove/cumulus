@@ -306,3 +306,14 @@ func (e Event) Validate() error {
 
 // sinceMS 是相对起点的毫秒（AtMS 的来源）。
 func sinceMS(start time.Time) int64 { return time.Since(start).Milliseconds() }
+
+// Kinds 是事件词表的全集（按流程顺序）。
+//
+// 它的用处是**让"消费端漏了新事件"变成一件可测的事**：宿主/测试拿它对照自己的
+// 分发逻辑，缺一个就红。新增 Kind 时忘了通知消费方——这类漂移靠人记是记不住的。
+func Kinds() []Kind {
+	return []Kind{
+		KindStarted, KindStage, KindFile, KindReasoning, KindContent,
+		KindCitations, KindRelated, KindError, KindDone,
+	}
+}
