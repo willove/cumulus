@@ -33,10 +33,13 @@ import (
 // 运行中不热换——热插拔是注册面的事，HTTP 面只把装配结果暴露出去。
 // 语料与索引例外：摄入是运行时事件，索引跟着重建（个人库规模，毫秒级）。
 type Server struct {
-	Store    corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
-	Synth    qaflow.SynthFunc
-	Embedder embedPkg.Embedder // 可空：nil = 语义重排/语义尺缺席
-	Reuse    *knowledge.ReuseStore
+	Store corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
+	Synth qaflow.SynthFunc
+	// StreamSynth 是**可选**能力：填了它，流式端点会把思考与正文逐段发出。
+	// nil = 只支持整条（那就发整段 content 帧，不假装流式）。
+	StreamSynth qaflow.StreamSynthFunc
+	Embedder    embedPkg.Embedder // 可空：nil = 语义重排/语义尺缺席
+	Reuse       *knowledge.ReuseStore
 	// Signals 使用信号库（"长"的地基）：再问族服务端推导，cite 族前端
 	// 钩子。nil = 不记（库是可选件，缺了问答照常）。
 	Signals  *knowledge.SignalStore

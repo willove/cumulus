@@ -31,7 +31,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
 		RouteStage{Config: opts.Route},
 		EscalateStage{Retrieve: opts.Escalate, Expand: opts.Expander, Analyze: opts.Analyzer, Weighted: opts.WeightedRetrieve},
-		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
+		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor, Stream: opts.StreamSynth, Emit: opts.Emitter, RunID: opts.RunID},
 		AccountStage{},
 	}
 	// 第二次事实判定：escalate 在驱逐**之后**又换过一轮窗，第一次判定
@@ -152,7 +152,7 @@ func bareRunner(query string, retrieve func(*context.Context, Rewrite) ([]Eviden
 			RewriteStage{Query: query},
 			EvidenceStage{Retrieve: retrieve},
 			RouteStage{Config: opts.Route},
-			SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor},
+			SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor, Stream: opts.StreamSynth, Emit: opts.Emitter, RunID: opts.RunID},
 			AccountStage{},
 		},
 		View: context.CommittedView{
@@ -218,6 +218,9 @@ type Options struct {
 	Emitter *harness.Emitter
 	// RunID 进每一帧事件（外部按它对账/回放）。空 = 不带（一次性问答无编号）。
 	RunID string
+	// StreamSynth 是**可选**的流式合成能力（能力在接线处声明，见 StreamSynthFunc
+	// 的注释：方法值会把方法丢掉，断言找不回来）。nil = 整条路径。
+	StreamSynth StreamSynthFunc
 	// CtxBudget 合成前的上下文预算（按源配额/语义近重合并/窗口预算）。
 	// 零值 = 默认预算（MaxWindows 8 / PerSource 2 / Dedup 0.92——
 	// 0.92 是 Volt 论文的合并阈值，不是我们拍的）。

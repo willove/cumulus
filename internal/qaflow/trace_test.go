@@ -164,3 +164,94 @@ func TestCommittedStringCarriesVersions(t *testing.T) {
 		}
 	}
 }
+
+// 流式合成 + 发射器 → 思考与正文**分帧**流进事件；没接流式能力时走整条。
+//
+// 这条测试钉的是本轮踩过的坑：能力必须**在接线处显式声明**。方法值
+// （l.Synthesize）一旦传进 Options.Synth 就只是普通函数类型，流式方法在类型
+// 层面消失，靠断言找不回来——真跑表现是端点正常、事件正常、但正文仍是整段，
+// 一眼看不出来。
+type streamStub struct {
+	used bool
+}
+
+func (s *streamStub) Synthesize(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
+	a := Answer{Text: "整条答案"}
+	if len(ws) > 0 {
+		a.Citations = []string{ws[0].SourceID + "#" + ws[0].Span}
+	}
+	return a, Usage{}, nil
+}
+
+func (s *streamStub) stream(_ string, ws []EvidenceWindow, _ facts.Report, fn PieceFunc) (Answer, Usage, error) {
+	s.used = true
+	if fn != nil {
+		_ = fn(Piece{Reasoning: "先看覆盖度"})
+		_ = fn(Piece{Content: "答案上"})
+		_ = fn(Piece{Content: "半句"})
+	}
+	a := Answer{Text: "答案上半句"}
+	if len(ws) > 0 {
+		a.Citations = []string{ws[0].SourceID + "#" + ws[0].Span}
+	}
+	return a, Usage{}, nil
+}
+
+func TestSynthesizeStageStreamsWhenCapabilityDeclared(t *testing.T) {
+	stub := &streamStub{}
+	rec := harness.NewRecorder()
+	r := Runner("连接池最大连接数是多少", BM25Evidence(traceCorpus(), 3, 60), stub.Synthesize, Options{
+		Emitter:     harness.NewEmitter(rec),
+		RunID:       "run-stream",
+		StreamSynth: stub.stream,
+	})
+	c := context.New("trace-stream")
+	if err := r.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	if !stub.used {
+		t.Fatal("declared streaming capability must be used (method values lose it otherwise)")
+	}
+	var reason, content int
+	var acc string
+	for _, ev := range rec.All() {
+		switch ev.Kind {
+		case harness.KindReasoning:
+			reason++
+		case harness.KindContent:
+			content++
+			acc += ev.Content.Text
+		}
+	}
+	if reason == 0 || content < 2 {
+		t.Fatalf("thinking and answer must arrive as separate frames: reasoning=%d content=%d", reason, content)
+	}
+	if acc != "答案上半句" {
+		t.Fatalf("incremental content must assemble into the answer: %q", acc)
+	}
+}
+
+// 能力缺席 = 整条路径（不是错误），且答案仍正确。
+func TestSynthesizeStageFallsBackWithoutStreaming(t *testing.T) {
+	stub := &streamStub{}
+	rec := harness.NewRecorder()
+	r := Runner("连接池最大连接数是多少", BM25Evidence(traceCorpus(), 3, 60), stub.Synthesize, Options{
+		Emitter: harness.NewEmitter(rec), RunID: "run-nostream",
+	})
+	c := context.New("trace-nostream")
+	if err := r.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	if stub.used {
+		t.Fatal("without a declared capability the whole-path must be used")
+	}
+	ans, _ := context.Get(c, KeyAnswer)
+	if ans.Text != "整条答案" {
+		t.Fatalf("answer must come from the whole path: %q", ans.Text)
+	}
+	for _, ev := range rec.All() {
+		if ev.Kind == harness.KindContent {
+			t.Fatalf("no emitter stream means no content frames (only stages/windows): %v", rec.Kinds())
+		}
+	}
+}

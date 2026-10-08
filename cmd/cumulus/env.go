@@ -57,22 +57,46 @@ func loadDotEnv(path string) {
 
 // pickSynth 按选择装配合成面：offline（默认，无网络）或 llm（真提供方）。
 // llm 缺配置时直接报错——不许静默回落到桩。
-func pickSynth(which string) (qaflow.SynthFunc, string, error) {
+// pickSynth 装合成面，并**顺带声明它有没有流式能力**。
+//
+// 为什么第二个返回值不能省：流式能力必须**在接线处显式声明**——把
+// `l.Synthesize`（方法值）传进 Options.Synth 之后，`SynthesizeStream` 这个方法
+// 在类型层面就消失了，靠类型断言找不回来（真跑踩过：端点正常、事件正常，
+// 但正文仍是整段）。所以这里同时把流式那条腿交出来，nil = 只支持整条。
+func pickSynth(which string) (qaflow.SynthFunc, qaflow.StreamSynthFunc, string, error) {
 	switch which {
 	case "", "offline":
 		return func(q string, ws []qaflow.EvidenceWindow, fx facts.Report) (qaflow.Answer, qaflow.Usage, error) {
 			return synth.Offline(q, ws, fx)
-		}, "offline", nil
+		}, nil, "offline", nil
 	case "llm":
 		c, err := llmFromEnvImpl()
 		if err != nil {
-			return nil, "", err
+			return nil, nil, "", err
 		}
 		l := &synth.LLM{Client: c}
 		label := "llm:" + c.Model + "@" + hostOf(c.BaseURL)
-		return l.Synthesize, label, nil
+		// 上游补全器不支持流式（llm.Streamer 没实现）时也不接这条腿——
+		// 免得"接了但每步都退回调"，读数上却显示流式开着。
+		if !llm.SupportsStream(c) {
+			return l.Synthesize, nil, label + " (no-stream)", nil
+		}
+		return l.Synthesize, adaptSynthStream(l), label, nil
 	default:
-		return nil, "", errUnknownSynth(which)
+		return nil, nil, "", errUnknownSynth(which)
+	}
+}
+
+// adaptSynthStream 把 synth 的 PieceFunc 形状翻译成 qaflow 的（apps/cmd 这条
+// 边是合法的：pipeline 不反向依赖 capabilities，所以形状在两侧各声明一次）。
+func adaptSynthStream(l *synth.LLM) qaflow.StreamSynthFunc {
+	return func(q string, ws []qaflow.EvidenceWindow, fx facts.Report, fn qaflow.PieceFunc) (qaflow.Answer, qaflow.Usage, error) {
+		return l.SynthesizeStream(q, ws, fx, func(p synth.StreamPiece) error {
+			if fn == nil {
+				return nil
+			}
+			return fn(qaflow.Piece{Reasoning: p.Reasoning, Content: p.Content})
+		})
 	}
 }
 

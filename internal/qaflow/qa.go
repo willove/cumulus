@@ -16,6 +16,7 @@ import (
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/facts"
+	"github.com/willove/cumulus/internal/harness"
 	"github.com/willove/cumulus/internal/prior"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -243,6 +244,27 @@ func (RouteStage) Verify(c *context.Context) error {
 // 从哪来，契约不变：每个断言挂窗口，挂不上的不许存在。
 type SynthFunc func(question string, windows []EvidenceWindow, fx facts.Report) (Answer, Usage, error)
 
+// PieceFunc 收一段流式输出（思考与正文分开标）。与 synth.PieceFunc 形状一致，
+// 但**在 pipeline 侧重新声明**：pipeline 不能反向依赖 capabilities（boundary
+// 门禁会拦），所以这里只声明"流程需要什么形状"，由 apps 层做适配。
+type PieceFunc func(piece Piece) error
+
+// Piece 是一段流式输出。
+type Piece struct {
+	Reasoning string // 思考过程（要全部显示）
+	Content   string // 答案正文
+}
+
+// StreamSynthFunc 是**可选**的流式合成能力：填了它，流程边收边发事件；
+// nil 就走整条路径（合法状态，不是错误）。
+//
+// 为什么是**显式字段**而不是"看合成器有没有实现某个接口"（真跑踩过）：
+// `l.Synthesize` 是**方法值**——传进 Options.Synth 之后它就是一个普通函数类型，
+// `SynthesizeStream` 这个方法**在类型层面已经不存在了**，断言永远失败、能力静默
+// 消失（真跑表现：流式端点跑通、事件照发、但正文仍是整段 replace，一眼看不出来）。
+// 能力靠**接线处声明**，不靠运行时猜。
+type StreamSynthFunc func(question string, windows []EvidenceWindow, fx facts.Report, fn PieceFunc) (Answer, Usage, error)
+
 // SynthesizeStage 只读窗口与改写。路由是 refuse 时标记拒答、不调合成面；
 // 非拒答而没有合成面是配置错误，直接失败——不许悄悄产无证据文本。
 //
@@ -257,6 +279,13 @@ type SynthesizeStage struct {
 	Query          string
 	Synth          SynthFunc
 	GroundingFloor float64 // 0 = 不启用语义尺（缺 embedder 时的默认）
+	// Emit 非 nil 且合成器实现了 StreamSynth 时，**边收边发** reasoning/content
+	// 事件（思考过程要"全部显示"，那就必须边到边显示，而不是等跑完再倒出来）。
+	// 三种情况都合法：没有 emitter（不发）、合成器不支持流式（走整条）、
+	// 消费者断开（事件出口吞掉错误，问答照常——降级可见见 harness 契约 3）。
+	Stream StreamSynthFunc // 非 nil = 合成器支持流式（能力在接线处声明）
+	Emit   *harness.Emitter
+	RunID  string
 }
 
 func (SynthesizeStage) Name() string { return "synthesize" }
@@ -264,6 +293,31 @@ func (SynthesizeStage) Reads() []string {
 	return []string{KeyWindows.String(), KeyRoute.String(), KeyAbstain.String()}
 }
 func (SynthesizeStage) Writes() []string { return []string{KeyAnswer.String(), KeySynthUsage.String()} }
+func (s SynthesizeStage) synthFunc() SynthFunc {
+	if s.Stream == nil || s.Emit == nil {
+		return s.Synth // 没装出口或合成器不支持流式 = 整条路径（不是错误）
+	}
+	return func(q string, ws []EvidenceWindow, fx facts.Report) (Answer, Usage, error) {
+		return s.Stream(q, ws, fx, s.pieces)
+	}
+}
+
+// pieces 把流式片段翻成事件：思考与正文**分帧**，不混。
+func (s SynthesizeStage) pieces(p Piece) error {
+	if p.Reasoning != "" {
+		if ev, err := harness.Reasoning(s.RunID, p.Reasoning); err == nil {
+			_ = s.Emit.Emit(ev)
+		}
+	}
+	if p.Content != "" {
+		// 增量 append（replace 留空）：合成器的流式输出就是增量。
+		if ev, err := harness.Content(s.RunID, p.Content, false); err == nil {
+			_ = s.Emit.Emit(ev)
+		}
+	}
+	return nil
+}
+
 func (s SynthesizeStage) Run(c *context.Context) error {
 	d, ok := context.Get(c, KeyRoute)
 	if !ok {
@@ -282,7 +336,7 @@ func (s SynthesizeStage) Run(c *context.Context) error {
 	}
 	ws, _ := context.Get(c, KeyWindows)
 	fx, _ := context.Get(c, KeyFactReport)
-	ans, usage, err := s.Synth(s.Query, ws, fx)
+	ans, usage, err := s.synthFunc()(s.Query, ws, fx)
 	if err != nil {
 		return err
 	}

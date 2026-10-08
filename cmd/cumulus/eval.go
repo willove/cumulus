@@ -256,7 +256,11 @@ func runEval(ctx gocontext.Context) error {
 	if err != nil {
 		return err
 	}
-	synthFn, synthLabel, err := pickSynth(os.Getenv("CUMULUS_SYNTH"))
+	synthFn, streamFn, synthLabel, err := pickSynth(os.Getenv("CUMULUS_SYNTH"))
+	// 评测侧目前不发事件流（它要的是逐题指标，不是帧序列），但流式能力
+	// 仍显式接上：**能力声明在接线处，评测要不要用是另一件事**。v1 传 nil
+	// 给 executor，合成照旧走整条（答案与流式路径逐字段一致，见 synth 流式的纪律 3）。
+	_ = streamFn
 	if err != nil {
 		return err
 	}

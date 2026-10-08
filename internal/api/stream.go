@@ -77,6 +77,7 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 	opts.CorpusVersion, opts.ConfigVersion, opts.StrategyVersion, opts.BeliefVersion = s.committedVersions()
 	opts.Emitter = em
 	opts.RunID = runID
+	opts.StreamSynth = s.StreamSynth
 
 	runner := qaflow.Runner(req.Question, qaflow.BM25Evidence(s.Index(), s.TopK, s.Width), s.Synth, opts)
 	if err := runner.Run(c); err != nil {
@@ -87,10 +88,12 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := s.record(c, req.Question)
-	emitStreamResult(runID, c, resp, runner.View, em, req.Session)
+	// 合成器支持流式 = 答案正文已经逐段发过。
+	streamedAnswer := s.StreamSynth != nil
+	emitStreamResult(runID, c, resp, runner.View, em, streamedAnswer)
 
 	// 收尾：一帧 done（含提交视图与计量），然后 [DONE]（与 OpenAI 协议同惯例）。
-	if ev, err := harness.Done(runID, qaflow.FinalFrom(streamFinal(resp, runner.View, em, req.Session, c))); err == nil {
+	if ev, err := harness.Done(runID, qaflow.FinalFrom(streamFinal(resp, runner.View, em, c))); err == nil {
 		emit(ev)
 	}
 	stream.Done()
@@ -101,7 +104,7 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 //
 // **顺序有意义**：先引用（证据面）再答案（交付面）——消费者据此知道
 // "答案里的每条断言都能对上前面那几条引用"。
-func emitStreamResult(runID string, c *context.Context, resp QAResponse, view context.CommittedView, em *harness.Emitter, session string) {
+func emitStreamResult(runID string, c *context.Context, resp QAResponse, view context.CommittedView, em *harness.Emitter, streamedAnswer bool) {
 	emit := func(ev harness.Event) { _ = em.Emit(ev) }
 	cits := make([]harness.Citation, 0, len(resp.Citations))
 	for _, cit := range resp.Citations {
@@ -132,18 +135,18 @@ func emitStreamResult(runID string, c *context.Context, resp QAResponse, view co
 			}
 		}
 	}
-	if resp.Answer != "" {
-		// 一次性整段（replace=true）：**诚实的形状**——当前合成面不是流式的
-		// （llm 层还没 Stream 接口），伪增量比整段更坏。
+	// 合成器支持流式时，答案正文**已经**逐段发过了（reasoning/content 帧），
+	// 这里绝不能再补一条整段——重复的整段会让客户端把答案显示两遍。
+	// 不支持流式才补整段（replace=true）：诚实的形状，伪增量比整段更坏。
+	if resp.Answer != "" && !streamedAnswer {
 		if ev, err := harness.Content(runID, resp.Answer, true); err == nil {
 			emit(ev)
 		}
 	}
-	_ = session
 }
 
 // streamFinal 把响应 + 视图 + 出口健康映射成 done 载荷。
-func streamFinal(resp QAResponse, view context.CommittedView, em *harness.Emitter, session string, c *context.Context) qaflow.FinalInput {
+func streamFinal(resp QAResponse, view context.CommittedView, em *harness.Emitter, c *context.Context) qaflow.FinalInput {
 	in := qaflow.FinalInput{
 		Answer: resp.Answer, Refused: resp.Refused, RefusalReason: resp.Reason,
 		RouteAction: resp.Route.Action, RouteTier: resp.Route.Signals.Tier,
@@ -160,7 +163,6 @@ func streamFinal(resp QAResponse, view context.CommittedView, em *harness.Emitte
 		"delivered": em.Events(),
 		"dropped":   em.Health().Dropped, // 出口丢了多少也报上去（降级可见）
 	}
-	_ = session
 	return in
 }
 

@@ -4,6 +4,32 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 思考与正文的真增量（llm.Streamer / StreamSynthFunc）
+
+**已完成**：思考过程与答案正文**双通道实时可看**（此前只有整段）。
+
+**llm 层**（`internal/llm/stream.go`）：`Streamer` 是**可选**接口（`Complete` 不动）。
+`Chunk{Reasoning, Content}` **两个通道分开**——混在一个流里，调用方只能靠猜哪段是
+思考（真跑踩过：reasoning 混进正文，前端把思考当答案念出来）。三条纪律：
+
+1. **同一请求两条路一致**：流式只是取答案的方式不同，最终 Text 必须与 `Complete`
+   逐字段一致（推理链兜底 JSON 提取复用同一份逻辑）；
+2. **成本未知不是 0**：流式端点常不回 usage → `CostKnown=false`；
+3. **超长单帧不许静默截断**：自己按字节读 SSE 行（不用 `bufio.Scanner` 默认 64KB
+   ——300KB 的思考链会直接断在中间且报错难懂）。
+
+**能力必须显式声明**（本轮最大的坑）：`l.Synthesize` 是**方法值**，传进
+`Options.Synth` 之后它就是普通函数类型，`SynthesizeStream` 这个方法**在类型层面
+已经不存在**，断言永远失败、能力静默消失——真跑表现：端点正常、事件正常、正文仍是
+整段 replace，**一眼看不出来**。所以 `Options.StreamSynth` 是显式字段，由接线处
+（`pickSynth`）连同 `llm.SupportsStream(c)` 一起声明；上游不支持流式时**不接这条腿**
+（免得"接了但每步都退回调"，读数却显示流式开着）。
+
+**读数**（真模型 + 真语料，`-synth llm`）：`content` **13 帧**逐段到达
+（`{` → `"answer":"专利法是为了保护` → …），38 帧全部落地、`dropped=0`。
+`reasoning` 0 帧——该模型不吐 `reasoning_content`（**能力在，模型没给**，
+这件事读数可见，不假装"思考已显示"）。
+
 ## 埋点与流式端点（/v1/qa/stream）
 
 事件词表落地成**两处接点**：

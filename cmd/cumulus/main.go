@@ -62,7 +62,7 @@ func runSelftest(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	synthFn, synthLabel, err := pickSynth(*synthFlag)
+	synthFn, _, synthLabel, err := pickSynth(*synthFlag)
 	if err != nil {
 		return err
 	}
@@ -305,12 +305,13 @@ func runServe(args []string) error {
 	if len(docs) == 0 {
 		fmt.Println("serve: starting with an empty store (watch/ingest will fill it)")
 	}
-	synthFn, synthLabel, err := pickSynth(*synthFlag)
+	synthFn, streamFn, synthLabel, err := pickSynth(*synthFlag)
 	if err != nil {
 		return err
 	}
 	// 摄入面装配：store 是语料的家，索引是它的投影（摄入后热重建）
 	srv := api.NewWithStore(st, synthFn, *topk, *width)
+	srv.StreamSynth = streamFn
 	if _, err := srv.Rebuild(ctx); err != nil {
 		return err
 	}
