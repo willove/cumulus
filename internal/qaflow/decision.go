@@ -46,6 +46,16 @@ type DecisionDecider struct {
 	// GateThreshold：noul 低于它就算"证据不足以支撑答案"。**只在这一层
 	// 有意义**：它把"能不能合成"这件事交给架构，而不是事后统计。
 	GateThreshold float64
+	// Criterion 是闸门判据（默认 answerable）：
+	//
+	//	answerable —— "这堆证据能不能回答这个问题"（整体判，宽松）
+	//	relation   —— "**哪几条**证据直接给出了答案"（逐条指认，严格）
+	//
+	// 真跑踩到为什么要有第二种（DuReader hard 40 题）：answerable 判了
+	// 40 次"有答案"、拦 0 次，而其中 42.5% 的题**检索根本没找到答案**——
+	// 干扰项是**同主题网页**，整体判时模型把"话题相关"读成了"有答案"。
+	// 改成"点名哪一条直接给了答案"把判断逼到逐条上，NONE 才是真的没有。
+	Criterion string
 }
 
 // Decide 问一句，返回判断与留痕。**永不返回 error**——决策失败不是问答失败。
@@ -76,17 +86,25 @@ func (d *DecisionDecider) Decide(ctx gocontext.Context, kind, question string, w
 	if thr <= 0 || thr > 1 {
 		thr = 0.5 // 默认闸门（真上线前要按数据定，别拍）
 	}
+	criterion := d.Criterion
+	if criterion == "" {
+		criterion = "answerable"
+	}
+	rec.Kind = "gate/" + criterion
 
 	start := time.Now()
-	resp, err := d.Client.Ask(ctx, decide.Request{
-		Content: sb.String(),
-		Questions: map[string]decide.Question{
-			"answerable": {
-				Type:         decide.TypeNoul,
-				Instructions: "这些证据里能不能找到这个问题的答案？",
-			},
-		},
-	})
+	var (
+		err   error
+		score float64
+		conf  float64
+	)
+	switch criterion {
+	case "relation":
+		score, conf, err = d.askWhichWindows(ctx, sb.String())
+	default:
+		score, conf, err = d.askAnswerable(ctx, sb.String())
+	}
+	rec.Noul, rec.Confidence = score, conf
 	rec.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
 		rec.Reason = "error: " + err.Error()
@@ -94,10 +112,51 @@ func (d *DecisionDecider) Decide(ctx gocontext.Context, kind, question string, w
 	}
 	rec.Applied = true
 	rec.Reason = "ok"
-	if a, ok := resp.Answers["answerable"]; ok {
-		rec.Noul, rec.Confidence = a.Noul, a.Confidence
+	return score >= thr, score, rec
+}
+
+// askAnswerable 是**整体判**：这堆证据能不能回答这个问题（宽松）。
+func (d *DecisionDecider) askAnswerable(ctx gocontext.Context, content string) (float64, float64, error) {
+	resp, err := d.Client.Ask(ctx, decide.Request{
+		Content: content,
+		Questions: map[string]decide.Question{
+			"answerable": {Type: decide.TypeNoul, Instructions: "这些证据里能不能找到这个问题的答案？"},
+		},
+	})
+	if err != nil {
+		return 0, 0, err
 	}
-	return rec.Noul >= thr, rec.Noul, rec
+	a := resp.Answers["answerable"]
+	return a.Noul, a.Confidence, nil
+}
+
+// askWhichWindows 是**逐条指认**：哪几条证据**直接给出了答案**（严格）。
+//
+// 为什么要逐条而不是整体：同主题噪声里"整体相关"很容易被读成"有答案"，
+// 而"点名"把判断逼到每一条上——点名不出来（NONE）才是真的没有。
+// 判据用分数型（无判据的决策等于让模型拍脑袋，见 internal/decide 的纪律）。
+func (d *DecisionDecider) askWhichWindows(ctx gocontext.Context, content string) (float64, float64, error) {
+	resp, err := d.Client.Ask(ctx, decide.Request{
+		Content: content + "\n上面哪几条证据直接给出了这个问题的答案？",
+		Questions: map[string]decide.Question{
+			"which": {
+				Type:         decide.TypeScore,
+				Instructions: "上面这些证据里，直接给出问题答案的**条数**是多少？只谈相关话题但没有答案的**不算**。",
+				Scale: []string{
+					"没有任何一条直接给出答案",
+					"至少一条直接给出答案",
+				},
+			},
+		},
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	a := resp.Answers["which"]
+	if a.Score <= 0 {
+		return 0, a.Confidence, nil // 0 条 = 证据里没有答案
+	}
+	return 1, a.Confidence, nil // ≥1 条 = 有直接答案
 }
 
 // DecideFromEnv 装配可降级决策器。没配 key 就返回 nil ——**nil 就是"这一层
@@ -117,7 +176,12 @@ func DecideFromEnv(kind string) *DecisionDecider {
 	if err != nil {
 		return nil
 	}
-	return &DecisionDecider{Client: c}
+	// CUMULUS_GATE_CRITERION：answerable（整体判，默认）| relation（逐条指认）
+	crit := os.Getenv("CUMULUS_GATE_CRITERION")
+	if crit == "" {
+		crit = "answerable"
+	}
+	return &DecisionDecider{Client: c, Criterion: crit}
 }
 
 // DecisionRecordOf 取决策留痕（没有就返回零值——"没决策过"与"决策结果是零"可区分：

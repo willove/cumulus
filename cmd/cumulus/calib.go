@@ -48,7 +48,14 @@ func gateStats(state evalfcore.RunState) string {
 	if len(parts) == 0 {
 		return "gate(off)"
 	}
-	return "gate(decided=" + itoa(decided) + " blocked=" + itoa(blocked) + " {" + strings.Join(parts, ",") + "})"
+	kind := "?"
+	for _, r := range state.Results {
+		if r.DecisionReason != "" {
+			kind = r.DecisionKind
+			break
+		}
+	}
+	return "gate[" + kind + "](decided=" + itoa(decided) + " blocked=" + itoa(blocked) + " {" + strings.Join(parts, ",") + "})"
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

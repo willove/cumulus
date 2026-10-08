@@ -54,3 +54,22 @@ func Parse(text string) Result {
 	}
 	return res
 }
+
+// idRe 匹配"纯编号"（1、2、3 或 [1]、2.）。用于逐条指认类回包："哪几条证据
+// 直接给了答案 → 1,3"。
+var idRe = regexp.MustCompile(`\d{1,3}`)
+
+// ParseIDs 取回包里出现的编号（**保序、不去重**）。注意它与 Parse 是两件事：
+// Parse 判"每条是/否"，ParseIDs 只取被点名的编号。别把两者混用——真跑踩过
+// 一侧用 Y/N 格式、另一侧用纯编号，回包解析全落空。
+func ParseIDs(text string) []int {
+	var out []int
+	for _, m := range idRe.FindAllString(text, -1) {
+		n, err := strconv.Atoi(m)
+		if err != nil || n <= 0 {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}

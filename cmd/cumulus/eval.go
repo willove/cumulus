@@ -148,6 +148,7 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 	// 在读数里是两回事）。
 	if rec, ok := qaflow.DecisionRecordOf(c); ok {
 		out.DecisionApplied, out.DecisionReason, out.DecisionNoul = rec.Applied, rec.Reason, rec.Noul
+		out.DecisionKind = rec.Kind
 		if reason, ok := context.Get(c, qaflow.KeyRefusalReason); ok && reason == "decision-gate" {
 			out.GateBlocked = true
 		}

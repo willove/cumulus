@@ -73,6 +73,7 @@ type ItemResult struct {
 	VerifyConf       float64 `json:"verify_conf,omitempty"`      // 决策模型对该判断的置信度
 	DecisionApplied  bool    `json:"decision_applied,omitempty"` // 闸门/决策层是否真的跑了
 	DecisionReason   string  `json:"decision_reason,omitempty"`  // not-bound / error:… / ok
+	DecisionKind     string  `json:"decision_kind,omitempty"`    // gate/answerable | gate/relation
 	GateBlocked      bool    `json:"gate_blocked,omitempty"`     // 闸门是否真的拦下了这一题
 	DecisionNoul     float64 `json:"decision_noul,omitempty"`    // 闸门分
 	RouteTier        string  `json:"route_tier,omitempty"`       // 置信信号档位：logprob / retrieval
@@ -110,6 +111,7 @@ type ItemOutcome struct {
 	DecisionApplied  bool
 	DecisionReason   string
 	DecisionNoul     float64
+	DecisionKind     string
 	GateBlocked      bool // 闸门是否真的拦下了这一题
 	Windows          int
 	LatencyMS        int64
@@ -284,6 +286,7 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		VerifyConf:        out.VerifyConf,
 		DecisionApplied:   out.DecisionApplied,
 		DecisionReason:    out.DecisionReason,
+		DecisionKind:      out.DecisionKind,
 		DecisionNoul:      out.DecisionNoul,
 		GateBlocked:       out.GateBlocked,
 		LatencyMS:         latency,

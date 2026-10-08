@@ -98,7 +98,7 @@ func TestDecisionRecordReachesContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := DecisionRecordOf(c)
-	if !ok || got.Source != "decision-model-preview" || got.Kind != "answerable" {
+	if !ok || got.Source != "decision-model-preview" || got.Kind != "gate/answerable" {
 		t.Fatalf("record must round-trip through the context: %+v (ok=%v)", got, ok)
 	}
 }
@@ -246,5 +246,29 @@ func TestGateLiveClientLeavesAppliedRecord(t *testing.T) {
 	route, _ := context.Get(c, KeyRoute)
 	if route.Action == "refuse" {
 		t.Fatalf("noul 0.95 must pass the gate: %+v", route)
+	}
+}
+
+// relation 判据：模型判"没有任何一条直接给出答案"（score 0）时必须拦；
+// 判"至少一条"时放行。这是把判断逼到**逐条**上的那条判据。
+func TestGateRelationCriterion(t *testing.T) {
+	none := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{"which":{"type":"score","score":0,"confidence":0.9}}}`))
+	}))
+	defer none.Close()
+	some := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"answers":{"which":{"type":"score","score":1,"confidence":0.9}}}`))
+	}))
+	defer some.Close()
+
+	dNone := &DecisionDecider{Client: decide.New(none.URL, "k", "m"), Criterion: "relation"}
+	ok, score, rec := dNone.Decide(gocontext.Background(), "answerable", "q", demoWindows())
+	if ok || score != 0 || rec.Kind != "gate/relation" {
+		t.Fatalf("zero direct answers must block: ok=%v score=%v rec=%+v", ok, score, rec)
+	}
+	dSome := &DecisionDecider{Client: decide.New(some.URL, "k", "m"), Criterion: "relation"}
+	ok2, score2, _ := dSome.Decide(gocontext.Background(), "answerable", "q", demoWindows())
+	if !ok2 || score2 != 1 {
+		t.Fatalf("at least one direct answer must pass: ok=%v score=%v", ok2, score2)
 	}
 }

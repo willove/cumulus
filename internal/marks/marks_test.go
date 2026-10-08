@@ -33,3 +33,17 @@ func TestParseCoversOnlyYes(t *testing.T) {
 		t.Fatalf("covers must follow the yes-list: %+v", r)
 	}
 }
+
+// ParseIDs：纯编号回包（"哪几条直接给了答案 → 1,3"）。
+func TestParseIDs(t *testing.T) {
+	got := ParseIDs("1, 3")
+	if len(got) != 2 || got[0] != 1 || got[1] != 3 {
+		t.Fatalf("bare id list must parse: %v", got)
+	}
+	if len(ParseIDs("NONE")) != 0 {
+		t.Fatal("NONE means no id picked")
+	}
+	if len(ParseIDs("没有一条直接给出答案")) != 0 {
+		t.Fatal("prose reply means no id picked")
+	}
+}
