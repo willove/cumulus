@@ -59,6 +59,16 @@ type StageInfo struct {
 	Name       string     `json:"name"`
 	Phase      StagePhase `json:"phase"`
 	DurationMS int64      `json:"duration_ms,omitempty"`
+	// Label 是**显示标签**（中文，来自 harness 的阶段表）——事件自带，
+	// 免得每个消费方各写一份映射（老 cumulus 控制台就有一份自己的，
+	// 两边迟早说法不一致）。
+	Label string `json:"label,omitempty"`
+	// Detail 是"这一步干了什么"（一行摘要：取回几窗、覆盖几事实、路由到哪档）。
+	// 没有就空着——**不许编**：宁可空着让 UI 显示阶段名，也不要显示假细节。
+	Detail string `json:"detail,omitempty"`
+	// Percent 是全局进度（0..100）。0 = 未知（**未知不是 0**：消费方应把它
+	// 当"没数据"而不是"刚开始"）。
+	Percent float64 `json:"percent,omitempty"`
 }
 
 // FileInfo 是**逐窗口**事件载荷：这是"引用文章"的流式形态——检索到一个窗口就
@@ -159,13 +169,27 @@ func Started(runID, question string) (Event, error) {
 }
 
 func Stage(runID, name string, phase StagePhase, durationMS int64) (Event, error) {
+	return StageDetailed(runID, name, phase, durationMS, "", 0)
+}
+
+// StageDetailed 是带**标签 / 详情 / 全局进度**的阶段事件。
+//
+// detail/percent 都是可选项：有就给消费方省事（不用自己拼），没有就是空/0
+// （消费方退回阶段名显示）。**别把"不知道"填成"0 进度"**——那是两种意思。
+func StageDetailed(runID, name string, phase StagePhase, durationMS int64, detail string, percent float64) (Event, error) {
 	if name == "" {
 		return Event{}, fmt.Errorf("harness: stage 缺 name")
 	}
 	if phase != PhaseStart && phase != PhaseDone {
 		return Event{}, fmt.Errorf("harness: stage 非法相位 %q", phase)
 	}
-	return Event{Kind: KindStage, RunID: runID, Stage: &StageInfo{Name: name, Phase: phase, DurationMS: durationMS}}, nil
+	if percent > 100 {
+		percent = 100
+	}
+	return Event{Kind: KindStage, RunID: runID, Stage: &StageInfo{
+		Name: name, Phase: phase, DurationMS: durationMS,
+		Label: StageLabel(name), Detail: oneLine(detail), Percent: percent,
+	}}, nil
 }
 
 func File(runID string, f FileInfo) (Event, error) {

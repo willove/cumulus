@@ -4,6 +4,48 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 对接 invoke-chat（@wil-works/evoke-chat）：adapter，不是 UI
+
+**harness 不做 UI**，界面已经有了：`@wil-works/evoke-chat`（v0.4.1，Vite/Vue）。
+harness 一旦自带界面，就会退化成一个内部耦合点；而且层次纪律会直接拦下
+（harness 归 capabilities，长出 UI 依赖 = capabilities → apps 反向依赖）。
+
+我们做的是**协议适配**：`internal/harness/evokechat` —— 纯翻译，**零依赖**
+（只认 harness 的事件类型 + 标准库），输出"宿主该调用哪些引擎方法、带什么参数"。
+
+**它对齐的契约**（docs/chat/ai-contract.md 的硬规则）：
+
+| 契约要求 | 怎么落 |
+|---|---|
+| `appendContent` / `appendThinkContent` **分开两个 API**（混写会串行渲染） | `reasoning` → `OpAppendThink`；`content` → `OpAppendContent`（各有测试钉住） |
+| 结构化进度走瞬时事件，**别把阶段进度拼进 think 文本** | `stage`/`file` → `OpProgress`，`Transient=true` |
+| 事件信封 `{type, seq, time, data}`，**seq 必须连续** | `Envelope()`；瞬时事件（started/stage）不推进游标也不造成缺口 |
+| 拿不到窗口容量就不画环 | 只给 `used`，**绝不伪造 `capacity`** |
+| 引用面板 | `citations` → `refs[{sourceId,title,text,url,resolved}]` |
+
+**补的两个真缺口**（从契约反查出来的，不是猜的）：
+1. `stage` 事件加 **`label`（中文标签）/ `detail`（这一步干了什么）/ `percent`**——
+   标签表在 harness（`StageLabel`，未登记的原样返回、**不猜不编**），每个消费方
+   都要它，两边各写一份迟早说法不一致；
+2. **阶段进度要有分母**：分母取**本次实际注册的阶段数**（装了哪些可选件步数就不同），
+   写死常数会让进度条说谎。
+
+**真跑读数**（真模型 + 真语料）：
+```
+ 9.1%  理解问题与检索意图
+18.2%  复用上轮证据
+27.3%  检索证据窗口        · 取回 1 条窗口
+36.4%  核对事实覆盖        · 1/1 条事实已覆盖
+54.5%  判断证据够不够      · 路由 escalate · 覆盖 1.00 · 边际 0.00
+81.8%  合成答案            · 答案 62 字
+100.0%  记录可复用证据
+```
+详情只写**这一步刚做完时可读到**的东西——不许用后面才产生的数据解释这一步。
+
+**file 事件的两种口径**（`Options.FilesAsToolCalls`）：默认走**进度行**（轻）；
+可切成**工具调用卡**（重、可折叠回看原文）。默认轻，是因为契约明确说结构化进度别堆
+进 think，而工具卡是结构化呈现、不是文本。
+
 ## 思考与正文的真增量（llm.Streamer / StreamSynthFunc）
 
 **已完成**：思考过程与答案正文**双通道实时可看**（此前只有整段）。

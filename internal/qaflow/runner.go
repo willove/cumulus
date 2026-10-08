@@ -103,10 +103,9 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	if opts.Reuse != nil {
 		stages = append(stages, ReuseRecordStage{Session: opts.Session, Store: opts.Reuse, Query: query})
 	}
-	return &flow.Runner{
+	r := &flow.Runner{
 		Flow:   "qa",
 		Stages: stages,
-		Trace:  traceFunc(opts.Emitter, opts.RunID),
 		View: context.CommittedView{
 			CorpusVersion:   opts.CorpusVersion,
 			ConfigVersion:   opts.ConfigVersion,
@@ -115,6 +114,10 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		},
 		ViewHook: calibrationHook,
 	}
+	// 观测闭包：进度分母是**本次实际注册的阶段数**（装了哪些可选件，
+	// 步数就不一样）——写死一个常数会让进度条说谎。
+	r.Trace = traceFunc(opts.Emitter, opts.RunID, len(stages))
+	return r
 }
 
 // calibrationHook 把路由实际生效的档位、校准程序与阈值填进提交视图。
@@ -236,9 +239,9 @@ type Options struct {
 
 // traceFunc 返回挂到 flow.Runner 上的观测钩子。emitter 为 nil 时返回 nil
 // （flow 那边 nil = 不观测）——**可选面缺席不留空壳**（见文件头约定）。
-func traceFunc(em *harness.Emitter, runID string) flow.TraceFunc {
+func traceFunc(em *harness.Emitter, runID string, total int) flow.TraceFunc {
 	if em == nil {
 		return nil
 	}
-	return NewTrace(em, runID).Stage
+	return NewTrace(em, runID, total).Stage
 }

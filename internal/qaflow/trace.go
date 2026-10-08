@@ -21,11 +21,15 @@ type Trace struct {
 	em    *harness.Emitter
 	runID string
 	files map[string]bool // 已发过的 docid（去重：升级/重取数会重发同一篇）
+	done  int             // 已收尾的阶段数（算进度用）
+	total int             // 本次流程的标准阶段数（分母；0 = 未知）
+	synth bool            // 已经过合成阶段（详情文案要防"用未来数据解释过去"）
 }
 
-// NewTrace 装一个事件发射器（em 为 nil = 这一层没接）。
-func NewTrace(em *harness.Emitter, runID string) *Trace {
-	return &Trace{em: em, runID: runID, files: map[string]bool{}}
+// NewTrace 装一个事件发射器（em 为 nil = 这一层没接）。total 是本次流程的
+// 标准阶段数——**进度要有分母**，否则百分比就是猜的。
+func NewTrace(em *harness.Emitter, runID string, total int) *Trace {
+	return &Trace{em: em, runID: runID, files: map[string]bool{}, total: total}
 }
 
 // Emitter 返回底层发射器（供上层补发终态事件）。
@@ -49,10 +53,15 @@ func (t *Trace) Stage(c *context.Context, name string, phase flow.TracePhase, du
 	switch phase {
 	case flow.TraceDone:
 		p = harness.PhaseDone
+		t.done++
 	case flow.TraceFail:
 		p = harness.PhaseDone // 失败也收尾（耗时可见），错误由上层发 error 事件
+		t.done++
 	}
-	ev, err := harness.Stage(t.runID, name, p, durMS)
+	// 详情按"这一步**刚做完时**可读到的东西"写——不许用后面才产生的数据
+	// 解释这一步（真跑教训式的诱惑：合成之后再回头给检索阶段写"找到了答案"）。
+	ev, err := harness.StageDetailed(t.runID, name, p, durMS,
+		t.detail(c, name, phase), harness.StageProgress(t.done, t.total))
 	if err != nil {
 		return // 半截事件不许进流；构造错由 harness 侧计数
 	}
@@ -193,4 +202,77 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(rs[:n]) + "…"
+}
+
+// detail 是"这一步干了什么"的一行摘要。**只写这一步当时可读到的**；读不到
+// 就留空（消费方退回阶段标签）——不留空而编一句，读数就开始骗人。
+func (t *Trace) detail(c *context.Context, name string, phase flow.TracePhase) string {
+	if phase == flow.TraceStart {
+		return "" // 开始时通常还什么都没产生
+	}
+	switch name {
+	case (EvidenceStage{}).Name():
+		if ws, ok := context.Get(c, KeyWindows); ok {
+			return fmt.Sprintf("取回 %d 条窗口", len(ws))
+		}
+	case (FactsStage{}).Name():
+		if fx, ok := context.Get(c, KeyFactReport); ok {
+			covered := 0
+			for _, f := range fx.Facts {
+				if f.Covered {
+					covered++
+				}
+			}
+			return fmt.Sprintf("%d/%d 条事实已覆盖", covered, len(fx.Facts))
+		}
+	case (RouteStage{}).Name():
+		if r, ok := context.Get(c, KeyRoute); ok {
+			return fmt.Sprintf("路由 %s · 覆盖 %.2f · 边际 %.2f", r.Action, r.Signals.Coverage, r.Signals.Margin)
+		}
+	case (EvictStage{}).Name():
+		if ws, ok := context.Get(c, KeyWindows); ok {
+			return fmt.Sprintf("上下文内保留 %d 条窗口", len(ws))
+		}
+	case (SynthesizeStage{}).Name():
+		if a, ok := context.Get(c, KeyAnswer); ok {
+			if a.Refused {
+				return "证据不足，已拒答（" + oneLine(a.RefusalReason) + "）"
+			}
+			return fmt.Sprintf("答案 %d 字", len([]rune(a.Text)))
+		}
+	case (AccountStage{}).Name():
+		if u, ok := context.Get(c, KeyUsage); ok {
+			return fmt.Sprintf("计量 %d/%d token", u.PromptTokens, u.CompletionTokens)
+		}
+	case (EscalateStage{}).Name():
+		if e, ok := context.Get(c, KeyEscalation); ok {
+			if e.Executed {
+				if r := oneLine(e.Reason); r != "" {
+					return "已升级取数并重判（" + r + "）"
+				}
+				return "已升级取数并重判"
+			}
+			if e.Triggered {
+				return "路由判了升级，但没有贵路执行处"
+			}
+		}
+		return "未升级"
+	case (GateStage{}).Name():
+		if rec, ok := DecisionRecordOf(c); ok {
+			if !rec.Applied {
+				return "决策面缺席，按原路径放行"
+			}
+			return "决策闸门分 " + fmt.Sprintf("%.2f", rec.Noul)
+		}
+	}
+	return ""
+}
+
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	rs := []rune(s)
+	if len(rs) > 60 {
+		return string(rs[:60]) + "…"
+	}
+	return s
 }
