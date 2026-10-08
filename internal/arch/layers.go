@@ -81,6 +81,7 @@ var packages = map[string]Layer{
 	"evaldata":         LayerCapabilities,
 	"evalfcore":        LayerCapabilities,
 	"facts":            LayerCapabilities,
+	"harness":          LayerCapabilities, // 对外输出面（只依赖 kernel；依赖 pipeline 会被 boundary 拦住）
 	"failure":          LayerCapabilities,
 	"ingest":           LayerCapabilities,
 	"knowledge":        LayerCapabilities,
