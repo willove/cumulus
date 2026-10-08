@@ -45,6 +45,9 @@ const (
 	KindDone      Kind = "done"      // 收尾：答案 + 决策 + 计量 + 提交视图
 )
 
+// SchemaVersion 是当前事件 schema 的主版本。消费方应把它与不认识的值对比。
+const SchemaVersion = 1
+
 // StagePhase 是阶段事件的状态。
 type StagePhase string
 
@@ -142,6 +145,11 @@ type DoneInfo struct {
 // Event 是一次输出事件。载荷用可选字段（老前端与通用客户端都习惯这种形状），
 // 但**每个 Kind 必填的字段由构造器校验**——事件流里出现半截事件比不出事件更坏。
 type Event struct {
+	// V 是**事件 schema 版本**。消费方遇到不认识的主版本要**显式报错**，不要猜字段
+	// （真跑缺这条：加字段兼容，改名/删字段没人拦——多消费方并存时那条边界是裸奔的）。
+	// 约定：主版本不同 = 破坏性变更（字段改名/删除/语义变化），必须升 V；
+	// 加可选字段 = 不升。消费方按"字段可能缺"写代码，不按"字段一定在"。
+	V     int    `json:"v"`
 	Seq   int    `json:"seq"`
 	Kind  Kind   `json:"kind"`
 	AtMS  int64  `json:"at_ms"`
@@ -251,6 +259,9 @@ func Done(runID string, d DoneInfo) (Event, error) {
 // Validate 检查事件自洽（必填字段齐、序号非负）。**收流侧也要查**：外部消费
 // 一个半截事件时，应该能立刻看出来，而不是解析到一半才发现。
 func (e Event) Validate() error {
+	if e.V != 0 && e.V != SchemaVersion {
+		return fmt.Errorf("不认识的事件 schema 版本 v%d（本进程是 v%d）", e.V, SchemaVersion)
+	}
 	switch e.Kind {
 	case KindStarted:
 		if e.Question == "" {

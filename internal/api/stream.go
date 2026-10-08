@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/harness"
@@ -49,11 +50,15 @@ func (s *Server) handleQAStream(w http.ResponseWriter, r *http.Request) {
 
 	runID := streamRunID(req)
 	stream := harness.NewSSE(w, flusher.Flush)
+	// **异步写者**：SSE 写是不可取消的，对端卡住就会顺着 Emit 把 stage 一起卡住。
+	// 把写移出流程协程（有界队列 + 单写者保序），遥测帧满即丢、交付帧等到超时。
+	async := harness.NewAsync(stream, 256, 5*time.Second)
+	defer func() { _ = async.Close() }() // 排空队列：done 帧必须写出去
 	// **边发边录**：同一份事件既推给 live 客户端，也落库供回放/断线恢复。
 	// 两处消费的是同一批事件，所以不可能不一致（回放不是"另一条链路"）。
-	var sink harness.Sink = stream
+	var sink harness.Sink = async
 	if s.Store != nil && strings.TrimSpace(req.Session) != "" {
-		if log, err := harness.OpenSession(r.Context(), s.Store, req.Session); err == nil {
+		if log, err := harness.OpenSessionTTL(r.Context(), s.Store, req.Session, sessionTTL()); err == nil {
 			sink = harness.NewRecording(stream, log)
 		} else {
 			// 落库是**增强**：接不上就照常发流（契约 1），只在日志里说一句。

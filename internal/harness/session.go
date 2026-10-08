@@ -29,6 +29,12 @@ type SessionManifest struct {
 	// 同样可回放——**断线恢复不等于丢历史**。
 	Complete  bool   `json:"complete"`
 	UpdatedAt string `json:"updated_at"`
+	// ExpiresAt 是这份会话事件的到期时刻（零值 = 不过期）。
+	//
+	// 为什么必须有：落库的是**用户提问原文 + 引用原文 + 思考过程**，多租户共用一个
+	// store 时"只增不减"既是成本问题也是数据问题（谁问了什么会一直留着）。
+	// 保留期必须**默认存在**而不是靠人记得删。
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 // SessionLog 把事件流**落库**，让它可回放、可断线恢复。
@@ -49,10 +55,21 @@ type SessionLog struct {
 	id    string
 	count int
 	last  int
+	ttl   time.Duration // 保留期；0 = 跟着清单里已有的 ExpiresAt，不改写
 }
 
 // OpenSession 打开（或续写）一场会话的日志。
 func OpenSession(ctx gocontext.Context, port store.Port, sessionID string) (*SessionLog, error) {
+	return OpenSessionTTL(ctx, port, sessionID, 0)
+}
+
+// DefaultSessionTTL 是默认保留期（7 天）。事件里装的是提问原文与思考过程，不是
+// 该永久保存的东西。
+const DefaultSessionTTL = 7 * 24 * time.Hour
+
+// OpenSessionTTL 打开会话并设置保留期。ttl=0 → DefaultSessionTTL；
+// 续写已有会话时**保留原有的到期时刻**（不因续写而无限续命）。
+func OpenSessionTTL(ctx gocontext.Context, port store.Port, sessionID string, ttl time.Duration) (*SessionLog, error) {
 	if port == nil {
 		return nil, fmt.Errorf("harness: session log needs a store")
 	}
@@ -65,7 +82,10 @@ func OpenSession(ctx gocontext.Context, port store.Port, sessionID string) (*Ses
 	if err := port.EnsureCollection(ctx, SessionManifestCollection); err != nil {
 		return nil, fmt.Errorf("harness: ensure manifest collection: %w", err)
 	}
-	log := &SessionLog{port: port, id: sessionID}
+	if ttl <= 0 {
+		ttl = DefaultSessionTTL
+	}
+	log := &SessionLog{port: port, id: sessionID, ttl: ttl}
 	// 续写：从清单恢复游标（同一 session 二次提问 = 接着写，不是重开）
 	var man SessionManifest
 	if err := port.GetStruct(ctx, SessionManifestCollection, sessionID, &man); err == nil {
@@ -116,6 +136,12 @@ func (l *SessionLog) Commit(ctx gocontext.Context, complete bool) error {
 		return nil
 	}
 	man := SessionManifest{SessionID: l.id, Count: l.count, LastSeq: l.last, Complete: complete, UpdatedAt: nowRFC3339()}
+	// 续写不重置到期时刻：否则"一直问同一 session"会让事件永不过期。
+	if prev, ok := manifestOf(ctx, l.port, l.id); ok && prev.ExpiresAt != "" {
+		man.ExpiresAt = prev.ExpiresAt
+	} else if l.ttl > 0 {
+		man.ExpiresAt = time.Now().Add(l.ttl).UTC().Format(time.RFC3339Nano)
+	}
 	if err := l.port.PutStruct(ctx, SessionManifestCollection, l.id, man); err != nil {
 		return fmt.Errorf("harness: commit session manifest: %w", err)
 	}
@@ -215,4 +241,68 @@ func (r *RecordingSink) Write(ev Event) error {
 		}
 	}
 	return liveErr
+}
+
+// Expired 判断这份清单是否已过期（解析失败按**未过期**处理：宁可多留，
+// 也不因为一个坏时间戳把整场会话删掉——删除是不可逆的）。
+func (m SessionManifest) Expired(now time.Time) bool {
+	if m.ExpiresAt == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339Nano, m.ExpiresAt)
+	if err != nil {
+		return false
+	}
+	return now.After(t)
+}
+
+// PruneSession 删掉一场会话的事件与清单（用户显式删除 / 到期清理都走它）。
+//
+// 返回删掉的事件数。清单写在最后删：中途失败时清单还在，读到的仍是"可回放"，
+// 不会出现"清单说有事件、实际没了"的空洞。
+func PruneSession(ctx gocontext.Context, port store.Port, sessionID string) (int, error) {
+	if port == nil {
+		return 0, fmt.Errorf("harness: prune needs a store")
+	}
+	man, ok := manifestOf(ctx, port, sessionID)
+	if !ok {
+		return 0, nil // 没有就是没有（幂等）
+	}
+	n := 0
+	for seq := 1; seq <= man.LastSeq; seq++ {
+		if err := port.Delete(ctx, SessionCollection, eventID(sessionID, seq)); err != nil {
+			return n, fmt.Errorf("harness: prune event %d: %w", seq, err)
+		}
+		n++
+	}
+	if err := port.Delete(ctx, SessionManifestCollection, sessionID); err != nil {
+		return n, fmt.Errorf("harness: prune manifest: %w", err)
+	}
+	return n, nil
+}
+
+// PruneExpired 清理所有已过期的会话（返回清理了几场、几帧）。
+//
+// 这是**唯一**该跑在后台的删除路径：到期就删，不等谁来点。
+func PruneExpired(ctx gocontext.Context, port store.Port, now time.Time) (sessions int, events int, err error) {
+	if port == nil {
+		return 0, 0, fmt.Errorf("harness: prune needs a store")
+	}
+	ids, err := port.ListIDs(ctx, SessionManifestCollection, 0)
+	if err != nil {
+		return 0, 0, fmt.Errorf("harness: list manifests: %w", err)
+	}
+	for _, id := range ids {
+		man, ok := manifestOf(ctx, port, id)
+		if !ok || !man.Expired(now) {
+			continue
+		}
+		n, derr := PruneSession(ctx, port, id)
+		events += n
+		if derr != nil {
+			return sessions, events, derr
+		}
+		sessions++
+	}
+	return sessions, events, nil
 }

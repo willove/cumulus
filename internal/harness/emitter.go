@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -65,6 +66,9 @@ func (e *Emitter) Emit(ev Event) error {
 	}
 	e.mu.Lock()
 	e.seq++
+	if ev.V == 0 {
+		ev.V = SchemaVersion
+	}
 	ev.Seq = e.seq
 	ev.AtMS = sinceMS(e.start)
 	sink := e.sink
@@ -261,3 +265,22 @@ func Marshal(ev Event) ([]byte, error) {
 
 // ErrSinkClosed 给测试与实现方用的哨兵错误。
 var ErrSinkClosed = errors.New("harness: sink closed")
+
+// DecodeFrame 是**消费方的入口**：解一帧并按主版本把关。
+//
+// 为什么消费方要走它而不是 json.Unmarshal：未知主版本必须**显式失败**。
+// 直接 Unmarshal 会把不认识的结构悄悄解成零值（内容帧丢失、引用为空），而调用方
+// 以为"帧到了"——这类静默兼容失败最难查。
+func DecodeFrame(data []byte) (Event, error) {
+	var ev Event
+	if err := json.Unmarshal(data, &ev); err != nil {
+		return Event{}, fmt.Errorf("harness: 帧不是 JSON: %w", err)
+	}
+	if ev.V != SchemaVersion {
+		return Event{}, fmt.Errorf("harness: 不认识的事件 schema 版本 v%d（本进程是 v%d）", ev.V, SchemaVersion)
+	}
+	if err := ev.Validate(); err != nil {
+		return Event{}, err
+	}
+	return ev, nil
+}

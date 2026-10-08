@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/willove/cumulus/internal/abstain"
@@ -325,6 +326,18 @@ func runServe(args []string) error {
 		return fmt.Errorf("CUMULUS_KEYS: %w", kerr)
 	}
 	srv.Keys = keys
+	// 会话事件保留期：启动清一次 + 每小时清一次（落库的是提问原文与思考过程，
+	// 不是该永久保存的东西；到期就删，不等谁来点）。
+	if st != nil {
+		api.PruneSessions(ctx, st)
+		go func() {
+			t := time.NewTicker(pruneEvery())
+			defer t.Stop()
+			for range t.C {
+				api.PruneSessions(gocontext.Background(), st)
+			}
+		}()
+	}
 	if keys.Empty() {
 		fmt.Println("serve: 未配 CUMULUS_KEYS —— 所有请求放行（仅限本地/单人使用）")
 	} else {
@@ -434,4 +447,20 @@ func runSignals(args []string) error {
 		}
 	}
 	return nil
+}
+
+// pruneEvery 是会话清扫周期（CUMULUS_PRUNE_EVERY，默认 1h；0/配错 = 默认）。
+//
+// 周期与 TTL **故意分开**：TTL 决定"多久算过期"，周期决定"多久才真的删"。
+// 把周期调到比 TTL 还密是部署者的选择（要更硬的删除保证）——但不该由代码替他们定。
+func pruneEvery() time.Duration {
+	v := strings.TrimSpace(os.Getenv("CUMULUS_PRUNE_EVERY"))
+	if v == "" {
+		return time.Hour
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return time.Hour
+	}
+	return d
 }

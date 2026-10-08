@@ -3,8 +3,14 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	gocontext "context"
+
+	"github.com/willove/cumulus/internal/store"
 
 	"github.com/willove/cumulus/internal/harness"
 )
@@ -33,6 +39,14 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.replayEvents(w, r, strings.TrimSuffix(path, "/events"))
 	case path != "" && r.Method == http.MethodGet:
 		s.sessionManifest(w, r, path)
+	case path != "" && r.Method == http.MethodDelete:
+		// 用户显式删除（"清除记录"）。到期清理由后台清扫走同一条 PruneSession。
+		n, err := harness.PruneSession(r.Context(), s.Store, path)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "prune failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"session_id": path, "deleted_events": n})
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "unsupported session request")
 	}
@@ -119,4 +133,32 @@ func atoiDefault(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+// sessionTTL 读会话保留期（CUMULUS_SESSION_TTL，如 `72h`；0/未设 = 默认 7 天）。
+//
+// 落库的是**用户提问原文 + 引用原文 + 思考过程**——不是该永久保存的东西。
+func sessionTTL() time.Duration {
+	v := strings.TrimSpace(os.Getenv("CUMULUS_SESSION_TTL"))
+	if v == "" {
+		return harness.DefaultSessionTTL
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return harness.DefaultSessionTTL // 配错不静默放宽
+	}
+	return d
+}
+
+// pruneSessions 清掉已过期的会话（serve 定期调用 + 启动时清一次）。
+// 这是**唯一**该跑在后台的删除路径：到期就删，不等谁来点。
+func PruneSessions(ctx gocontext.Context, st store.Port) {
+	sessions, events, err := harness.PruneExpired(ctx, st, time.Now())
+	if err != nil {
+		fmt.Printf("session: 清理过期会话出错（不阻断服务）：%v\n", err)
+		return
+	}
+	if sessions > 0 {
+		fmt.Printf("session: 清理过期会话 %d 场（%d 帧）\n", sessions, events)
+	}
 }

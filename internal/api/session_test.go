@@ -133,3 +133,52 @@ func TestUnknownSessionIsNotFound(t *testing.T) {
 		t.Fatalf("unknown session must be 404: %d", rec.Code)
 	}
 }
+
+// 保留期与删除：事件带 expires_at；用户显式删除后立刻 404。
+func TestSessionDeleteAndExpiry(t *testing.T) {
+	s := sessionServer(t)
+	body, _ := streamQA(t, s, `{"question":"连接池最大连接数是多少","session":"del-me"}`)
+	if kinds, _ := framesOf(t, body); len(kinds) == 0 {
+		t.Fatal("stream produced nothing")
+	}
+
+	// 清单带过期时间
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/del-me", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manifest: %d", rec.Code)
+	}
+	var man map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &man)
+	if man["expires_at"] == nil || man["expires_at"] == "" {
+		t.Fatalf("manifest must carry an expiry: %v", man)
+	}
+
+	// 显式删除
+	del := httptest.NewRequest(http.MethodDelete, "/v1/sessions/del-me", nil)
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, del)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("delete: %d %s", rec2.Code, rec2.Body.String())
+	}
+	var out map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &out)
+	if n, _ := out["deleted_events"].(float64); n <= 0 {
+		t.Fatalf("delete must report how many events went: %v", out)
+	}
+
+	// 删除后再查 = 404（不是空 200）
+	get := httptest.NewRequest(http.MethodGet, "/v1/sessions/del-me", nil)
+	rec3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec3, get)
+	if rec3.Code != http.StatusNotFound {
+		t.Fatalf("deleted session must be 404: %d", rec3.Code)
+	}
+	// 重复删除幂等
+	rec4 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec4, httptest.NewRequest(http.MethodDelete, "/v1/sessions/del-me", nil))
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("repeat delete must be idempotent: %d", rec4.Code)
+	}
+}
