@@ -173,6 +173,16 @@ func lexicalCoverage(idx *retrieval.Index, query string, ws []deepcore.Window) f
 	return coverageOf(idx, query, texts).Value
 }
 
+// LexicalCoverageFor 是词面覆盖度的导出入口（自适应预算要用它做判据）。
+// 口径与深循环内部一致：分母只数语料内可达词。
+func LexicalCoverageFor(idx *retrieval.Index, query string, ws []EvidenceWindow) float64 {
+	texts := make([]string, 0, len(ws))
+	for _, w := range ws {
+		texts = append(texts, w.Text)
+	}
+	return coverageOf(idx, query, texts).Value
+}
+
 // coverageOf 算覆盖并把语料外词一并记下（语料外词单独上报）。
 func coverageOf(idx *retrieval.Index, query string, texts []string) CoverageInfo {
 	terms := dedupe(retrieval.Fields(query))

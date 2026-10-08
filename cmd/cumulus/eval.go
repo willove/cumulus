@@ -98,6 +98,25 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 		synthFn = e.synth()
 	}
 	retrieve := qaflow.BM25Evidence(e.idx, e.topk(), e.width())
+	// 自适应预算（实验档）：第一页覆盖不够就整页加宽。诊断指向的是"给得够"
+	// 而不是"选得准"——multidoc evidence@k3=27.1%、@k9=70.8%。
+	if os.Getenv("CUMULUS_ADAPTIVE") == "1" {
+		big := e.topk() * 3
+		if v := os.Getenv("CUMULUS_TOPK"); v == "" {
+			big = 9
+		}
+		thr := 0.6
+		if v := os.Getenv("CUMULUS_ADAPTIVE_COV"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 1 {
+				thr = f
+			}
+		}
+		idx := e.idx
+		retrieve = qaflow.AdaptiveK(idx, e.width(), e.topk(), big, thr,
+			func(q string, ws []qaflow.EvidenceWindow) float64 {
+				return qaflow.LexicalCoverageFor(idx, q, ws)
+			})
+	}
 	if e.deep != nil {
 		retrieve = qaflow.BM25DeepEvidence(e.idx, e.width(), *e.deep)
 	}
@@ -270,6 +289,9 @@ func runEval(ctx gocontext.Context) error {
 	}
 
 	idx := retrieval.Build(corpus)
+	if c := coordFromEnv(); c > 0 {
+		idx.Coord = c
+	}
 	st, err := store.Open("", true)
 	if err != nil {
 		return err

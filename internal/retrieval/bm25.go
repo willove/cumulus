@@ -34,6 +34,16 @@ type Index struct {
 	N        int
 	AvgLen   float64
 
+	// Coord 是协调因子指数（0 = 关，默认）。打分时乘 (命中词数/查询词数)^Coord：
+	// 只命中一个实体的文档不再压过"把问句里几个实体都覆盖了"的文档。
+	//
+	// 为什么需要（真跑）：多实体问句（DomainRAG multidoc："数学与应用数学
+	// 专业**与**数据计算及应用专业在人才培养上的共同目标…"）里，纯 BM25 求和
+	// 会把"某个实体词反复命中"的文档排在前面，金标被推到 10–20 名——
+	// 池子里有（91.7% 在 top-20）但排不到前面。实测金标首次名次 ≤3 的只有
+	// 8/48。协调因子治的正是这个。
+	Coord float64
+
 	byID map[string]Document
 }
 
@@ -151,47 +161,21 @@ func (idx *Index) Rank(query string, k int) []string {
 // RankTerms 对已分词的词项列表排序。存在的原因：改写/收窄后的词项
 // 不能再拼回字符串重分词（会得到不同的二元组）。
 func (idx *Index) RankTerms(terms []string, k int) []string {
-	if idx == nil || idx.N == 0 || k <= 0 {
-		return nil
-	}
-	unique := UniqueTerms(terms)
-	if len(unique) == 0 {
-		return nil
-	}
-	scores := idx.scoreTerms(unique)
-	type hit struct {
-		id    string
-		score float64
-	}
-	hits := make([]hit, 0, len(scores))
-	for id, sc := range scores {
-		if sc > 0 {
-			hits = append(hits, hit{id, sc})
-		}
-	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		return hits[i].id < hits[j].id
-	})
-	if len(hits) > k {
-		hits = hits[:k]
-	}
-	if len(hits) == 0 {
-		return nil // 无命中返回 nil，不是空切片——调用方用 nil 判“没有”
-	}
-	out := make([]string, len(hits))
-	for i, h := range hits {
-		out[i] = h.id
-	}
-	return out
+	return idx.RankTermsCoord(terms, k)
 }
 
 // scoreTerms 只访问含查询词项的文档——这就是把 O(N) 全扫描换成
 // O(命中) 的那一步。
 func (idx *Index) scoreTerms(unique []string) map[string]float64 {
+	scores, hits := idx.scoreTermsCoord(unique)
+	_ = hits
+	return scores
+}
+
+// scoreTermsCoord 是 BM25 + 命中词数（协调因子的原料）。确定性：同输入同输出。
+func (idx *Index) scoreTermsCoord(unique []string) (map[string]float64, map[string]int) {
 	scores := make(map[string]float64, 256)
+	hits := make(map[string]int, 256)
 	for _, term := range unique {
 		postings := idx.Postings[term]
 		if len(postings) == 0 {
@@ -204,9 +188,82 @@ func (idx *Index) scoreTerms(unique []string) map[string]float64 {
 			tf := float64(p.TF)
 			denom := tf + bm25K1*(1-bm25B+bm25B*dl/idx.AvgLen)
 			scores[p.DocID] += idf * tf * (bm25K1 + 1) / denom
+			hits[p.DocID]++
 		}
 	}
-	return scores
+	return scores, hits
+}
+
+// coordFactor 返回该文档的协调乘子（1 = 开着但没惩罚）。指数 0 = 关。
+//
+// 分母只数**可达词**（语料里真的有的查询词）：胶水二元组与语料外词谁也匹配
+// 不上，把它们算进分母等于凭空惩罚每一篇文档——真跑踩过：可达词分母下
+// multidoc 27.1%→25.0%、faithful 81.6%→77.6%（协调因子反而有害）。这与
+// 词面覆盖度的"分母只数可达词"是同一条纪律。
+func (idx *Index) coordFactor(matched, reachable int) float64 {
+	if idx.Coord <= 0 || reachable <= 0 {
+		return 1
+	}
+	return math.Pow(float64(matched)/float64(reachable), idx.Coord)
+}
+
+// reachableTerms 是查询词里语料真有的那些（协调因子的分母）。
+func (idx *Index) reachableTerms(unique []string) int {
+	n := 0
+	for _, t := range unique {
+		if len(idx.Postings[t]) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// RankCoord 按协调因子排序（协调因子关掉时与 Rank 同序）。
+func (idx *Index) RankCoord(query string, k int) []string {
+	terms := UniqueTerms(Fields(query))
+	return idx.RankTermsCoord(terms, k)
+}
+
+// RankTermsCoord 是 RankTerms 的协调因子版：给定的词项表不能拼回字符串重分词，
+// 所以协调因子也必须在这个入口可用。
+func (idx *Index) RankTermsCoord(terms []string, k int) []string {
+	if idx == nil || idx.N == 0 || k <= 0 {
+		return nil
+	}
+	unique := UniqueTerms(terms)
+	if len(unique) == 0 {
+		return nil
+	}
+	scores, hits := idx.scoreTermsCoord(unique)
+	reach := idx.reachableTerms(unique)
+	type hit struct {
+		id    string
+		score float64
+	}
+	list := make([]hit, 0, len(scores))
+	for id, sc := range scores {
+		if sc <= 0 {
+			continue
+		}
+		list = append(list, hit{id: id, score: sc * idx.coordFactor(hits[id], reach)})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].score != list[j].score {
+			return list[i].score > list[j].score
+		}
+		return list[i].id < list[j].id
+	})
+	if len(list) > k {
+		list = list[:k]
+	}
+	out := make([]string, len(list))
+	for i, h := range list {
+		out[i] = h.id
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ResolveSpan 把 "rune[起:止]" 坐标还原成原文片段。解析失败返回 error——

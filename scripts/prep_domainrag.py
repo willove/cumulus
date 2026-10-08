@@ -114,6 +114,8 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--raw", default="", help="DomainRAG-main 目录（默认 ~/datasets/domainrag/raw）")
     ap.add_argument("--tasks", default="basic,multidoc,structured,faithful,time_sensitive")
+    ap.add_argument("--corpus-from", default="", help="语料从哪个任务的引用并集建（默认=本任务）。"
+                    "合并切片下用它避免跨任务噪声：basic 的候选池不该装 multidoc 的文档")
     ap.add_argument("--merge", action="store_true",
                     help="跨任务合并成一个切片（校准要一个题集；题号带 <task>: 前缀）")
     ap.add_argument("--distractors", type=int, default=0, help="每题掺多少干扰文档（0 = 不掺）")
@@ -131,6 +133,15 @@ def main() -> int:
 
     rng = random.Random(args.seed)
     merged_docs, merged_items, per_task = {}, [], {}
+    # 先跑一遍 corpus_from 任务，只为把它的文档并集算出来（不落盘）
+    corpus_docs = {}
+    if args.corpus_from:
+        cpath = os.path.join(root, TASKS[args.corpus_from])
+        for line in open(cpath, encoding="utf-8"):
+            if not line.strip():
+                continue
+            for did, ref in collect_refs(json.loads(line)):
+                corpus_docs.setdefault(did, {"id": did, "title": ref.get("title", ""), "body": ref["contents"]})
     for task in tasks:
         path = os.path.join(root, TASKS[task])
         if not os.path.exists(path):
@@ -188,7 +199,9 @@ def main() -> int:
                     item[k] = rec[k]
             items.append(item)
 
-        corpus = list(docs.values())
+        corpus = list(corpus_docs.values()) if corpus_docs else list(docs.values())
+        for did, d in docs.items():
+            corpus_docs.setdefault(did, d)
         # 难度旋钮：掺干扰文档（跨题去重采样）。金标永远在语料里。
         if args.distractors > 0 and len(items) > 1:
             pool = [d for d in corpus]

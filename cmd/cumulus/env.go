@@ -153,6 +153,22 @@ func selectorFromEnv() deepcore.Selector {
 	}
 }
 
+// coordFromEnv 返回检索协调因子指数（0 = 关，默认）。
+// CUMULUS_COORD=1 启用 (命中词数/查询词数)^lambda：多实体问句里，"覆盖了
+// 问句几个实体"比"某个实体词反复命中"更该排前面（DomainRAG multidoc 实测：
+// 协调前金标 ≤3 名只有 8/48）。
+func coordFromEnv() float64 {
+	v := os.Getenv("CUMULUS_COORD")
+	if v == "" {
+		return 0
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f < 0 {
+		return 0
+	}
+	return f
+}
+
 // deepFromEnv 从默认档出发按环境微调深循环（实验旋钮：池子大小与预算
 // 决定"选择阶段有没有余量"）。
 //
