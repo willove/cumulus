@@ -27,6 +27,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import random
 import sys
 import urllib.request
@@ -38,6 +39,80 @@ RAW_PATH = "dev.jsonl.gz"
 def hash12(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
+
+# 引导语/版式噪声：网页正文里大量"下面一起来看看""如图所示""相关阅读"——
+# 它们与问句有词面重叠（页面在讲这个话题），但里面没有答案。抽金标与丢弃
+# 判据共用这一张表（一处口径）。
+FILLER = ("下面", "一起来看看", "小编", "接下来", "如图", "如图所示", "相关阅读",
+          "浏览次数", "分享", "点击", "详情", "原标题", "内容提要", "摘要", "编辑：")
+WEAK = ("没有肯定答案", "不知道", "不太清楚", "仅供参考")
+
+
+def best_sentence(passage: str, question: str, max_len: int = 120) -> str:
+    """从正例段落里抽一句**答案句**。
+
+    两个坑都踩过（真跑）：
+    1. 正例是整段网页原文（导航、广告、重复链接），拿整段当金标，判官按
+       "被金标支持"打分必然全否——实测 30 题判官 6.9%；
+    2. 换成"与问句词面重叠最高的一句"更糟：正例里常把**问句原话**搬进来
+       当小标题（"国庆过后还有什么假期?"），重叠 1.0 的那句正是问题本身，
+       判官于是对正确答案判 NO（实测 3.8%）。
+    所以：先排除**问句复述**（归一化后与问句几乎相同的句子），再在剩下的
+    句子里偏向"答案长相"——含数字/枚举标记、非疑问句式、不与问句重复。
+    字还是原文的字，只把"答案是哪一句"交给数据层，别让判官去猜。
+    """
+    text = (passage or "").strip()
+    if not text:
+        return ""
+    parts, cur = [], []
+    for ch in text:
+        cur.append(ch)
+        if ch in "。！？；!?;\n":
+            parts.append("".join(cur).strip())
+            cur = []
+    if cur:
+        parts.append("".join(cur).strip())
+    parts = [p for p in parts if len(p) >= 4]
+    if not parts:
+        return text[:max_len]
+
+    def norm(s: str) -> str:
+        return "".join(ch for ch in s if ch.isalnum())
+
+    def grams(s: str):
+        s = norm(s)
+        return {s[i:i + 2] for i in range(len(s) - 1)}
+
+    qg = grams(question)
+    if not qg:
+        return parts[0][:max_len]
+
+    clean = []
+    for p in parts:
+        pg = grams(p)
+        if not pg:
+            continue
+        echo = len(qg & pg) / max(1, len(qg))
+        if echo >= 0.9 and len(norm(p)) <= len(norm(question)) * 1.5:
+            continue  # 问句复述/小标题：是问题不是答案
+        clean.append((p, echo, pg))
+    if not clean:
+        clean = [(p, len(qg & grams(p)) / max(1, len(qg)), grams(p)) for p in parts if grams(p)]
+    if not clean:
+        return text[:max_len]
+
+    def answer_score(p: str, echo: float, pg) -> float:
+        has_num = 1.0 if re.search(r"[0-9０-９一二三四五六七八九十]", p) else 0.0
+        enum = 1.0 if re.search(r"(^|\s)[0-9]+[、.．)）]|[一二三四五六七八九十]+[、）)]", p) else 0.0
+        questionish = 1.0 if p.rstrip().endswith(("?", "？")) else 0.0
+        filler = 1.0 if any(k in p for k in FILLER) else 0.0
+        weak = 1.0 if any(k in p for k in WEAK) else 0.0
+        overlap = len(qg & pg) / max(1, len(qg))
+        return (0.5 * overlap + 0.35 * has_num + 0.15 * enum
+                - 0.5 * questionish - 0.8 * filler - 0.3 * weak - 0.0004 * len(p))
+
+    best = max(clean, key=lambda c: answer_score(*c))
+    return best[0][:max_len]
 
 def download(dest_dir: str) -> str:
     os.makedirs(dest_dir, exist_ok=True)
@@ -94,6 +169,7 @@ def main() -> int:
 
     docs, items, seen = [], [], set()
     dropped_no_positive = 0
+    dropped_unjudgeable = 0
     for idx in sorted(keep):
         r = rows[idx]
         q = (r.get("query") or "").strip()
@@ -123,12 +199,17 @@ def main() -> int:
                 docs.append({"id": did, "title": "", "body": text})
             if (did, text) in pos:
                 gold_ids.append(did)
+        gold_answer = best_sentence(pos[0][1], q)
+        if len(gold_answer) < 10 or any(k in gold_answer for k in FILLER):
+            dropped_unjudgeable += 1
+            continue  # 金标抽不出可信答案句：这题进不了校准（判官没有可依据的金标）
         items.append({
             "id": str(r.get("query_id", idx)),
             "question": q,
-            # 规则臂在这套数据上没有口径（正例是整段检索文本，不是短答案）——
-            # 与 cn-law 同款的协议边界，记在 manifest 里，指标看证据命中与判官。
-            "answer": pos[0][1][:120],
+            # 规则臂仍无字面口径（答案句与生成答案不会逐字相同），但**判官有**：
+            # 金标从"整段原文"改成"与问句词面最贴的一句"（见 best_sentence）。
+            # 协议写进 manifest，指标看证据命中与判官。
+            "answer": gold_answer,
             "gold_ids": gold_ids,
         })
 
@@ -152,11 +233,12 @@ def main() -> int:
         "queries_requested": args.queries or len(rows),
         "queries": len(items),
         "dropped_no_positive": dropped_no_positive,
+        "dropped_unjudgeable": dropped_unjudgeable,
         "docs": len(docs),
         "negatives_per_query": args.negatives_per_query or "all",
         "avg_doc_chars": round(sum(len(d["body"]) for d in docs) / max(1, len(docs)), 1),
         "gold_in_corpus": golds <= {d["id"] for d in docs},
-        "answer_protocol": "answer = 首个正例前 120 字（规则臂无口径，看 evidence/judge）",
+        "answer_protocol": "answer = 首个正例里排除问句复述/引导语后最像答案的一句（≤120 字，原文不加工；抽不出可信句的题丢弃并计数）；规则臂无字面口径，看 evidence/judge",
         "corpus_sha": hashlib.sha256("".join(d["id"] for d in docs).encode()).hexdigest()[:16],
         "items_sha": hashlib.sha256("".join(i["id"] for i in items).encode()).hexdigest()[:16],
     }

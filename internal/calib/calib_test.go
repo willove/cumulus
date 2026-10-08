@@ -216,3 +216,53 @@ func TestBucketMonotoneFlagReflectsRawNoise(t *testing.T) {
 		prev = k.Value
 	}
 }
+
+// Evaluate 用**外来**阈值评估，不重挑阈值——在锁箱上重挑等于用锁箱调参。
+func TestEvaluateUsesGivenThreshold(t *testing.T) {
+	var samples []Sample
+	for i := 0; i < 40; i++ {
+		conf := float64(i) / 40
+		samples = append(samples, Sample{Confidence: conf, Correct: conf >= 0.5, Oracle: OracleJudge})
+	}
+	rep := Evaluate(0.5, samples, 0.10)
+	if rep.Answered != 20 || rep.AnsweredRisk != 0 {
+		t.Fatalf("given threshold must be honoured: %+v", rep)
+	}
+	if !rep.Satisfiable {
+		t.Fatalf("zero error under alpha must pass: %+v", rep)
+	}
+	// 阈值放到 0.5 以下会把错的题也放进已答集合：风险上升，必须如实报
+	lo := Evaluate(0.25, samples, 0.10)
+	if lo.Answered != 30 || lo.AnsweredRisk <= 0 {
+		t.Fatalf("lowering the threshold must show more risk: %+v", lo)
+	}
+	if lo.Satisfiable {
+		t.Fatalf("risk 10/30 with correction must fail alpha=0.10: %+v", lo)
+	}
+	// 空样本不算"通过"（没有样本就没有承诺）
+	empty := Evaluate(0.5, nil, 0.10)
+	if empty.Satisfiable || empty.Answered != 0 {
+		t.Fatalf("empty lockbox must not pass: %+v", empty)
+	}
+}
+
+// 小档不许绑架判决：最高置信档只有 1 题且答错时，包络曾被钉在 1.0，
+// 于是整体 93.9% 的易语料也被判"所有 α 不可行"。候选阈值必须有样本量。
+func TestBuildIgnoresTinyTopBucket(t *testing.T) {
+	var samples []Sample
+	for i := 0; i < 199; i++ {
+		samples = append(samples, Sample{Confidence: 0.5 + float64(i%40)/100, Correct: i%25 != 0, Oracle: OracleEvidence})
+	}
+	// 一个孤零零的最高档且答错
+	samples = append(samples, Sample{Confidence: 0.99, Correct: false, Oracle: OracleEvidence})
+	rep := Build(samples, 0, 0.10, 4)
+	if !rep.Satisfiable {
+		t.Fatalf("a single wrong item at the top must not block the honest threshold: %+v", rep)
+	}
+	if rep.Answered < 100 {
+		t.Fatalf("honest threshold should cover most of the set, got %d", rep.Answered)
+	}
+	if rep.Bound > 0.10 {
+		t.Fatalf("bound must respect alpha: %+v", rep)
+	}
+}

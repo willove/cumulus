@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/willove/cumulus/internal/embed"
+	"github.com/willove/cumulus/internal/evaldata"
+	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/judge"
 	"github.com/willove/cumulus/internal/llm"
@@ -147,4 +149,47 @@ func envInt(name string) (int, bool) {
 		return 0, false
 	}
 	return v, true
+}
+
+// applySplitAndSample 按环境先切分再采样。顺序是刻意的——**切分决定
+// "这题属于哪一份"（身份，稳定，与顺序无关），采样只是"这一份里跑多少题"
+// 的成本旋钮**。CUMULUS_SPLIT=calib|val|lockbox（题 id 哈希，默认 50/25/25），
+// CUMULUS_SAMPLE=N 对切分后的集合生效。
+func applySplitAndSample(items []evalfcore.Item) ([]evalfcore.Item, error) {
+	// 校准切分：CUMULUS_SPLIT=calib|val|lockbox 按题 id 哈希取一份。顺序是
+	// 刻意的——**先切分再采样**：切分决定"这题属于哪一份"（身份，稳定，
+	// 与顺序无关），采样只是"这一份里跑多少题"的成本旋钮。
+	if name := os.Getenv("CUMULUS_SPLIT"); name != "" {
+		calibFrac, valFrac := evaldata.DefaultSplit()
+		if v := os.Getenv("CUMULUS_SPLIT_CALIB"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f < 1 {
+				calibFrac = f
+			}
+		}
+		if v := os.Getenv("CUMULUS_SPLIT_VAL"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 && f < 1 {
+				valFrac = f
+			}
+		}
+		parts := evaldata.SplitItems(items, calibFrac, valFrac)
+		picked, ok := parts[evaldata.SplitName(name)]
+		if !ok {
+			return nil, fmt.Errorf("unknown CUMULUS_SPLIT %q (calib|val|lockbox)", name)
+		}
+		fmt.Printf("split %s: %d/%d 题（calib=%.0f%% val=%.0f%% 余下锁箱；题 id 哈希，与顺序无关）\n",
+			name, len(picked), len(items), calibFrac*100, valFrac*100)
+		items = picked
+	}
+	// 采样：把题数压到 N（成本旋钮；0 = 全量）。对**切分后的集合**生效
+	// ——"跑 300 题"指的是这一份里的 300 题，不是全库前 300 题。
+	if v := os.Getenv("CUMULUS_SAMPLE"); v != "" {
+		n := 0
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			return nil, fmt.Errorf("CUMULUS_SAMPLE not a number: %q", v)
+		}
+		if n > 0 && n < len(items) {
+			items = items[:n]
+		}
+	}
+	return items, nil
 }

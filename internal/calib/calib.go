@@ -44,6 +44,63 @@ const (
 	OracleEvidence = "evidence"
 )
 
+// Label 是一条样本的**事实**（对错 + 神谕来源），与用哪个信号无关。
+// 信号竞赛必须共用同一批标签：换信号不许换答案口径，否则比的是题目不是信号。
+type Label struct {
+	Correct bool
+	Oracle  string
+}
+
+// LabelOf 给一道题定标签。第二个返回值为假 = 这道题**不进任何校准**
+// （拒答 / 判官出错 / 评测出错）：它不是"答错"，是没有可校准的答案。
+func LabelOf(r evalfcore.ItemResult) (Label, bool) {
+	if r.Refused || r.Failure == "eval-error" || r.JudgeErr != "" {
+		return Label{}, false
+	}
+	if r.JudgeOK != nil {
+		return Label{Correct: *r.JudgeOK, Oracle: OracleJudge}, true
+	}
+	return Label{Correct: r.EvidenceHit, Oracle: OracleEvidence}, true
+}
+
+// SampleOf 用给定的信号值 + 共同标签造样本（信号竞赛用）。
+func SampleOf(r evalfcore.ItemResult, signal float64) (Sample, bool) {
+	lab, ok := LabelOf(r)
+	if !ok {
+		return Sample{}, false
+	}
+	return Sample{Confidence: signal, Correct: lab.Correct, Oracle: lab.Oracle}, true
+}
+
+// 神谕选择（校准用哪个事实口径）。判官不是唯一神谕：检索侧信号要承诺的
+// 是"找到没找到"（证据命中，确定性），答案侧信号要承诺的是"答对没答对"
+// （判官，受金标形态影响）。两个口径的读数可以差几十个百分点——并列报，
+// 不许拿一个冒充另一个。
+const (
+	OracleAny         = "any"      // 有判官用判官，否则证据命中
+	OracleJudgeOpt    = "judge"    // 只认判官判过的题
+	OracleEvidenceOpt = "evidence" // 只认证据命中（确定性，不看判官）
+)
+
+// SampleOfOracle 按指定神谕造样本。valid=false 表示这道题在该口径下没有
+// 可用事实（拒答、判官没判上分、评测出错），必须排除而不是当成"答错"。
+func SampleOfOracle(r evalfcore.ItemResult, signal float64, oracle string) (Sample, bool) {
+	if r.Refused || r.Failure == "eval-error" {
+		return Sample{}, false
+	}
+	switch oracle {
+	case OracleEvidenceOpt:
+		return Sample{Confidence: signal, Correct: r.EvidenceHit, Oracle: OracleEvidence}, true
+	case OracleJudgeOpt:
+		if r.JudgeOK == nil || r.JudgeErr != "" {
+			return Sample{}, false
+		}
+		return Sample{Confidence: signal, Correct: *r.JudgeOK, Oracle: OracleJudge}, true
+	default:
+		return SampleOf(r, signal)
+	}
+}
+
 // SampleFromResults 把逐题结果转成可校准样本。第二个返回值是**被跳过**
 // 的题数（拒答 / 判官出错 / 评测出错 / 无置信记录）——跳过多少必须可见，
 // 否则"校准集只有 40 条"这种事实会消失在平均值里。
@@ -206,6 +263,15 @@ func Build(samples []Sample, skipped int, alpha float64, buckets int) Report {
 		}
 	}
 
+	// 候选阈值只认"已答 ≥ minAnswers"的档：在 3 题上算风险是噪声，不是
+	// 承诺。真跑踩过——easy 档整体 93.9%，最高档只有 1 题且答错，风险包络
+	// 被钉在 1.0，于是**所有 α 都判不可行**；而答满 214 题的实际风险只有
+	// 6%。包络本身要保留（它保证"置信度更高的人不会更差"），但必须建立在
+	// 有样本量的档上。
+	minAnswers := 20
+	if len(samples) < 2*minAnswers {
+		minAnswers = 1
+	}
 	envelope, best := 0.0, math.Inf(1)
 	for _, tau := range uniq {
 		answered, errors := 0, 0
@@ -217,6 +283,9 @@ func Build(samples []Sample, skipped int, alpha float64, buckets int) Report {
 			if !s.Correct {
 				errors++
 			}
+		}
+		if answered < minAnswers {
+			continue // 档太小：不算风险，也不进包络
 		}
 		risk := float64(errors) / float64(answered)
 		if risk > envelope {
@@ -252,6 +321,37 @@ type Drift struct {
 	Drifted          bool    `json:"drifted"`  // 变差：承诺可能破了
 	Improved         bool    `json:"improved"` // 变好：校准偏保守（不是漂移）
 	Note             string  `json:"note"`
+}
+
+// Evaluate 用**给定的阈值**评估一批样本：答 conf ≥ τ 的题数与错误率。
+//
+// 这是锁箱工作流的入口：阈值来自校准集（Build），样本来自锁箱集。
+// 不复用 Build 是因为 Build 会**重新挑**阈值——在锁箱上重挑阈值等于用
+// 锁箱调参，锁箱就废了。锁箱只接受一个外来阈值，然后如实回答它是否兑现。
+func Evaluate(threshold float64, samples []Sample, alpha float64) Report {
+	if alpha <= 0 || alpha >= 1 {
+		alpha = 0.10
+	}
+	rep := Report{Samples: len(samples), Alpha: alpha, Threshold: threshold, Oracles: map[string]int{}}
+	for _, s := range samples {
+		rep.Oracles[s.Oracle]++
+	}
+	errors := 0
+	for _, s := range samples {
+		if s.Confidence < threshold {
+			continue
+		}
+		rep.Answered++
+		if !s.Correct {
+			errors++
+		}
+	}
+	if rep.Answered > 0 {
+		rep.AnsweredRisk = float64(errors) / float64(rep.Answered)
+	}
+	rep.Bound = rep.AnsweredRisk + (1-alpha)/float64(rep.Answered+1)
+	rep.Satisfiable = rep.Answered > 0 && rep.Bound <= alpha
+	return rep
 }
 
 // CompareSamples 是锁箱复验：拿校准集拟合出的阈值，直接在锁箱样本上算

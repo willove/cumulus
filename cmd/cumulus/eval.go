@@ -136,7 +136,13 @@ func (e *bm25Executor) Answer(_ gocontext.Context, question string) (evalfcore.I
 		CostKnown:        usage.CostKnown,
 		Confidence:       route.Signals.Confidence,
 		RouteTier:        route.Signals.Tier,
+		Coverage:         route.Signals.Coverage,
+		Margin:           route.Signals.Margin,
 	}
+	// 带符号的词面支持：答案的内容词有多少落在窗口原文里（post-answer
+	// 信号——只能在答案出来之后算，因此进不了路由，但进得了校准比较，
+	// 以及之后"验证后再决定升级/拒答"的环节）。
+	out.Support, out.SupportN = qaflow.AnswerSupport(answer.Text, windows)
 	// 底物信号交给归因（不在评审器的签名里加东西，执行面顺手报）：
 	// 窗里有没有数、查询的实体语料里有没有。
 	texts := make([]string, 0, len(windows))
@@ -207,13 +213,9 @@ func runEval(ctx gocontext.Context) error {
 		if path == "" {
 			path = filepath.Join(os.Getenv("HOME"), "datasets/cn-law-rag/finetune_dataset.jsonl")
 		}
-		sample := 300
-		if v := os.Getenv("CUMULUS_SAMPLE"); v != "" {
-			if _, err := fmt.Sscanf(v, "%d", &sample); err != nil {
-				return fmt.Errorf("CUMULUS_SAMPLE not a number: %q", v)
-			}
-		}
-		set, err := evaldata.LoadCNLaw(path, sample)
+		// cnlaw 自带采样参数：这里给 0（全量），统一采样交给下面的公共块
+		// ——两处采样会让"先切分再采样"的顺序无法保证。
+		set, err := evaldata.LoadCNLaw(path, 0)
 		if err != nil {
 			return err
 		}
@@ -243,18 +245,6 @@ func runEval(ctx gocontext.Context) error {
 		}
 		corpus, rawItems = set.Docs, set.Items
 		corpusSHA, itemsSHA = set.CorpusSHA, set.ItemsSHA
-		// CUMULUS_SAMPLE 对本地集同样生效（截前 N 题）——它是"跑多少题"
-		// 的统一旋钮，不该因为数据来源不同就失灵（真跑踩过：以为跑 30 题，
-		// 实际把 200 题全送进了 LLM 臂）。
-		if v := os.Getenv("CUMULUS_SAMPLE"); v != "" {
-			n := 0
-			if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-				return fmt.Errorf("CUMULUS_SAMPLE not a number: %q", v)
-			}
-			if n > 0 && n < len(rawItems) {
-				rawItems = rawItems[:n]
-			}
-		}
 		fmt.Printf("local: corpus=%s items=%s docs=%d items=%d\n", corpusPath, itemsPath, len(corpus), len(rawItems))
 		// 数据诊断必须看得见：金标不在语料里是"该拒答"的合法构造，但要
 		// 显式选择，不能默默跑（否则把数据错当成检索失败）。
@@ -262,6 +252,11 @@ func runEval(ctx gocontext.Context) error {
 			fmt.Printf("  warn: %s\n", w)
 		}
 	}
+	rawItems, err = applySplitAndSample(rawItems)
+	if err != nil {
+		return err
+	}
+
 	dset, err := evalfcore.NewDataset(rawItems)
 	ds = dset
 	if err != nil {
@@ -436,6 +431,8 @@ func runEval(ctx gocontext.Context) error {
 		}
 		fmt.Println(evalfcore.CalibrationReport(strongest.Arm, strongest))
 		printCalib(strongest)
+		printLockbox(strongest)
+		printCalibContest(strongest, alphaFromEnv())
 		if tau0Auto {
 			tau, oracle := evalfcore.SuggestedTau0(strongest)
 			fmt.Printf("tau0 suggestion: CUMULUS_TAU0=%.3f (from %s, next run applies it)\n", tau, oracle)
@@ -454,6 +451,8 @@ func runEval(ctx gocontext.Context) error {
 	if tau0Auto || os.Getenv("CUMULUS_CALIB") == "1" {
 		fmt.Println(evalfcore.CalibrationReport(state.Arm, state))
 		printCalib(state)
+		printLockbox(state)
+		printCalibContest(state, alphaFromEnv())
 	}
 	if tau0Auto {
 		tau, oracle := evalfcore.SuggestedTau0(state)

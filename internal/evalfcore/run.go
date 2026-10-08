@@ -60,11 +60,17 @@ type ItemResult struct {
 	Failure           string   `json:"failure,omitempty"`
 	RouteAction       string   `json:"route_action,omitempty"` // fast / escalate / refuse（归因与校准分桶用）
 	Confidence        float64  `json:"confidence,omitempty"`   // 路由实际用的置信代理（校准分桶用）
-	RouteTier         string   `json:"route_tier,omitempty"`   // 置信信号档位：logprob / retrieval
-	LatencyMS         int64    `json:"latency_ms"`
-	PromptTokens      int      `json:"prompt_tokens"`
-	CompletionTokens  int      `json:"completion_tokens"`
-	CostKnown         bool     `json:"cost_known"`
+	// 候选信号：校准要能**比较**信号，不能只有一个复合值。一次付费跑动
+	// 同时收齐，之后在同一批结果上比单调性与 α 可行性（见 internal/calib）。
+	Coverage         float64 `json:"coverage,omitempty"`      // 查询词覆盖度（语料内可达词口径）
+	Margin           float64 `json:"margin,omitempty"`        // (top1-top2)/top1：候选区分度
+	Support          float64 `json:"support,omitempty"`       // 答案的词面支持（SLC 离线代理，post-answer）
+	SupportN         int     `json:"support_terms,omitempty"` // 支持度分母（答案内容词数；0 = 无可验证断言）
+	RouteTier        string  `json:"route_tier,omitempty"`    // 置信信号档位：logprob / retrieval
+	LatencyMS        int64   `json:"latency_ms"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	CostKnown        bool    `json:"cost_known"`
 }
 
 // Citation 是答案里的一条引用。Resolved 为假 = 坐标回溯失败。
@@ -82,6 +88,10 @@ type ItemOutcome struct {
 	Cited            []Citation
 	Refused          bool
 	RouteAction      string
+	Coverage         float64 // 检索覆盖度（候选信号）
+	Margin           float64 // 候选区分度（候选信号）
+	Support          float64 // 答案词面支持（候选信号；post-answer）
+	SupportN         int     // 支持度分母（0 = 答案没有可验证的内容词）
 	Windows          int
 	LatencyMS        int64
 	PromptTokens     int
@@ -244,6 +254,10 @@ func (r *Runner) runItem(ctx context.Context, item Item) (ItemResult, error) {
 		RouteAction:       out.RouteAction,
 		Confidence:        out.Confidence,
 		RouteTier:         out.RouteTier,
+		Coverage:          out.Coverage,
+		Margin:            out.Margin,
+		Support:           out.Support,
+		SupportN:          out.SupportN,
 		LatencyMS:         latency,
 		PromptTokens:      out.PromptTokens,
 		CompletionTokens:  out.CompletionTokens,
