@@ -4,6 +4,33 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 宿主侧胶水：examples/evokechat/cumulus-transport.js
+
+Go 里的 `internal/harness/evokechat` 是同一套映射的 **Go 版**（服务端与测试用）；
+前端跑不了 Go，所以 `examples/evokechat/cumulus-transport.js` 是它的 **JS 镜像**。
+两侧必须同步改——事件词表变了两边都要动。
+
+**引擎 API 逐个核过存在性**（v0.4.1 `useChatEngine` 的返回值，共 49 个方法）：
+transport 用到的 11 个**全部真实存在**，其中三个是核对后才敢用的：
+
+| 想做的事 | 真实 API | 注意 |
+|---|---|---|
+| 阶段进度 | `setProgress(msg.id, {label, detail, elapsedMs})` | 组件直接渲染这三项（`message.progress.*`），**收尾引擎会清掉**；percent 组件不画，要进度条就自己用 `onStage` 画 |
+| 整段替换正文 | `updateMessage(msg.id, {content})` | **没有** `setContent` |
+| 引用面板 | 只能靠 `onCitations` 宿主回调 | **没有** `setSources`；面板用 `EbChatSources` 插槽或 `addArtifact` |
+
+**接入三行**：
+```js
+import { createCumulusTransport } from './cumulus-transport'
+const engine = useChatEngine({ onSend: createCumulusTransport({ engine }) })
+```
+`onSend` **必须返回 Promise 直到流结束**——引擎的 loading 挂在这一刻，生成中发送钮
+才会变停止钮（stoppable）；提前 resolve 会让 loading 立刻回落、停止钮不出现。
+
+**真跑验证**（真模型 + 真 SSE 流 + 假引擎记录调用）：进度行 22 条（首「理解问题与检索
+意图」末 `null`＝收尾清掉）、答案写入 17 次、工具卡 1 开 1 合、`completeMessage`/
+`setUsage` 各 1 次、思考 0 段（该模型不吐 `reasoning_content`）。
+
 ## 事件浏览器（viewer）：自证事件词表够用
 
 `internal/api/web/index.html`（embed 在 `/`，**零构建**：改它不需要 npm，一个二进制全带走）。
