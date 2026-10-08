@@ -134,6 +134,10 @@
   </div>
 
   <div class="box">
+    <div class="row" style="margin-bottom:6px">
+      <span class="kv" id="manifest" style="flex:1">还没有会话</span>
+      <button id="resume" style="display:none">断线续传</button>
+    </div>
     <details class="sum">
       <summary>事件契约自检：逐帧记录与词表覆盖</summary>
       <div class="counts" id="counts"></div>
@@ -153,10 +157,16 @@ const handled = Object.fromEntries(KINDS.map(k => [k, false]));
 const $ = id => document.getElementById(id);
 let ctrl = null;
 let ansBuf = "";
+// 会话 id 每次提问唯一（否则两次提问会接在同一场会话上），
+// lastSeq 是"我已经看到第几帧"——**断线续传的游标**。
+let sessionId = "";
+let lastSeq = 0;
+let manifest = null;
 
 $("go").onclick = () => { const q = $("q").value.trim(); if (q) run(q); };
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("go").click(); });
 $("stop").onclick = () => { if (ctrl) ctrl.abort(); };
+$("resume").onclick = resume;
 
 function reset() {
   const ul = $("stages");
@@ -178,13 +188,15 @@ function reset() {
 
 async function run(question) {
   reset();
+  sessionId = "viewer-" + Date.now().toString(36);
+  lastSeq = 0;
   $("go").disabled = true; $("stop").disabled = false;
   ctrl = new AbortController();
   try {
     const resp = await fetch("/v1/qa/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, session: "viewer" }),
+      body: JSON.stringify({ question, session: sessionId }),
       signal: ctrl.signal
     });
     if (!resp.ok) throw new Error("HTTP " + resp.status + " " + (await resp.text()));
@@ -232,6 +244,7 @@ function row(kind, seq, at, note) {
 
 function handle(ev) {
   if (ev.kind) seen[ev.kind] = (seen[ev.kind] || 0) + 1;
+  if (ev.seq) lastSeq = ev.seq;
   switch (ev.kind) {
     case "started":
       handled.started = true;
@@ -317,6 +330,7 @@ function handle(ev) {
       $("bar").firstElementChild.style.width = "100%";
       $("pct").textContent = "完成 · 事件 " + ((d.counts || {}).delivered || "?") +
         " · 丢失 " + ((d.counts || {}).dropped || 0);
+      loadManifest();
       // 收尾后思考区收成一行，可再展开
       $("thinkWrap").open = false;
       $("thinkSum").textContent = "思考过程（" + $("think").textContent.length + " 字，点击展开）";
@@ -328,6 +342,41 @@ function handle(ev) {
       row(ev.kind || "?", ev.seq, ev.at_ms, "**未处理**");
   }
   renderCounts();
+}
+
+// 会话清单：这场会话录了多少帧、完了吗。断线时它就是"还有什么没看到"的依据。
+async function loadManifest() {
+  if (!sessionId) return;
+  try {
+    const r = await fetch("/v1/sessions/" + encodeURIComponent(sessionId));
+    if (!r.ok) return;
+    const m = await r.json();
+    manifest = m;
+    $("manifest").textContent =
+      "会话 " + m.session_id + " · 已录 " + m.count + " 帧 · 最后序号 " + m.last_seq +
+      " · " + (m.complete ? "已收尾" : "中途断开") +
+      (m.last_seq > lastSeq ? "（本地只看到第 " + lastSeq + " 帧）" : "（本地已看到全部）");
+    $("resume").style.display = (m.last_seq > lastSeq) ? "inline-block" : "none";
+  } catch (e) { /* 清单读不到不打扰：流本身已经跑完 */ }
+}
+
+// 断线续传：拿 cursor 补页。**帧形状与实时完全一致**——同一套 handle()，
+// 所以续传回来的思考/进度/引用会照常渲染，不需要第二套解析逻辑。
+async function resume() {
+  if (!sessionId) return;
+  $("resume").disabled = true;
+  $("pct").textContent = "补页中（cursor=" + lastSeq + "）…";
+  try {
+    const r = await fetch("/v1/sessions/" + encodeURIComponent(sessionId) + "/events?cursor=" + lastSeq);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    await readSSE(r);
+    $("pct").textContent = "已补页 · 现在看到第 " + lastSeq + " 帧";
+    await loadManifest();
+  } catch (e) {
+    $("pct").textContent = "补页失败：" + String((e && e.message) || e);
+  } finally {
+    $("resume").disabled = false;
+  }
 }
 
 function stageList() {

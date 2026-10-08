@@ -96,8 +96,19 @@ func (l *SessionLog) Record(ctx gocontext.Context, ev Event) error {
 	if ev.Kind == KindDone || ev.Kind == KindError {
 		return l.Commit(ctx, true)
 	}
+	// **增量提交**：每 N 帧写一次清单。理由是真实场景逼出来的——一次问答几十秒，
+	// 用户在**跑到一半**时掉线是常态；清单只在终态写的话，"进行中的会话"根本
+	// 查不到（真跑踩过：客户端读了 4 帧就断，问清单得到 404，补页无从下手）。
+	// 代价：清单会写多次，读到的 count 可能**略微落后**于实际——它本来就是进度
+	// 读数，不是账本；补页按 seq 直接读事件，不依赖清单的 count。
+	if ev.Seq%commitEvery == 0 {
+		return l.Commit(ctx, false)
+	}
 	return nil
 }
+
+// commitEvery 是增量提交清单的间隔（帧）。
+const commitEvery = 8
 
 // Commit 写清单（最后一步）。complete=true 表示会话正常收尾。
 func (l *SessionLog) Commit(ctx gocontext.Context, complete bool) error {
