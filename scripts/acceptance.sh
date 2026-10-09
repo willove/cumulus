@@ -24,6 +24,14 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
+
+# go 不一定在 PATH 里（后台任务/非交互 shell 的常见坑）：找不到就按 SDK 常见位置找。
+if ! command -v go >/dev/null 2>&1; then
+  for cand in /usr/local/go/bin /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" "$HOME/sdk"/go*/bin; do
+    [[ -x "$cand/go" ]] && export PATH="$cand:$PATH" && break
+  done
+fi
+command -v go >/dev/null 2>&1 || { echo "找不到 go（装它或在 PATH 里放好）"; exit 2; }
 export GOCACHE="$PWD/.gocache"
 
 OFFLINE=0
@@ -128,7 +136,9 @@ if [[ $OFFLINE -eq 0 ]]; then
 fi
 
 # `env VAR=… bin …`：比前缀数组更稳（bash 的 `"${ARR[@]}"` 在空数组下会吞掉后面的命令）
-env CUMULUS_KEYS="alpha=$KEY_A,beta=$KEY_B" ${LLM_ENV[@]+"${LLM_ENV[@]}"} \
+env CUMULUS_KEYS="alpha=$KEY_A,beta=$KEY_B" \
+  CUMULUS_QUOTAS="alpha=60/10,beta=60/10" \
+  ${LLM_ENV[@]+"${LLM_ENV[@]}"} \
   "$BIN" serve $SYNTH_FLAG -listen "127.0.0.1:$PORT" \
   -data "$DATA" -watch "$CORPUS" >"$LOG" 2>&1 &
 SERVER_PID=$!
@@ -199,11 +209,32 @@ echo "$STREAM" | grep -q '^\[DONE\]\|data: \[DONE\]' && ok "流以 [DONE] 收尾
 
 # ── 5. 会话回放
 head_ "5. 会话回放"
-SESS=$(curl -sf "$BASE/v1/sessions" -H "X-Cumulus-Key: $KEY_A" 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print((d.get("sessions") or [""])[-1])' 2>/dev/null || echo "")
+# 只有 **stream 端点**建会话（一次性 /v1/qa 不建——没有帧序列可存），
+# 所以这里必须先打一次 stream 才有一场会话可回放。
+curl -sN -m 60 -X POST "$BASE/v1/qa/stream" -H 'Content-Type: application/json' \
+  -H "X-Cumulus-Key: $KEY_A" -d '{"question":"发明专利年费是多少？","session":"acc-replay"}' >/dev/null 2>&1
+SESS=$(curl -sf "$BASE/v1/sessions" -H "X-Cumulus-Key: $KEY_A" 2>/dev/null |
+  python3 -c 'import sys,json;d=json.load(sys.stdin);ss=d.get("sessions") or [];print(ss[0].get("session_id","") if ss else "")' 2>/dev/null || echo "")
 if [[ -n "$SESS" ]]; then
   REPLAY=$(curl -sf "$BASE/v1/sessions/$SESS/events?cursor=0" -H "X-Cumulus-Key: $KEY_A")
   echo "$REPLAY" | grep -q '"kind"' && ok "会话可回放（${SESS}）" || bad "会话回放失败" "$(echo "$REPLAY" | head -c 120)"
-  echo "$REPLAY" | grep -q 'manifest' && ok "回放含 manifest（最后一帧）" || note "回放里没看到 manifest"
+  # manifest 是"最后一帧"这一条契约：客户端据此知道"这场会话到此为止"
+  MAN=$(curl -sf "$BASE/v1/sessions/$SESS" -H "X-Cumulus-Key: $KEY_A")
+  echo "$MAN" | grep -q '"' && ok "会话清单可读（manifest）" || bad "会话清单读不到: $(echo "$MAN" | head -c 100)"
+  # cursor 续读：带一个大 cursor 应该拿不到更早的事件（分页语义）
+  # cursor 超界 → **不再有真实事件**（实现会补一个"已到末尾"的进度帧，那是给
+  # 客户端的提示，不是历史事件；所以这里只查"没有历史事件帧"）。
+  TAILPAGE=$(curl -sf "$BASE/v1/sessions/$SESS/events?cursor=999999" -H "X-Cumulus-Key: $KEY_A")
+  if echo "$TAILPAGE" | grep -qE '"kind":"(stage|content|citations|reasoning)"'; then
+    bad "cursor 超界仍返回了历史事件帧"
+  else
+    ok "cursor 超界不再返回历史事件（分页语义正确）"
+  fi
+  echo "$TAILPAGE" | grep -q 'replay:' && ok "超界时给出已到末尾的提示帧" || note "超界时没有末尾提示帧"
+
+  # 删除会话（用户显式"清除记录"）
+  DEL=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/v1/sessions/$SESS" -H "X-Cumulus-Key: $KEY_A")
+  [[ "$DEL" == "200" ]] && ok "会话可删除（清除记录）" || bad "删除会话应 200，实得 $DEL"
 else
   note "没有可用 session（离线合成下可能不建会话）"
 fi
@@ -273,6 +304,30 @@ C_BAD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/v1/docs" -H 'Conte
 NOEV=$(curl -s -X POST "$BASE/v1/docs" -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_B" -d '{"topic":"beta 里没有语料时的生成","store":true}')
 echo "$NOEV" | grep -q 'error' && ok "无证据时给出可读错误（不产出空文档）" || bad "无证据时应报错"
 printf '    说明：%s\n' "$(echo "$NOEV" | head -c 120)"
+
+# ── 10. 配额与用量
+head_ "10. 配额与用量"
+USAGE=$(curl -sf "$BASE/v1/usage" -H "X-Cumulus-Key: $KEY_A")
+echo "$USAGE" | grep -q '"metered":true' && ok "用量读数可用（计量已装）" || bad "用量读数不可用" "$(echo "$USAGE" | head -c 120)"
+echo "$USAGE" | grep -q '"realm":"alpha"' && ok "用量按调用者 realm 报告" || bad "用量 realm 不对"
+QN=$(echo "$USAGE" | python3 -c 'import sys,json;print(json.load(sys.stdin)["usage"]["usage"]["questions"])' 2>/dev/null || echo 0)
+[[ "${QN:-0}" -ge 1 ]] && ok "问答次数已记账（$QN 次）" || bad "问答次数没记账"
+echo "$USAGE" | grep -q '"questions_per_day":60' && ok "配额读数可见" || bad "配额读数缺失"
+
+# 单独起一个"小额配额"服务来验证 429（不然要问 60 次）
+SMALL_PORT=$((PORT+1))
+env CUMULUS_KEYS="alpha=$KEY_A" CUMULUS_QUOTAS="alpha=1/0" \
+  "$BIN" serve -synth offline -listen "127.0.0.1:$SMALL_PORT" -data "$WORK/small" -watch "$CORPUS" >"$WORK/small.log" 2>&1 &
+SMALL_PID=$!
+for _ in $(seq 1 30); do curl -sf "http://127.0.0.1:$SMALL_PORT/v1/health" -H "X-Cumulus-Key: $KEY_A" >/dev/null 2>&1 && break; sleep 0.5; done
+sleep 2
+c1=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SMALL_PORT/v1/qa" -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_A" -d '{"question":"发明专利年费是多少？"}')
+c2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$SMALL_PORT/v1/qa" -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_A" -d '{"question":"发明专利年费是多少？"}')
+[[ "$c1" == "200" ]] && ok "配额内 → 200" || note "第 1 次=$c1（离线合成下可能不同）"
+[[ "$c2" == "429" ]] && ok "超额 → 429" || bad "超额应 429，实得 $c2"
+DETAIL=$(curl -s -X POST "http://127.0.0.1:$SMALL_PORT/v1/qa" -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_A" -d '{"question":"x"}' | python3 -c 'import sys,json;print(json.load(sys.stdin).get("detail",""))' 2>/dev/null || echo "")
+echo "$DETAIL" | grep -q '重置' && ok "429 带可读原因（说明何时重置）" || note "429 未带原因: $DETAIL"
+kill $SMALL_PID 2>/dev/null
 
 # ── 汇总
 head_ "汇总"

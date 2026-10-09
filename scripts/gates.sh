@@ -3,6 +3,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# go / gofmt 不一定在 PATH 里（后台任务与非交互 shell 的常见坑）。找不到就按
+# SDK 常见位置找——门禁自己跑不起来时**整门红**，那比"没跑"更糟。
+ensure_go() {
+  command -v go >/dev/null 2>&1 && return 0
+  for cand in /usr/local/go/bin /opt/homebrew/bin /usr/local/bin "$HOME/go/bin" "$HOME/sdk"/go*/bin; do
+    if [[ -x "$cand/go" ]]; then export PATH="$cand:$PATH"; return 0; fi
+  done
+  return 1
+}
+ensure_go || { echo "gates: 找不到 go（装它或在 PATH 里放好）"; exit 2; }
+
 FAIL=0
 gate() { printf '[gate] %-28s' "$1"; shift; if "$@"; then echo "ok"; else echo "FAIL"; FAIL=1; fi; }
 

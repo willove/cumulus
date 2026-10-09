@@ -96,7 +96,9 @@ var packages = map[string]Layer{
 	"ctxmgmt": LayerCapabilities,
 	// docgen 是**知识文档生成**（语料的生产入口）：依赖检索与 LLM，
 	// 被 api 调用。它是 capabilities（运行时能力，不是 tooling）。
-	"docgen":            LayerCapabilities,
+	"docgen": LayerCapabilities,
+	// usage 是**用量计量与配额**（运行时能力：共享实例的必需品）
+	"usage":             LayerCapabilities,
 	"deepcore":          LayerCapabilities,
 	"embed":             LayerCapabilities,
 	"evaldata":          LayerTooling,

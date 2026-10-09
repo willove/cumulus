@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,18 @@ func (s *Server) sessionManifest(w http.ResponseWriter, r *http.Request, id stri
 // 保守：没有索引支持的全集扫描，就不假装能给全集）。
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	ids := r.URL.Query()["id"]
+	if len(ids) == 0 {
+		// **不带 id 时列出库里全部会话**（按保留期排序，最新在前）。
+		//
+		// 原来只有 `?id=` 一种查法，于是"我这次会话有哪些"根本问不出来——
+		// 验收脚本第一次跑就撞在这里（"没有可用 session"其实是我**查不出**，
+		// 不是没有）。清单类接口不给"列出来"的能力，调用方就只能自己记 id。
+		if s.Store == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"sessions": []harness.SessionManifest{}})
+			return
+		}
+		ids, _ = s.Store.ListIDs(r.Context(), harness.SessionManifestCollection, 0)
+	}
 	out := make([]harness.SessionManifest, 0, len(ids))
 	for _, id := range ids {
 		if id == "" {
@@ -76,6 +89,8 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 			out = append(out, man)
 		}
 	}
+	// 新的在前（UpdatedAt 是字符串时间戳，字典序即时间序；缺失时保持库序）
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
 }
 

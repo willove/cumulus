@@ -21,6 +21,7 @@ import (
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
+	"github.com/willove/cumulus/internal/usage"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +33,8 @@ import (
 // 语料与索引例外：摄入是运行时事件，索引跟着重建（个人库规模，毫秒级）。
 type Server struct {
 	Store corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
+	// Meter 是**用量计量与配额**（可选件）：nil = 不计量也不限流。
+	Meter *usage.Meter
 	// DocGen 是**知识文档生成**（可选件）：把证据整理成一篇可核对的文档写回
 	// 语料，于是下一轮问答能引用它。nil = 不提供（端点回 501，/v1/status 可见）。
 	DocGen *DocGen
@@ -72,6 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/sessions/", s.handleSession)
 	mux.HandleFunc("/v1/docs", s.handleGenerateDoc)
 	mux.HandleFunc("/v1/docs/topics", s.handleSuggestTopics)
+	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.HandleFunc("/v1/signal", s.handleSignal)
 	mux.HandleFunc("/v1/signals", s.handleSignals)
 	mux.HandleFunc("/v1/health", s.handleHealth)
@@ -135,6 +139,10 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 	// 语料版本是内容摘要，配置版本是生效装配的形状，策略是标签，信念
 	// 已退役记 none。语料在长，答案必须能说明"这是针对哪一版给的"。
 	opts.CorpusVersion, opts.ConfigVersion, opts.StrategyVersion, opts.BeliefVersion = s.committedVersions()
+	// 配额闸门（共享实例的必需品）：超限 → 429，不进流程（不耗 LLM、不写 session）
+	if !s.allowQuota(w, s.realmOf(r), usage.KindQuestion) {
+		return
+	}
 	idx, ierr := s.IndexFor(r.Context(), s.realmOf(r))
 	if ierr != nil || idx == nil {
 		writeErr(w, http.StatusInternalServerError, "index: "+realmErr(ierr))
@@ -146,6 +154,11 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := s.record(c, req.Question)
+	// token 记账：**只有 provider 给了 usage 才记**（CostKnown=false 不记）——
+	// 宁可读数说"不知道"，也不要填 0 冒充没用钱（usage 包的纪律 2）。
+	if s.Meter != nil && resp.Usage.CostKnown {
+		s.Meter.RecordTokens(s.realmOf(r), int64(resp.Usage.PromptTokens), int64(resp.Usage.CompletionTokens), true)
+	}
 	// 使用信号（"长"的地基）：同一 session 同一问句再来一次 = 再问。按
 	// 上轮答没答分两族（弃权没解决 / 答案没答全）——服务端推导，前端零
 	// 改动。无 session 的一次性问答不记（没有"再问"的上下文）。

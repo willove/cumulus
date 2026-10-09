@@ -17,9 +17,12 @@ import (
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/store"
+	"github.com/willove/cumulus/internal/usage"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -87,6 +90,17 @@ func runServe(args []string) error {
 	// 凭证表：`CUMULUS_KEYS=realm=key,realm2=key2`（realm 由**凭证推导**，
 	// 不信请求体里的自称）。没配 = 宽容（本地开发），但会打印醒目提示——
 	// 多租户部署忘了配 key 是危险状态，不该静默。
+	// 配额：CUMULUS_QUOTAS="alpha=50/5,beta=20/0"（realm=每天问答数/每天生成数；0=不限）。
+	// 没配 = 不限流（本地开发形态）；**共享实例必须配**——只做隔离挡不住写爆的人。
+	quotas, qerr := parseQuotas(os.Getenv("CUMULUS_QUOTAS"))
+	if qerr != nil {
+		return fmt.Errorf("CUMULUS_QUOTAS: %w", qerr)
+	}
+	if len(quotas) > 0 {
+		srv.Meter = usage.NewMeter(quotas)
+		fmt.Printf("meter: 配额已启用（%d 个 realm）\n", len(quotas))
+	}
+
 	keys, kerr := auth.ParseKeyringSpec(os.Getenv("CUMULUS_KEYS"))
 	if kerr != nil {
 		return fmt.Errorf("CUMULUS_KEYS: %w", kerr)
@@ -255,3 +269,40 @@ func runSignals(args []string) error {
 //
 // 周期与 TTL **故意分开**：TTL 决定"多久算过期"，周期决定"多久才真的删"。
 // 把周期调到比 TTL 还密是部署者的选择（要更硬的删除保证）——但不该由代码替他们定。
+
+// parseQuotas 解析 "realm=问答数/生成数,realm2=…"。
+//
+// 为什么是这个形状：一个 realm 两个数字，写成 map 反而啰嗦；0 = 该维度不限。
+func parseQuotas(spec string) (map[string]usage.Quota, error) {
+	out := map[string]usage.Quota{}
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		realm, rest, ok := strings.Cut(part, "=")
+		if !ok {
+			return nil, fmt.Errorf("项 %q 缺少 '='（形如 realm=50/5）", part)
+		}
+		q := usage.Quota{}
+		qbits := strings.SplitN(rest, "/", 2)
+		n, err := strconv.Atoi(strings.TrimSpace(qbits[0]))
+		if err != nil {
+			return nil, fmt.Errorf("realm %s 的问答数 %q 不是整数", realm, qbits[0])
+		}
+		q.QuestionsPerDay = int64(n)
+		if len(qbits) == 2 {
+			d, err := strconv.Atoi(strings.TrimSpace(qbits[1]))
+			if err != nil {
+				return nil, fmt.Errorf("realm %s 的生成数 %q 不是整数", realm, qbits[1])
+			}
+			q.DocsPerDay = int64(d)
+		}
+		out[strings.TrimSpace(realm)] = q
+	}
+	return out, nil
+}
