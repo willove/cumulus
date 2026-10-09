@@ -4,6 +4,20 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 并发：read-modify-write 必须串行化（+ race 门禁）
+
+生成文档的更新是 **read-modify-write**（读旧版 → 算版本/差异 → 写回）。8 个并发请求
+生成同一主题时，版本号是 `[2 2 2 2 1 1 2 2]`——**6 次更新静默消失，不报错**。
+真实后果：版本历史被覆盖，而版本号正是"这一版多了/少了什么"的依据。
+
+修法：**按文档 id 串行化**那段临界区。锁粒度是文档 id 而非全局——不同主题完全并行。
+
+用 `sync.Map` 而不是 `map+Mutex`：map 零值不可用、惰性初始化本身就是竞争源
+（第一版自加的锁先被 race detector 报出来）。
+
+**第十道门禁**：`go test -race` 跑关键并发面（api / usage / knowledge / harness）。
+此前门禁完全不跑 race——这类问题只有它能抓。
+
 ## 长文档：按事实锚定切窗（不是把整篇塞进去）
 
 长文档探针（`scripts/probe_long.py` + `scripts/probe_long.sh`，9 篇 379–1733 字）实测：

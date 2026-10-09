@@ -60,8 +60,19 @@ type Server struct {
 	// realm 由**凭证推导**，不信客户端声明——声明就是自己说我是谁。
 	Keys *auth.Keyring
 
-	mu    sync.RWMutex
-	index *retrieval.Index
+	mu sync.RWMutex
+
+	// docLocks 是**按生成文档 id** 的串行化锁（见 lockDoc）。
+	//
+	// 为什么用 sync.Map 而不是 map+Mutex：map 的**零值不可用**、惰性初始化本身
+	// 又是竞争源（我用 map+Mutex 时 race detector 直接报了 docLocks 的竞争——
+	// 自己新加的锁自己先出事）。sync.Map 的零值可用，读多写少正是它的场景。
+	//
+	// 为什么不用一把大锁：不同主题的生成互不相干；大锁会把并行的也串起来。
+	// 为什么必须有：更新是 read-modify-write，不锁就会**静默丢更新**（并发测试读到
+	// 的版本号是 [2 2 2 2 1 1 2 2]——6 次更新凭空消失，且没有任何报错）。
+	docLocks sync.Map // docID → *sync.Mutex
+	index    *retrieval.Index
 	// indexes 是**按 realm 分开的索引**：多租户共用一个实例时，检索面也必须
 	// 分开。只在集合上分开、索引还共用着，等于门锁上了窗户开着。
 	indexes map[string]*retrieval.Index

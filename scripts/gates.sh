@@ -20,6 +20,13 @@ gate() { printf '[gate] %-28s' "$1"; shift; if "$@"; then echo "ok"; else echo "
 gate "gofmt" bash -c 'test -z "$(gofmt -l .)"'
 gate "vet" go vet ./...
 gate "test" go test ./...
+
+# race：并发正确性门禁。**只跑有关键并发面的包**（全量 -race 很慢，门禁要能天天跑）。
+#
+# 为什么必须有（真跑）：生成文档的更新是 read-modify-write（读版本 → 算差 → 写），
+# 8 个并发请求下版本号读出来是 [2 2 2 2 1 1 2 2] —— **6 次更新静默消失**，而且
+# 没有任何报错。人眼看代码看不出来，只有 race detector + 并发断言能抓。
+gate "race" go test -race -count=1 ./internal/api/ ./internal/usage/ ./internal/knowledge/ ./internal/harness/...
 # grammar-conformance：stage 契约（禁闭/反卷/注册）与**合流**（v0.2 §三.6：
 # 随机装卸重放三断言——无悬挂/逆干净/终态等价）都是流程文法的执行处。
 # boundary：分层与依赖方向（internal/arch）。新包不登记归属、或底层反向

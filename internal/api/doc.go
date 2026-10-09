@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	gocontext "context"
@@ -123,6 +124,17 @@ func (s *Server) handleGenerateDoc(w http.ResponseWriter, r *http.Request) {
 		// 竞争、读者分不清哪篇最新）——"整理一次、问答受益"就变成"整理越多越难查"。
 		topicKey := docgen.TopicKey(req.Topic)
 		id := genPrefix + topicKey
+
+		// **同主题串行化**（read-modify-write 竞态）。
+		//
+		// 真跑（并发测试，8 个请求同主题）：版本号读出来是 [2 2 2 2 1 1 2 2]
+		// ——**6 次更新被静默吞掉**：每个请求都读到 v1、都写 v2，谁慢谁覆盖谁。
+		// 真实场景就是"两个人同时整理同一个主题，版本历史丢了"。
+		//
+		// 锁的粒度是**文档 id**，不是全局：不同主题仍然完全并行（那 6 个并发的
+		// 不同主题用例照样秒过）。拿到锁后再读旧版 → 版本与正文都不会串。
+		unlock := s.lockDoc(id)
+		defer unlock()
 		prev := s.prevDoc(ctx, realm, id)
 		// 语义判据：词面判据抓不住"请求减缓" vs "申请缓缴"这类同义改写（真跑量到）。
 		// 判据缺席时 ReviseWith 自动退化为词面口径（保守：多报差异而非谎报合并）。
@@ -279,4 +291,18 @@ func (s *Server) handleSuggestTopics(w http.ResponseWriter, r *http.Request) {
 			"answer_incomplete":   docgen.WeightIncomplete,
 		},
 	})
+}
+
+// lockDoc 按**文档 id** 串行化"读旧版 → 算版本 → 写回"这段临界区。
+//
+// 为什么不用全局锁：不同主题的生成互不相干（实测 6 个不同主题并发时各写一篇，
+// 毫秒级完成）。全局锁会把"互不相干的并发"也串起来。
+//
+// 为什么必须有：生成文档的更新是 read-modify-write（读版本 → 算差 → 写），
+// 不串行化就会丢更新——**而且不报错**（后写覆盖先写，看起来一切正常）。
+func (s *Server) lockDoc(id string) func() {
+	v, _ := s.docLocks.LoadOrStore(id, &sync.Mutex{})
+	l := v.(*sync.Mutex)
+	l.Lock()
+	return l.Unlock
 }

@@ -329,6 +329,47 @@ DETAIL=$(curl -s -X POST "http://127.0.0.1:$SMALL_PORT/v1/qa" -H 'Content-Type: 
 echo "$DETAIL" | grep -q '重置' && ok "429 带可读原因（说明何时重置）" || note "429 未带原因: $DETAIL"
 kill $SMALL_PID 2>/dev/null
 
+# ── 11. 并发写入
+head_ "11. 并发写入"
+# 同主题并发生成 6 次：版本必须**逐次递增**（read-modify-write 竞态会静默吞更新，
+# 且不报错——真跑踩过：8 并发下版本号是 [2 2 2 2 1 1 2 2]，6 次更新消失）
+CONC=$(for i in $(seq 1 6); do
+  curl -sS -X POST "$BASE/v1/docs" -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_A" \
+    -d '{"topic":"专利年费怎么交","store":true,"top_k":6}' &
+done; wait)
+VERS=$(printf '%s' "$CONC" | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+# 并发输出是多段 JSON，用解码器逐个取出
+dec = json.JSONDecoder()
+vs, i = [], 0
+while i < len(raw):
+    while i < len(raw) and raw[i] not in "{[": i += 1
+    if i >= len(raw): break
+    try:
+        obj, j = dec.raw_decode(raw, i)
+    except Exception:
+        i += 1; continue
+    vs.append(obj.get("version")); i = j
+print(" ".join(str(v) for v in vs))' 2>/dev/null)
+UNIQ=$(printf '%s' "$VERS" | tr ' ' '\n' | sort -u | grep -c '[0-9]')
+MAXV=$(printf '%s' "$VERS" | tr ' ' '\n' | sort -n | tail -1)
+if [[ "${UNIQ:-0}" -ge 6 ]]; then
+  ok "同主题并发 6 次：版本逐次递增（$VERS）"
+else
+  bad "同主题并发出现丢更新（版本号只有 ${UNIQ} 个不同值: $VERS）"
+fi
+# 并发问答不许 panic / 5xx
+PIDS=(); CODES=""
+for i in 1 2 3 4 5 6; do
+  CODES="$CODES$(curl -s -o /dev/null -w '%{http_code}
+' -X POST "$BASE/v1/qa" \
+    -H 'Content-Type: application/json' -H "X-Cumulus-Key: $KEY_A" \
+    -d "{\"question\":\"专利年费多少\",\"session\":\"conc$i\"}")"$'\n'
+done
+BAD5XX=$(printf '%s' "$CODES" | grep -c '5[0-9][0-9]')
+[[ "$BAD5XX" == "0" ]] && ok "并发问答无 5xx" || bad "并发问答出现 ${BAD5XX} 次 5xx"
+
 # ── 汇总
 head_ "汇总"
 printf '  PASS %d   FAIL %d\n' "$PASS" "$FAIL"

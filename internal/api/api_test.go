@@ -244,15 +244,16 @@ type fakeStore struct{ docs map[string]corpusDocShape }
 func newFakeStore() *fakeStore { return &fakeStore{docs: map[string]corpusDocShape{}} }
 
 type corpusDocShape struct {
-	ID   string
-	Body string
-	Coll string // 所属集合：多租户断言靠它（否则 ListIDs 忽略 realm 会掩盖越界）
+	ID      string
+	Body    string
+	Coll    string // 所属集合：多租户断言靠它（否则 ListIDs 忽略 realm 会掩盖越界）
+	Version int    // 生成文档版本号（并发"丢更新"断言靠它）
 }
 
 func (f *fakeStore) EnsureCollection(gocontext.Context, string) error { return nil }
 func (f *fakeStore) PutStruct(_ gocontext.Context, coll, id string, v any) error {
 	if d, ok := v.(corpus.Doc); ok {
-		f.docs[id] = corpusDocShape{ID: d.ID, Body: d.Body, Coll: coll}
+		f.docs[id] = corpusDocShape{ID: d.ID, Body: d.Body, Coll: coll, Version: d.Version}
 	}
 	return nil
 }
