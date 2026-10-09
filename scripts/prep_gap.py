@@ -164,10 +164,117 @@ def doc_id(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
+# ── drift 族：机械生成的歧义 ──────────────────────────────────────────────
+# 目的：量**护栏的拦截收益**（rejected-score 分支）。构造方式必须机械，否则就成了
+# "为护栏造胜证"——所以这里的歧义来自一个规则：同一个词尾「年费」套在 N 个领域上，
+# 问句一律用同一批口语模板，**不手工挑哪题会扩偏**。
+#
+# 真桥面对"年费多少钱"时会扩出「年费/缴纳/标准」，而语料里 6 个领域都有年费 →
+# 加权重取把窗口拉到**分数更低但词面更响**的那些上 → 首窗分低于朴素路 → 护栏弃用。
+DRIFT_DOMAINS = [
+    ("专利权年费缴纳标准", "专利权人应当自专利权授予之日起每年缴纳年费，"
+     "发明专利年费三百八十元，实用新型一百九十元。未在规定期限内缴纳的，可在期满后六个月内补缴并缴滞纳金。",
+     ["专利每年要交多少钱", "专利的年费怎么算"]),
+    ("房屋租金年缴管理办法", "承租人可选择按年缴纳租金，年缴租金按十二个月计算，"
+     "需提前三十日书面告知出租人，逾期未缴的按日加收滞纳金。",
+     ["租金年付怎么交", "房租年缴多少钱"]),
+    ("商业保险年费标准", "商业保险的年费按保险金额与费率厘定，"
+     "首年投保需一次性缴纳年费，次年可按期缴付，年费随年龄与风险变化调整。",
+     ["保险一年要交多少", "这个保险年费怎么算"]),
+    ("会员年费与权益说明", "会员年费为每人每年三百八十元，年费一次性缴纳后权益有效一年，"
+     "年费不予退还，年费到期前续缴可延续权益。",
+     ["会员年费多少", "会员这个年费怎么算"]),
+    ("职业培训年费标准", "职业培训年费按课程等级划分，年费含教材与考核费用，"
+     "中途退课按已学课时折算退费，年费不得转让他人。",
+     ["培训年费要多少", "培训班年费怎么算"]),
+    ("车辆保险年费与折扣", "车辆保险年费随车辆使用性质与出险记录浮动，"
+     "上年未出险可享折扣，年费须在保险期间开始前缴清。",
+     ["车险年费多少", "这个车险年费怎么算"]),
+]
+
+# 每个领域的干扰文档：同领域但不回答年费（把首程注意力拉走），再补几条跨领域的邻近话题。
+DRIFT_DISTURBORS = [
+    ("专利审查流程简介", "专利申请经受理、形式审查、实质审查、公告授权四个阶段，"
+     "审查员依据专利法与实施细则作出审查意见。"),
+    ("专利代理服务收费", "专利代理服务按件收费，代理费用不含官方规费，"
+     "委托代理事项应当签订书面委托合同。"),
+    ("房屋租赁登记备案", "租赁合同应当办理登记备案，备案内容包括租赁期限、租金与押金，"
+     "备案后出租人不得重复出租同一房屋。"),
+    ("房屋维修责任划分", "房屋主体结构由出租人负责维修，日常损耗与家具家电由承租人负责，"
+     "维修费用按责任归属承担。"),
+    ("保险理赔流程与材料", "理赔申请需提供事故证明与损失清单，保险公司在约定期限内核定，"
+     "核定后十个工作日内支付保险金。"),
+    ("保险免责情形说明", "免责情形包括故意行为、违法行为与自然损耗，"
+     "免责条款应当在投保时明确告知投保人。"),
+    ("会员权益使用规则", "会员权益包括优先客服与折扣券，权益不可转让，"
+     "会员资料变更应当及时更新。"),
+    ("会员等级与升级条件", "会员等级按累计消费金额升级，等级有效期一年，"
+     "等级下降不影响已购权益。"),
+    ("培训课程设置与考核", "培训课程分理论与实操，考核成绩合格颁发结业证书，"
+     "考核不合格可补考一次。"),
+    ("培训课时安排", "课程课时按模块划分，理论与实操课时比例为六比四，"
+     "实操课在实训室进行。"),
+    ("车辆使用性质分类", "车辆使用性质分为营运与非营运，非营运车辆按家庭自用申报，"
+     "改变性质须办理变更手续。"),
+    ("道路交通事故快速处理", "轻微事故可快速处理，由当事人自行撤离现场并协商定损，"
+     "协商不成可申请交警认定。"),
+    ("年费缴纳方式汇总", "各类年费可通过柜台、线上或代办机构缴纳，"
+     "缴纳后应及时查询到账状态。"),
+    ("费用票据与凭证管理", "费用凭证应当妥善保管，票据丢失可补开证明，"
+     "凭证是费用主张的必要材料。"),
+    ("年度预算编制流程", "年度预算由各部门编制后汇总，预算调整须经审批，"
+     "执行情况按季度分析。"),
+]
+
+
+def build_drift(out: str) -> int:
+    os.makedirs(out, exist_ok=True)
+    docs, items = [], []
+    for title, body in DRIFT_DISTURBORS:
+        docs.append({"id": doc_id(body), "title": title, "body": body})
+    for i, (title, body, qas) in enumerate(DRIFT_DOMAINS, 1):
+        did = doc_id(body)
+        docs.append({"id": did, "title": title, "body": body})
+        for j, q in enumerate(qas, 1):
+            items.append({"id": f"drift-{i}-{j}", "question": q, "answer": body[:60],
+                          "gold_ids": [did]})
+
+    with open(os.path.join(out, "corpus.jsonl"), "w", encoding="utf-8") as f:
+        for d in docs:
+            f.write(json.dumps(d, ensure_ascii=False) + "\n")
+    with open(os.path.join(out, "items.jsonl"), "w", encoding="utf-8") as f:
+        for it in items:
+            f.write(json.dumps(it, ensure_ascii=False) + "\n")
+
+    manifest = {
+        "source": "合成：歧义「年费」× 6 领域（机械生成，不手工挑题）",
+        "synthetic": True,
+        "license": "自造（探针用）",
+        "docs": len(docs),
+        "items": len(items),
+        "gold_docs": len(DRIFT_DOMAINS),
+        "distractors": len(DRIFT_DISTURBORS),
+        "doc_id_scheme": "正文 sha256 前 12 位",
+        "note": "**不是真实语料**：唯一目的是量护栏的拦截分支（rejected-score）。"
+                "歧义由规则生成（同词尾套多领域），**不挑题**——挑题会让读数变成"
+                "为护栏造胜证。真桥若在这批上也不扩偏，那就是它不扩偏，不该硬凑。",
+        "arms": {"开桥带护栏": "（默认）", "开桥无护栏": "CUMULUS_BRIDGE_GUARD=0"},
+    }
+    with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    print(f"[drift] 语料 {len(docs)} 篇（{len(DRIFT_DOMAINS)} 金标 + {len(DRIFT_DISTURBORS)} 干扰）"
+          f" / 问句 {len(items)} 条 → {out}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="输出目录（corpus.jsonl / items.jsonl / manifest.json）")
+    ap.add_argument("--family", choices=["gap", "drift"], default="gap",
+                    help="gap=词汇鸿沟（桥该有用）；drift=歧义年费（桥容易扩偏，量护栏）")
     args = ap.parse_args()
+    if args.family == "drift":
+        return build_drift(args.out)
     os.makedirs(args.out, exist_ok=True)
 
     docs, items = [], []
