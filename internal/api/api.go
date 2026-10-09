@@ -346,16 +346,18 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 	// 窗口分级（可选）：类别计数 + 分级是否发生过 + 结局。
 	// **"未分级"与"分级失败"必须分得开**（前者是没开分类器，后者是开了但没成）。
 	resp.Classification = &ClassificationView{Enabled: s.Options.WindowClassifier != nil}
-	if classes, ok := qaflow.WindowClassOf(c); ok {
-		counts := map[string]int{}
-		for _, cl := range classes {
-			counts[cl]++
+	if res, ok := qaflow.WindowClassOf(c); ok {
+		// 三态同址（ran/classes/outcome）："没开分类器""开了但没跑""跑了但失败"
+		// 在读数里必须分得开——这是本轮踩了几次的坑。
+		resp.Classification.Outcome = res.Outcome
+		if res.Ran && len(res.Classes) > 0 {
+			resp.Classification.Applied = true
+			counts := map[string]int{}
+			for _, cl := range res.Classes {
+				counts[cl]++
+			}
+			resp.Classification.Counts = counts
 		}
-		resp.Classification.Applied = true
-		resp.Classification.Counts = counts
-	}
-	if esc, ok := context.Get(c, qaflow.KeyEscalation); ok && esc.Classification != "" {
-		resp.Classification.Outcome = esc.Classification
 	}
 	if an, ok := context.Get(c, qaflow.KeyAnalysis); ok {
 		resp.Analysis = AnalysisView{Intent: an.Intent, Primary: an.Primary, OOV: an.OOV, Score: an.Score}

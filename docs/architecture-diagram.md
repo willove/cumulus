@@ -4,6 +4,15 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 失效模式规约（新增能力前必读）
+
+四类"接线错"在几轮里连续发生：可选面互相挡掉、往还没写的记录里写读数、方法值把能力
+丢掉、装配状态只在出错时可见。它们**都不是逻辑错**——编译过、测试绿、读数看着正常，
+只有真跑才显形。每类现在都有机械门禁（`internal/qaflow/wiring_test.go`、
+`internal/arch`）或结构约束。
+
+规约正文见 [failure-modes.md](failure-modes.md)，含"新增能力时的六问自查"。
+
 ## 窗口分级（GaRAGe 四类）：让检索日志可解释
 
 `file` 事件原本只带 rank/分数/预览：用户看到"检索到了这篇"，但**说不出为什么是它**。

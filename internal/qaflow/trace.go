@@ -102,20 +102,7 @@ func (t *Trace) emitWindows(c *context.Context) {
 	// 也不要把半张表写进事件流。
 	var classes map[int]string
 	if t.classifier != nil {
-		rw, ok2 := context.Get(c, KeyRewrite)
-		switch {
-		case !ok2:
-			t.noteClassify(c, "no-rewrite")
-		default:
-			got, err := t.classifier.Classify(c, rw.Original, ws)
-			if err != nil {
-				// 分级失败要**看得见**（否则读数里"没有类别"和"没分级"分不开，
-				// 而我第一版就是这么把失败静默掉的）
-				t.noteClassify(c, "failed: "+err.Error())
-			} else {
-				classes = got
-			}
-		}
+		classes = t.classifyWindows(c, ws)
 	}
 	for i, w := range ws {
 		if t.files[w.SourceID] {
@@ -318,18 +305,21 @@ func oneLine(s string) string {
 	return s
 }
 
-// noteClassify 把分级失败的结局记进升级记录旁的分类字段（可观测）。
-func (t *Trace) noteClassify(c *context.Context, outcome string) {
-	rec, ok := context.Get(c, KeyEscalation)
+// classifyWindows 跑一次分级并把**结局**写进挂点（成功/失败/没跑，三态同址）。
+// 失败也写——**不写就分不出"没跑"与"跑了没成"**，而那正是本轮踩了几次的坑。
+func (t *Trace) classifyWindows(c *context.Context, ws []EvidenceWindow) map[int]string {
+	rw, ok := context.Get(c, KeyRewrite)
 	if !ok {
-		return // 还没升级（正常时序）：此时结局已由 KeyWindowClass 承载
+		_ = SetWindowClass(c, WindowClassResult{Outcome: "skipped:no-rewrite"})
+		return nil
 	}
-	if rec.Classification == "" {
-		rec.Classification = outcome
-	} else {
-		rec.Classification += "+" + outcome
+	got, err := t.classifier.Classify(c, rw.Original, ws)
+	if err != nil {
+		_ = SetWindowClass(c, WindowClassResult{Outcome: "failed: " + err.Error(), Ran: true})
+		return nil
 	}
-	_ = context.Set(c, KeyEscalation, rec)
+	_ = SetWindowClass(c, WindowClassResult{Classes: got, Outcome: "ok", Ran: true})
+	return got
 }
 
 // classifyOnly 只做分级并写挂点（没有事件出口时的形态：`/v1/qa` 一次性 JSON）。
@@ -337,17 +327,8 @@ func (t *Trace) noteClassify(c *context.Context, outcome string) {
 func (t *Trace) classifyOnly(c *context.Context) {
 	ws, ok := context.Get(c, KeyWindows)
 	if !ok || len(ws) == 0 {
-		_ = SetWindowClass(c, nil)
+		_ = SetWindowClass(c, WindowClassResult{Outcome: "skipped:no-windows"})
 		return
 	}
-	rw, ok := context.Get(c, KeyRewrite)
-	if !ok {
-		_ = SetWindowClass(c, nil)
-		return
-	}
-	got, err := t.classifier.Classify(c, rw.Original, ws)
-	if err != nil {
-		t.noteClassify(c, "failed: "+err.Error())
-	}
-	_ = SetWindowClass(c, got)
+	t.classifyWindows(c, ws)
 }

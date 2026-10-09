@@ -134,22 +134,30 @@ func trimRunes(s string, n int) string {
 	return string(rs[:n]) + "…"
 }
 
-// KeyWindowClass 是窗口分级的挂点：{ "1": "ANSWER", … }（键是 rank）。
-var KeyWindowClass = context.NewKey[map[int]string]("evidence.window.class")
-
-// WindowClassOf 取窗口分级结果（第二个返回值 = 有没有分级过）。
+// WindowClassResult 是分级的结果与结局（**同一个挂点，三态同址**）。
 //
-// **挂点必须独立**：第一版把分级结局记在 EscalationRecord 上，而分级发生在升级
-// **之前**——那条记录当时还不存在，于是结局恒空（与桥那次同一个坑：往一条
-// 还没写的记录里写读数）。独立的 key 没有这个时序依赖。
-func WindowClassOf(c *context.Context) (map[int]string, bool) {
+// 为什么必须同址：结局原来写在 EscalationRecord 上，而分级发生在升级**之前**、
+// 那条记录当时还不存在 → 结局恒空（这个坑踩了两次，与桥那次同一类）。**观测状态
+// 必须住在生产者自己的挂点上**，不能寄生在别人稍后才写的记录里。
+type WindowClassResult struct {
+	// Classes 是 rank → 类别（空 = 没分级出结果）。
+	Classes map[int]string `json:"classes,omitempty"`
+	// Outcome：ok / failed:… / skipped:no-windows / skipped:no-rewrite。
+	Outcome string `json:"outcome,omitempty"`
+	// Ran 标记分级函数**被调用过**（Ran=false + 空 Classes = 压根没跑）。
+	Ran bool `json:"ran"`
+}
+
+// KeyWindowClass 是窗口分级的挂点。
+var KeyWindowClass = context.NewKey[WindowClassResult]("evidence.window.class")
+
+// WindowClassOf 取分级结果（第二个返回值 = 挂点上有没有记录）。
+func WindowClassOf(c *context.Context) (WindowClassResult, bool) {
 	return context.Get(c, KeyWindowClass)
 }
 
-// SetWindowClass 写分级结果（没分级就写空 map，便于"跑过但失败"与"没跑"分开）。
-func SetWindowClass(c *context.Context, m map[int]string) error {
-	if m == nil {
-		m = map[int]string{}
-	}
-	return context.Set(c, KeyWindowClass, m)
+// SetWindowClass 写分级结局（**任何路径都要写**，含"跑了但失败"——
+// 不写就分不出"没跑"与"跑了没成"）。
+func SetWindowClass(c *context.Context, r WindowClassResult) error {
+	return context.Set(c, KeyWindowClass, r)
 }

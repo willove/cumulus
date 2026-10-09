@@ -212,9 +212,6 @@
           "bridge": {
             "type": "string"
           },
-          "classification": {
-            "type": "string"
-          },
           "executed": {
             "type": "boolean"
           },
