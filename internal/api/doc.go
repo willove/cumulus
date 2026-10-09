@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	gocontext "context"
 
@@ -43,6 +44,11 @@ type GenerateDocResponse struct {
 	Gaps     []docgen.Gap     `json:"gaps,omitempty"`
 	Coverage docgen.Coverage  `json:"coverage"`
 	Stored   bool             `json:"stored"`
+	// Version / Updated / Note 是**同主题文档的增量**：再次生成同一主题是**更新
+	// 那一篇**（同 id 覆盖），不是再堆一篇内容重叠的文档。
+	Version int    `json:"version"`
+	Updated bool   `json:"updated"`
+	Note    string `json:"note,omitempty"`
 	// IndexRebuilt 是本次写入后是否重建了索引（下一轮检索才看得到）。
 	IndexRebuilt bool `json:"index_rebuilt"`
 }
@@ -111,32 +117,34 @@ func (s *Server) handleGenerateDoc(w http.ResponseWriter, r *http.Request) {
 		Sections: doc.Sections, Gaps: doc.Gaps, Coverage: doc.Coverage,
 	}
 	if req.Store {
-		// 落库走摄入面（内容哈希 id + 语料规范化），这样生成文档与手抄进来的
-		// 文档在**同一个索引口径**里，不会两套身份。
-		//
-		// **索引优先级**：生成文档的检索权重压到源文档之下（Generated 标记 +
-		// retrieval 的 Prior 升权规则）。理由是实测出来的：生成文档是**源的转述**，
-		// 词面重叠、篇幅更长，BM25 打分天然比不过源——不压优先级的话，问答永远
-		// 引用源文档，"整理一次、问答受益"就只停在"库里多了一篇"。
-		//
-		// 压优先级不等于压掉：命中生成文档时它仍然可被引用（**先答不上来时，
-		// 转述文档是更好的答案**——它已经把多篇源拼在一起了）。
-		doc.Body = docgen.ApplyMarker(doc.Body)
-		// id 用 gen- 前缀（内容哈希 + 前缀）：检索期能 O(1) 认出"这是转述文档"并
-		// 降权一档。**一次写入**（不"先按哈希写再改名"——那是两写一删，中途
-		// 失败会留下两篇）。
-		id := genPrefix + corpus.DigestHex([]byte(doc.Body))[:12]
-		if perr := s.putDoc(ctx, realm, id, doc.Body); perr != nil {
+		// 同主题 → 同 id（覆盖写）：先读旧版，算出这一版的增量说明。
+		// 不这么做的话，语料里会堆出好几篇内容高度重叠的同主题文档（检索互相
+		// 竞争、读者分不清哪篇最新）——"整理一次、问答受益"就变成"整理越多越难查"。
+		topicKey := docgen.TopicKey(req.Topic)
+		id := genPrefix + topicKey
+		prev := s.prevDoc(ctx, realm, id)
+		// 语义判据：词面判据抓不住"请求减缓" vs "申请缓缴"这类同义改写（真跑量到）。
+		// 判据缺席时 ReviseWith 自动退化为词面口径（保守：多报差异而非谎报合并）。
+		rev := docgen.ReviseWith(prev, doc, corpusSources(prev), docgen.SourcesOf(doc), docgenJudge(s.DocGen))
+		doc.Version, doc.Note = rev.Version, rev.Note()
+		doc.Body = docgen.Stamp(docgen.ApplyMarker(doc.Body), rev)
+		out.Version, out.Note = rev.Version, rev.Note()
+		if perr := s.putDoc(ctx, realm, id, topicKey, doc.Body, rev, doc.Sources); perr != nil {
 			writeErr(w, http.StatusInternalServerError, "store: "+perr.Error())
 			return
 		}
 		out.ID = id
 		out.Stored = true
+		out.Updated = prev != nil
 		// 写完要让本 realm 的索引失效：否则"生成成功了、下一轮却查不到"。
 		s.InvalidateRealm(realm)
 		if _, ierr := s.IndexFor(r.Context(), realm); ierr == nil {
 			out.IndexRebuilt = true
 		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	if false {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -150,12 +158,74 @@ func (s *Server) handleGenerateDoc(w http.ResponseWriter, r *http.Request) {
 const genPrefix = "gen-"
 
 // putDoc 写一篇文档到**调用者的 realm 集合**（生成文档与手抄文档同源同口径）。
-func (s *Server) putDoc(ctx gocontext.Context, realm, id, body string) error {
+func (s *Server) putDoc(ctx gocontext.Context, realm, id, topicKey, body string, rev docgen.Revision, sources []string) error {
 	coll := corpus.CollectionFor(realm)
 	if err := s.Store.EnsureCollection(ctx, coll); err != nil {
 		return err
 	}
 	return s.Store.PutStruct(ctx, coll, id, corpus.Doc{
 		ID: id, Body: body, Encoding: "text/plain; charset=utf-8",
+		Kind: "generated", TopicKey: topicKey,
+		Version: rev.Version, Sources: sources, GeneratedAt: time.Now(),
 	})
+}
+
+// prevDoc 读同主题的上一版（不存在 → nil，不算错误：首次生成就是没有上一版）。
+func (s *Server) prevDoc(ctx gocontext.Context, realm, id string) *docgen.Document {
+	var d corpus.Doc
+	if err := s.Store.GetStruct(ctx, corpus.CollectionFor(realm), id, &d); err != nil {
+		return nil
+	}
+	return docFromBody(d)
+}
+
+// docFromBody 从正文里还原结构化条目（只为算增量：上一版只需要"有哪些论断"）。
+//
+// 为什么不另存结构化副本：多一份真相就多一处会漂移的地方。正文里
+// "- 论断 [source]" 的形状是固定的，反解即可；解不出就退化为"无可比对内容"
+// （Note 变成"内容与上一版一致"——诚实的降级，不是静默错误）。
+func docFromBody(d corpus.Doc) *docgen.Document {
+	out := &docgen.Document{ID: d.ID, Body: d.Body, Version: d.Version, Sources: d.Sources}
+	var heading string
+	for _, line := range strings.Split(d.Body, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "<!--"):
+			// 版本标记行：跳过（内容比较不看它）
+		case strings.HasPrefix(t, "- "):
+			text, src := splitClaim(strings.TrimPrefix(t, "- "))
+			out.Sections = append(out.Sections, docgen.Section{Heading: heading,
+				Claims: []docgen.Claim{{Text: text, SourceID: src}}})
+		case strings.HasPrefix(t, "#"):
+			heading = strings.TrimSpace(strings.TrimLeft(t, "# "))
+		}
+	}
+	return out
+}
+
+// splitClaim 拆 "- 论断 [source]"。
+func splitClaim(s string) (text, source string) {
+	i := strings.LastIndex(s, " [")
+	if i < 0 || !strings.HasSuffix(s, "]") {
+		return s, ""
+	}
+	return s[:i], s[i+2 : len(s)-1]
+}
+
+// corpusSources 是上一版的源清单（旧文档可能没这份元数据 → 空）。
+func corpusSources(d *docgen.Document) []string {
+	if d == nil {
+		return nil
+	}
+	return d.Sources
+}
+
+// docgenJudge 从生成器借一个判据客户端（判据是**同一模型**的一次额外调用；
+// 没有客户端就返回 nil = 纯词面口径）。
+func docgenJudge(g *DocGen) docgen.EquivalentJudge {
+	if g == nil || g.Client == nil {
+		return nil
+	}
+	j := &docgen.EquivalentJudgeLLM{Client: g.Client}
+	return j.Judge()
 }

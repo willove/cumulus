@@ -6,6 +6,8 @@
 package corpus
 
 import (
+	"time"
+
 	"bufio"
 	"encoding/json"
 	"fmt"
@@ -65,6 +67,17 @@ type Doc struct {
 	Encoding  string `json:"encoding,omitempty"`   // utf-8 / gb18030（摄入时的解码分层）
 	SrcDigest string `json:"src_digest,omitempty"` // 原始字节的 sha256（血缘：产物→原始字节）
 	SrcBytes  int    `json:"src_bytes,omitempty"`  // 原始字节数
+
+	// 以下是**生成产物**的元数据（docgen 写；手抄文档为空）。
+	//
+	// 为什么放这里而不是正文里：正文要原样可读（贴进任何地方都成立），
+	// 而版本/主题键/来源清单是**机器账**——塞进正文会被索引进倒排
+	//（"cumulus version 2" 这类垃圾 token 参与打分）。
+	Kind        string    `json:"kind,omitempty"`      // "generated"（手抄为空）
+	TopicKey    string    `json:"topic_key,omitempty"` // 主题键（同主题 → 同键 → 同一篇）
+	Version     int       `json:"version,omitempty"`   // 第几版（新建=1）
+	Sources     []string  `json:"sources,omitempty"`   // 本版依据的源文档 id
+	GeneratedAt time.Time `json:"generated_at,omitempty"`
 }
 
 // Port 是语料面依赖的 store 能力（窄接口，测试可替）。它就是

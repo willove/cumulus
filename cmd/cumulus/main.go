@@ -315,14 +315,28 @@ func runDoc(args []string) error {
 	if *storeIt {
 		// 与 /v1/docs **同一口径**：加 marker + gen- 前缀（检索期据此降权）。
 		// 两处口径必须一致——不一致就会出现"一份带前缀一份不带"，降权规则漏一半。
-		body := docgen.ApplyMarker(doc.Body)
-		id := "gen-" + corpus.DigestHex([]byte(body))[:12]
+		topicKey := docgen.TopicKey(topic)
+		id := docgen.DocID(topic)
 		coll := corpus.CollectionFor("default")
+		rev := docgen.Revision{Version: 1}
 		if err := st.EnsureCollection(gocontext.Background(), coll); err != nil {
 			return err
 		}
-		if err := st.PutStruct(gocontext.Background(), coll, id,
-			corpus.Doc{ID: id, Body: body, Encoding: "text/plain; charset=utf-8"}); err != nil {
+		var prev corpus.Doc
+		if err := st.GetStruct(gocontext.Background(), coll, id, &prev); err == nil {
+			// 同主题已有文档 → 更新那一篇（同 id 覆盖），并说清这一版多了/少了什么。
+			rev = docgen.Revise(&docgen.Document{Version: prev.Version, Sources: prev.Sources,
+				Sections: sectionsFromBody(prev.Body)}, doc, prev.Sources, docgen.SourcesOf(doc))
+			fmt.Printf("更新已有文档：v%d（%s）\n", rev.Version, rev.Note())
+		} else {
+			fmt.Println("新建文档：v1")
+		}
+		body := docgen.Stamp(docgen.ApplyMarker(doc.Body), rev)
+		if err := st.PutStruct(gocontext.Background(), coll, id, corpus.Doc{
+			ID: id, Body: body, Encoding: "text/plain; charset=utf-8",
+			Kind: "generated", TopicKey: topicKey, Version: rev.Version,
+			Sources: docgen.SourcesOf(doc), GeneratedAt: time.Now(),
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("已写入语料：%s（下一轮问答可以引用它）\n", id)
@@ -346,6 +360,28 @@ func readDocs(dir string) []retrieval.Document {
 			continue
 		}
 		out = append(out, retrieval.Document{ID: docIDOf(body), Body: string(body)})
+	}
+	return out
+}
+
+// sectionsFromBody 从正文反解论断（CLI 侧算增量用；与服务端同一形状）。
+func sectionsFromBody(body string) []docgen.Section {
+	var out []docgen.Section
+	var heading string
+	for _, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(t, "<!--"):
+		case strings.HasPrefix(t, "- "):
+			text := strings.TrimPrefix(t, "- ")
+			src := ""
+			if i := strings.LastIndex(text, " ["); i >= 0 && strings.HasSuffix(text, "]") {
+				text, src = text[:i], text[i+2:len(text)-1]
+			}
+			out = append(out, docgen.Section{Heading: heading, Claims: []docgen.Claim{{Text: text, SourceID: src}}})
+		case strings.HasPrefix(t, "#"):
+			heading = strings.TrimSpace(strings.TrimLeft(t, "# "))
+		}
 	}
 	return out
 }

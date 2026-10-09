@@ -34,6 +34,12 @@ type Document struct {
 	Sections []Section `json:"sections"` // 结构化条目（展示与核对用）
 	Gaps     []Gap     `json:"gaps,omitempty"`
 	Coverage Coverage  `json:"coverage"`
+
+	// Version 是**同主题文档的版本号**（首次生成=1；再生成覆盖并 +1）。
+	// Note 是增量说明（新增/移除几条）；Sources 是本版依据的源文档 id。
+	Version int      `json:"version"`
+	Note    string   `json:"note,omitempty"`
+	Sources []string `json:"sources,omitempty"`
 }
 
 // Section 是文档的一节（一个子问题）。
@@ -179,6 +185,8 @@ func assemble(raw, topic string, ws []retrieval.Hit) (*Document, error) {
 	if len(doc.Sections) == 0 {
 		return nil, fmt.Errorf("docgen: 没有一条能挂上引用的论断（不产出半截文档）")
 	}
+	doc.Version = 1
+	doc.Sources = SourcesOf(doc)
 	doc.Body = renderBody(doc)
 	doc.Coverage = Coverage{
 		WindowsTotal: len(ws),
