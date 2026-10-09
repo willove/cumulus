@@ -28,6 +28,12 @@ type Index struct {
 	DocLens  map[string]int
 	N        int
 	AvgLen   float64
+	// AvgRunes 是**平均字符数**（AvgLen 是 token 数，两者不是一回事）。
+	//
+	// 为什么单独存一个："这个窗口装不装得下一篇文档"是**字符**的问题，
+	// 而 AvgLen 的单位是检索词元——中文 1700 字 ≈ 几百个二元组，用 AvgLen 判断
+	// 会得出"文档很短"的错误结论（真跑踩过：长文档探针的锚定判据因此失灵）。
+	AvgRunes float64
 
 	// Coord 是协调因子指数（0 = 关，默认）。打分时乘 (命中词数/查询词数)^Coord：
 	// 只命中一个实体的文档不再压过"把问句里几个实体都覆盖了"的文档。
@@ -50,6 +56,7 @@ func Build(docs []Document) *Index {
 		byID:     make(map[string]Document, len(docs)),
 	}
 	var totalTokens int
+	var totalRunes int
 	for _, d := range docs {
 		if d.ID == "" {
 			continue
@@ -66,9 +73,11 @@ func Build(docs []Document) *Index {
 			idx.Postings[term] = append(idx.Postings[term], Posting{DocID: d.ID, TF: count})
 		}
 		idx.N++
+		totalRunes += len([]rune(d.Body))
 	}
 	if idx.N > 0 {
 		idx.AvgLen = float64(totalTokens) / float64(idx.N)
+		idx.AvgRunes = float64(totalRunes) / float64(idx.N)
 	}
 	return idx
 }

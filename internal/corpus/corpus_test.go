@@ -113,3 +113,50 @@ func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
 func (m *memStore) Query(_ gocontext.Context, _ string, _ map[string]any, _, _ int, _ any) (int, error) {
 	return 0, nil
 }
+
+// jsonl 导入**必须按 realm** 写。原实现硬编码 `documents`（无 realm 后缀），于是
+// "-watch 吃 jsonl 语料 + 配了 CUMULUS_KEYS" 的组合下**导入 9 篇、查询一篇都读不到**
+// ——真跑（长文档探针 0/10 命中）才暴露；短条文语料用 .md，所以一直没踩到。
+func TestImportFileRealmWritesIntoCallerRealm(t *testing.T) {
+	m := newMemStore()
+	path := filepath.Join(t.TempDir(), "corpus.jsonl")
+	body := "专利权期限为二十年，自申请日起计算。"
+	if err := os.WriteFile(path, []byte(`{"id":"x1","body":"`+body+`"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 写进 alpha
+	n, err := ImportFileRealm(gocontext.Background(), m, "alpha", path)
+	if err != nil || n != 1 {
+		t.Fatalf("导入应成功: n=%d err=%v", n, err)
+	}
+	if _, ok := m.docs[CollectionFor("alpha")]["x1"]; !ok {
+		t.Fatalf("文档应写进调用者的 realm 集合（documents/alpha），实际：%v", collsOf(m))
+	}
+	// beta 读不到
+	docsB, _ := LoadRealm(gocontext.Background(), m, "beta")
+	if len(docsB) != 0 {
+		t.Fatalf("beta 不该读到 alpha 的语料: %d 篇", len(docsB))
+	}
+	// 默认集合里也不该有（原来就是写在这儿）
+	if _, ok := m.docs[Collection]["x1"]; ok {
+		t.Fatalf("不该再写进默认集合 documents（那正是原 bug）: %v", collsOf(m))
+	}
+	// realm 空 = 单租户老路径（仍写默认集合）
+	if _, err := ImportFile(gocontext.Background(), m, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.docs[Collection]["x1"]; !ok {
+		t.Fatalf("realm 为空时应写默认集合: %v", collsOf(m))
+	}
+}
+
+// collsOf 列出有文档的集合（断言信息用）。
+func collsOf(m *memStore) []string {
+	out := make([]string, 0, len(m.docs))
+	for coll, docs := range m.docs {
+		if len(docs) > 0 {
+			out = append(out, coll)
+		}
+	}
+	return out
+}

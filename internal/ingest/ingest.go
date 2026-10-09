@@ -189,7 +189,7 @@ func scanOnce(ctx gocontext.Context, p corpus.Port, realm, dir string, seen map[
 		seen[path] = sum
 		switch {
 		case strings.HasSuffix(name, ".jsonl"):
-			if n, err := corpus.ImportFile(ctx, p, path); err == nil {
+			if n, err := corpus.ImportFileRealm(ctx, p, realm, path); err == nil {
 				imported += n
 			}
 		case strings.HasSuffix(name, ".txt"), strings.HasSuffix(name, ".md"):

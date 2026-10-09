@@ -37,9 +37,16 @@ func BM25Evidence(idx *retrieval.Index, k, width int) func(*context.Context, Rew
 			width = width + width/2
 		}
 		hits := retrieveWeighted(c, idx, r.Effective(), k, width)
-		// 多事实问句：逐事实取证据后并入（fan-out）。K=1 不进（整句即
-		// 事实，旧路径逐字节不变）
+		// 多事实问句：逐事实取证据后并入（fan-out）。
 		if fx, ok := context.Get(c, KeyFacts); ok && len(fx) >= 2 {
+			hits = mergeHits(hits, retrievePerFact(c, idx, fx, k, width))
+		}
+		// **单事实也要按锚切窗**（长文档修复）。真跑（长文档探针 9 篇、379–1733 字）：
+		// 答案埋在文档 74%–98% 处，而默认窗口切在 48%–57% 处 →
+		// "金标命中 10/10、窗口含答案只有 8/10"。加宽能救（width=1600 回到 10/10），
+		// 但那等于把整篇塞进窗口——**搬运不是检索**。所以这里按事实的核心词组
+		// 锚定再切一个窗口，并进窗口集（旧结果为主，行为不会变差）。
+		if fx, ok := context.Get(c, KeyFacts); ok && len(fx) == 1 && longDocAnchorable(idx, fx[0].ID) {
 			hits = mergeHits(hits, retrievePerFact(c, idx, fx, k, width))
 		}
 		// 语义重排（可选组件）：绑了 embedder 才走；没绑/失败都保序并留痕

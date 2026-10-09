@@ -128,12 +128,23 @@ func Save(ctx gocontext.Context, p Port, docs []retrieval.Document) error {
 // cn-law-rag 的 anchor/positive 形状——positive 当 body，标题进 id 前缀）。
 // 返回导入的文档数。已存在的 id 覆盖（upsert）。
 func ImportFile(ctx gocontext.Context, p Port, path string) (int, error) {
+	return ImportFileRealm(ctx, p, "", path)
+}
+
+// ImportFileRealm 是**按 realm** 的 jsonl 导入。
+//
+// 为什么必须有：原实现硬编码写 `documents`（无 realm 后缀），而 watch 目录在多租户
+// 下写的是 `documents/<realm>` —— 于是 "-watch 吃 jsonl 语料 + 配了 CUMULUS_KEYS"
+// 的组合下，**导入了 9 篇、查询一篇都读不到**（真跑：长文档探针 0/10 命中，
+// 而短条文语料用 .md 所以一直没暴露）。realm 空 = 单租户老路径。
+func ImportFileRealm(ctx gocontext.Context, p Port, realm, path string) (int, error) {
+	coll := CollectionFor(realm)
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, fmt.Errorf("corpus: open %s: %w", path, err)
 	}
 	defer f.Close()
-	if err := p.EnsureCollection(ctx, Collection); err != nil {
+	if err := p.EnsureCollection(ctx, coll); err != nil {
 		return 0, fmt.Errorf("corpus: ensure: %w", err)
 	}
 	sc := bufio.NewScanner(f)
@@ -166,7 +177,7 @@ func ImportFile(ctx gocontext.Context, p Port, path string) (int, error) {
 		if id == "" {
 			id = hashID(body)
 		}
-		if err := p.PutStruct(ctx, Collection, id, Doc{ID: id, Body: body, Encoding: "utf-8", SrcDigest: DigestFull([]byte(body))}); err != nil {
+		if err := p.PutStruct(ctx, coll, id, Doc{ID: id, Body: body, Encoding: "utf-8", SrcDigest: DigestFull([]byte(body))}); err != nil {
 			return n, fmt.Errorf("corpus: put %s: %w", id, err)
 		}
 		n++

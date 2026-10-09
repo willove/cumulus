@@ -20,10 +20,12 @@ import (
 // "专利期限是多少年？专利权什么时候生效？"——公告/授予条款置顶，
 // "期限为二十年"那条整个不在窗里，模型答"未涉及具体年数"）。
 //
-// K=1 不走这条（整句即事实，与旧路径逐字节一致——136 问里 124 问
-// K=1，常态不能为新件付出行为变化）。
+// **K=1 的取舍**：原来 K=1 不走这条（整句即事实，与旧路径逐字节一致）。但长文档
+// 探针证明它在长文里会漏——答案埋在 74%–98% 处而窗口切在 48%–57% 处，且加宽
+// 能救（window hit 8/10 → 10/10）只是把整篇塞进窗口。现在 K=1 **仅在长文档**上
+// 也走锚定切窗（`longDocAnchorable`），短文档与旧路径逐字节一致（零行为变化）。
 func retrievePerFact(c *context.Context, idx *retrieval.Index, fx []facts.Fact, k, width int) []retrieval.Hit {
-	if len(fx) < 2 || idx == nil {
+	if len(fx) == 0 || idx == nil {
 		return nil
 	}
 	var an query.Analysis
@@ -76,3 +78,21 @@ func factTerms(q string) []string {
 	}
 	return out
 }
+
+// longDocAnchorable 判断这条事实所在（或最可能命中）的文档是否**长到需要锚定切窗**。
+//
+// 口径：语料平均长度 > 窗口宽的 1.5 倍。理由很朴素——**窗口装不下整篇**时，
+// 才需要"按事实的词组锚到具体条文"；短文档一个窗口就是全文，锚定没有意义。
+// 用平均长度而不是单篇：avg 是廉价的全局判据（一次遍历），而真正的过滤交给
+// `SearchFactWeighted` 的命中（没命中就等于没产出）。
+func longDocAnchorable(idx *retrieval.Index, factID string) bool {
+	if idx == nil || idx.N == 0 {
+		return false
+	}
+	// 用 **AvgRunes（平均字符数）**，不是 AvgLen（token 数）：判"窗口装不装得下"
+	// 是字符问题，用 token 数会把中文长文判成短文（真跑踩过）。
+	return int(idx.AvgRunes) > defaultWidthRunes*3/2
+}
+
+// defaultWidthRunes 是默认窗口宽（与 Options.Width 的默认值同口径）。
+const defaultWidthRunes = 400

@@ -1,6 +1,7 @@
 package qaflow
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/willove/cumulus/internal/context"
@@ -73,5 +74,41 @@ func TestFanoutSkipsSingleFact(t *testing.T) {
 	_ = context.Set(c, KeyFacts, fx)
 	if hits := retrievePerFact(c, idx, fx, 4, 240); hits != nil {
 		t.Fatalf("K=1 不许走 fan-out，got %d hits", len(hits))
+	}
+}
+
+// 长文档里**单事实**问句也要按锚切窗：答案埋在 74%–98% 处，而默认窗口切在
+// 48%–57% 处（真跑：长文档探针 window hit 8/10）。加宽能救但等于整篇搬运。
+func TestSingleFactLongDocAnchorsWindow(t *testing.T) {
+	body := "第一条 前言与适用范围。" + strings.Repeat(" filler 内容凑长度。", 120) +
+		"第九十九条 专利权的期限为二十年，自申请日起计算。"
+	idx := retrieval.Build([]retrieval.Document{{ID: "long", Body: body}})
+	c := context.New("longdoc")
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "专利权保护期限是多久"})
+	_ = context.Set(c, KeyFacts, []facts.Fact{{ID: "f1", Query: "专利权 期限 二十年"}})
+
+	hits := retrievePerFact(c, idx, []facts.Fact{{ID: "f1", Query: "专利权 期限 二十年"}}, 3, 200)
+	joined := ""
+	for _, h := range hits {
+		joined += h.SpanText
+	}
+	if !strings.Contains(joined, "二十年") {
+		t.Fatalf("锚定切窗应把答案句收进窗口，got %+v", hits)
+	}
+}
+
+// 短文档**行为不变**：AvgLen 不够长时不做锚定切窗（零多余检索）。
+func TestShortDocSkipsAnchoring(t *testing.T) {
+	idx := retrieval.Build([]retrieval.Document{
+		{ID: "s1", Body: "专利权的期限为二十年，自申请日起计算。"},
+		{ID: "s2", Body: "侵权赔偿按权利人损失确定。"},
+	})
+	if longDocAnchorable(idx, "f1") {
+		t.Fatal("短文档不该触发锚定切窗（否则是无谓的多一次检索）")
+	}
+	// 长文档才触发
+	idxLong := retrieval.Build([]retrieval.Document{{ID: "l1", Body: strings.Repeat("内容。", 500)}})
+	if !longDocAnchorable(idxLong, "f1") {
+		t.Fatal("长文档应触发锚定切窗")
 	}
 }
