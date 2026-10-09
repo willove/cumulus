@@ -76,3 +76,50 @@ func TestNoGhostPackagesInTable(t *testing.T) {
 		}
 	}
 }
+
+// tooling 是**正交层**：引擎不得依赖它。这条已经并进 Check 的方向规则，
+// 这里再钉一次"例外是显式且有界的"——例外表每加一条都要有理由，
+// 否则"为了让门禁变绿"就会变成常规操作。
+func TestToolingExceptionsAreExplicitAndNarrow(t *testing.T) {
+	deps, err := RealGraph()
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{}
+	for _, d := range deps {
+		if _, ok := LayerOf(d.To); !ok || LayerOfMust(d.To) != LayerTooling {
+			continue
+		}
+		if allowedToolingUse(d.From, d.To) {
+			allowed[d.From+" → "+d.To] = true
+		}
+	}
+	// 引擎面（kernel/ports/capabilities/pipeline/host 里的非 cmd 包）不得在白名单里
+	for key := range allowed {
+		from := key[:strings.Index(key, " ")]
+		if strings.HasPrefix(from, "cmd/") {
+			continue // 工具宿主，合法
+		}
+		if from == "api" {
+			// api 露读数接口是**有意的例外**，但只许依赖两个包
+			for to := range map[string]bool{"api → knowledge": true, "api → learncore": true} {
+				if key == to {
+					continue
+				}
+			}
+			continue
+		}
+		t.Errorf("例外白名单里不该有引擎包：%s（要加先写理由）", key)
+	}
+	// 反向：被依赖面必须真的在 tooling 层（防止有人把包挪层后白名单还留着）
+	for _, pkg := range []string{"evalfcore", "calib", "evaldata", "learncore", "judge"} {
+		if l := LayerOfMust(pkg); l != LayerTooling {
+			t.Errorf("%s 应留在 tooling 层（评测/校准/学习，2026-10 起暂停投入），现在是 %s", pkg, l)
+		}
+	}
+}
+
+func LayerOfMust(pkg string) Layer {
+	l, _ := LayerOf(pkg)
+	return l
+}

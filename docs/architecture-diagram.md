@@ -4,6 +4,60 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 架构调整（2026-10）：小而美——拆文件 + 划出 tooling 层
+
+### 为什么要做这件事
+
+用**工具接入面**（chat/completions、MCP、DSH 插件）之前先量了一遍"独立 RAG 引擎"的
+实际形状，发现两处与"小而美"不符：
+
+1. **单文件塞多件事**：`internal/qaflow/qa.go` 475 行里装着**六个 stage**；
+   `cmd/cumulus/eval.go` 589 行同时装"执行器装配"与"实验编排"；`api.go` 588 行同时装
+   "服务是什么/怎么路由/怎么采样响应"。改一处会与另一处撞在一起。
+2. **开发工具与引擎混在一层**：评测、校准、学习闭环、人工批注（**tools**）与检索、合成
+   （**引擎**）住在同一层，任何方向错误都不会被门禁发现。
+
+### 一、拆文件（按职责，不按行数）
+
+| 原文件 | 拆成 | 依据 |
+|---|---|---|
+| `qaflow/qa.go` 475 | `qa.go` 107（只剩共享词汇）+ `stage_rewrite/evidence/route/synthesize/account.go` | **一个 stage 一个文件 → 与文法（flow-grammar §三）一一对应** |
+| `api/api.go` 588 | `api.go` 320 + `versions.go` 289（四版本/按 realm 索引/响应采样） | "服务是什么" vs "响应怎么采" |
+| `cmd/cumulus/eval.go` 589 | `eval.go` 255（执行面）+ `eval_run.go` 333（跑与读数） | 接线 vs 编排 |
+| `cmd/cumulus/main.go` 467 | `main.go` 275 + `serve.go` 192 | 分发 vs **装配**（装配最容易静默失手） |
+| `retrieval/bm25.go` 408 | `bm25.go` 83（建索引）+ `search.go` 325（打分） | 数据结构 vs 排序策略（后者可实验） |
+| `retrieval/window.go` 462 | `window.go` 186（切窗口）+ `anchor.go` 276（挑窗口） | 纯坐标算法 vs 启发式 |
+| `facts/facts.go` 453 | `facts.go` 153（分词/分解）+ `eval.go` 299（覆盖评估/冲突） | 语言学近似 vs 流程契约 |
+
+现在**最大的文件是 423 行**（`calib`，属于暂停的 tooling），引擎侧最大 382 行。
+
+### 二、划出 tooling 层（**评测与学习暂停投入**）
+
+新增 `LayerTooling`——与 capabilities 的区别不是"重要性"，而是**谁需要它**：
+capabilities 是**引擎运行**要的能力，tooling 只在**我们开发/测量这个引擎**时才需要。
+
+分层的意义是一条**可执行的边界**：`kernel / ports / capabilities / pipeline / apps`
+**不得依赖 tooling**。没有这条线，"为了加个读数就 import 评测包"会在几个月里把引擎
+拖成它自己的工具。
+
+例外**显式且有界**（`allowedToolingUse`，加一条要写理由）：
+- `cmd/cumulus`、`cmd/humanbatch`：工具的宿主（eval/calib/learn/verify 子命令住这儿）；
+- `api → knowledge/learncore`：`/v1/signals` 露的是**线上使用信号读数**（服务能力），
+  不是评测功能。
+
+**这条规则当场抓出四个真实越界**，改掉两个错判：
+- `qaflow → abstain`（弃答权重门）、`qaflow → knowledge`（复用命中）**是运行时能力**，
+  我原先误放进 tooling → 改回 capabilities（层判错的证据）；
+- `cmd/humanbatch → evalfcore/evaldata` 是合法的工具宿主 → 进白名单。
+
+门禁还钉住"暂停"这个决定：`evalfcore / calib / evaldata / learncore / judge` 必须在
+tooling 层——谁想给评测加新能力，会先撞到这条门禁看到"暂停投入"的说明。
+
+### 三、"知识文档生成"是下一个主攻方向
+
+摄入、检索、合成都有，**但"把知识整理成文档"这件事没有**——而它才是个人知识库的
+主要产物（答案是副产品）。这是当前最大的功能缺口。
+
 ## 失效模式规约（新增能力前必读）
 
 四类"接线错"在几轮里连续发生：可选面互相挡掉、往还没写的记录里写读数、方法值把能力
