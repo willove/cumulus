@@ -370,6 +370,28 @@ done
 BAD5XX=$(printf '%s' "$CODES" | grep -c '5[0-9][0-9]')
 [[ "$BAD5XX" == "0" ]] && ok "并发问答无 5xx" || bad "并发问答出现 ${BAD5XX} 次 5xx"
 
+# 单写者模型：同一数据目录**起第二个进程必须失败且说清怎么办**
+# （存储层对目录持独占锁——"多进程共用一个数据目录"不是数据错乱，而是第二个起不来；
+#  那就得让报错**能照着做**，而不是丢一句 Badger 英文）
+head_ "12. 单写者模型"
+SECOND="$WORK/second.log"
+env CUMULUS_KEYS="alpha=$KEY_A" "$BIN" serve -synth offline -listen "127.0.0.1:$((PORT+2))" \
+  -data "$DATA" >"$SECOND" 2>&1
+SECOND_OUT=$(cat "$SECOND" 2>/dev/null | head -6)
+if [[ -z "$(curl -sf "http://127.0.0.1:$((PORT+2))/v1/health" -H "X-Cumulus-Key: $KEY_A" 2>/dev/null)" ]]; then
+  ok "第二个进程确实起不来（独占目录锁）"
+  for want in "另一个进程" "单写者" "只留一个进程"; do
+    if printf '%s' "$SECOND_OUT" | grep -q "$want"; then
+      ok "报错含可操作提示：$want"
+    else
+      bad "报错缺少可操作提示（$want）" "$SECOND_OUT"
+    fi
+  done
+else
+  pkill -f "cumulus-accept.*$((PORT+2))" 2>/dev/null
+  bad "第二个进程竟然起来了（独占锁失效=会数据错乱）"
+fi
+
 # ── 汇总
 head_ "汇总"
 printf '  PASS %d   FAIL %d\n' "$PASS" "$FAIL"

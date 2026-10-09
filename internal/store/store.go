@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/willove/cumulite"
 	"github.com/willove/cumulite/contract"
@@ -46,6 +47,28 @@ type Port interface {
 	ListIDs(ctx context.Context, coll string, limit int) ([]string, error)
 }
 
+// ErrLocked 表示**这个数据目录已经被另一个进程占用**。
+//
+// 为什么要有这个类型：存储层是 Badger，**对目录持独占锁**——所以
+// "两个进程共用一个数据目录"不是"会数据错乱"，而是**第二个进程根本起不来**。
+// 但默认错误是一句英文 Badger 原文，部署者看不懂也猜不到该怎么办。这里把它变成
+// 一条**能照着做的中文说明**（单写者模型 + 三条可选做法）。
+type ErrLocked struct {
+	Dir   string
+	Cause error
+}
+
+func (e *ErrLocked) Error() string {
+	return fmt.Sprintf("store: 数据目录 %q 已被另一个进程占用（%s）"+
+		"\n  本系统的存储层对目录持独占锁：**同一时刻只允许一个进程写它**"+
+		"（单写者模型，不是数据会错乱，而是第二个进程起不来）。"+
+		"\n  可选做法：① 给每个进程各自的数据目录；② 共用一个目录时只留一个进程"+
+		"（其余用 HTTP 面访问它）；③ 需要真多进程写入就换支持多进程共享的存储"+
+		"（那是换存储层的事，不在当前范围）。", e.Dir, e.Cause)
+}
+
+func (e *ErrLocked) Unwrap() error { return e.Cause }
+
 // Open 打开存储。dir 为空且 inMemory 为真时用内存引擎（测试与 selftest 用）。
 func Open(dir string, inMemory bool) (Port, error) {
 	var opts []cumulite.Option
@@ -54,9 +77,26 @@ func Open(dir string, inMemory bool) (Port, error) {
 	}
 	e, err := cumulite.Open(dir, opts...)
 	if err != nil {
+		if isDirLocked(err) {
+			return nil, &ErrLocked{Dir: dir, Cause: err}
+		}
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
 	return &adapter{engine: e}, nil
+}
+
+// isDirLocked 识别"目录被占用"这一类错误。
+//
+// 判据取**两种措辞**：Badger 的 "Cannot acquire directory lock" 与
+// "resource temporarily unavailable"（不同版本措辞不同，只匹配一种会在升级后失效）。
+func isDirLocked(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "cannot acquire directory lock") ||
+		strings.Contains(msg, "resource temporarily unavailable") ||
+		strings.Contains(msg, "directory lock")
 }
 
 type adapter struct {

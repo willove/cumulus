@@ -13,6 +13,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -135,20 +136,38 @@ func (s *Server) handleGenerateDoc(w http.ResponseWriter, r *http.Request) {
 		// 不同主题用例照样秒过）。拿到锁后再读旧版 → 版本与正文都不会串。
 		unlock := s.lockDoc(id)
 		defer unlock()
-		prev := s.prevDoc(ctx, realm, id)
-		// 语义判据：词面判据抓不住"请求减缓" vs "申请缓缴"这类同义改写（真跑量到）。
-		// 判据缺席时 ReviseWith 自动退化为词面口径（保守：多报差异而非谎报合并）。
-		rev := docgen.ReviseWith(prev, doc, corpusSources(prev), docgen.SourcesOf(doc), docgenJudge(s.DocGen))
-		doc.Version, doc.Note = rev.Version, rev.Note()
-		doc.Body = docgen.Stamp(docgen.ApplyMarker(doc.Body), rev)
-		out.Version, out.Note = rev.Version, rev.Note()
-		if perr := s.putDoc(ctx, realm, id, topicKey, doc.Body, rev, doc.Sources); perr != nil {
-			writeErr(w, http.StatusInternalServerError, "store: "+perr.Error())
-			return
+		// 乐观校验：写完**回读确认这一版是我们写的**，不是就直接重试。
+		//
+		// 为什么进程内锁之外还要它：store 对目录持独占锁（单写者模型，见
+		// store.ErrLocked），所以两个进程**写不进同一个目录**——跨进程丢更新在当前
+		// 存储层下不会发生。但"锁失效"仍有别的路径（同一进程内多个 Server 实例、
+		// 测试替身、将来的换存储层），而丢更新是**静默**的（后写覆盖先写、不报错）。
+		// 回读校验是**与锁无关**的兜底：不管谁写的，只要库里不是我这版，就重做。
+		for attempt := 0; ; attempt++ {
+			if attempt >= docWriteAttempts {
+				writeErr(w, http.StatusConflict,
+					fmt.Sprintf("同一主题正被并发更新，重试 %d 次仍未能落库（id=%s）；请稍后再试", docWriteAttempts, id))
+				return
+			}
+			prev := s.prevDoc(ctx, realm, id)
+			// 语义判据：词面判据抓不住"请求减缓" vs "申请缓缴"这类同义改写（真跑量到）。
+			// 判据缺席时 ReviseWith 自动退化为词面口径（保守：多报差异而非谎报合并）。
+			rev := docgen.ReviseWith(prev, doc, corpusSources(prev), docgen.SourcesOf(doc), docgenJudge(s.DocGen))
+			doc.Version, doc.Note = rev.Version, rev.Note()
+			doc.Body = docgen.Stamp(docgen.ApplyMarker(doc.Body), rev)
+			out.Version, out.Note = rev.Version, rev.Note()
+			if perr := s.putDoc(ctx, realm, id, topicKey, doc.Body, rev, doc.Sources); perr != nil {
+				writeErr(w, http.StatusInternalServerError, "store: "+perr.Error())
+				return
+			}
+			if s.docIsOurs(ctx, realm, id, rev.Version) {
+				break // 库里就是我这一版：落库成功
+			}
+			// 否则：我们被别人覆盖了（版本对不上）→ 重做读-算-写
 		}
 		out.ID = id
 		out.Stored = true
-		out.Updated = prev != nil
+		out.Updated = s.prevDoc(ctx, realm, id) != nil || out.Version > 1
 		// 写完要让本 realm 的索引失效：否则"生成成功了、下一轮却查不到"。
 		s.InvalidateRealm(realm)
 		if _, ierr := s.IndexFor(r.Context(), realm); ierr == nil {
@@ -305,4 +324,22 @@ func (s *Server) lockDoc(id string) func() {
 	l := v.(*sync.Mutex)
 	l.Lock()
 	return l.Unlock
+}
+
+// docWriteAttempts 是乐观校验的**重试上限**。
+//
+// 为什么是 3：正常并发（同主题多人同时整理）在进程内锁下根本不会进入重试；
+// 进入重试说明有"外部写入者"，重试 3 次仍失败就该**明确报冲突**而不是无限重试
+// （无限重试 = 把一个错误变成一次死循环）。
+const docWriteAttempts = 3
+
+// docIsOurs 回读校验：库里那一篇的版本是不是我们刚写的版本。
+//
+// **按版本判，不按正文判**：正文可能被规范化改写（空白），版本号是单调的。
+func (s *Server) docIsOurs(ctx gocontext.Context, realm, id string, version int) bool {
+	var d corpus.Doc
+	if err := s.Store.GetStruct(ctx, corpus.CollectionFor(realm), id, &d); err != nil {
+		return false // 读不到 = 视为没落成（保守：宁可重试）
+	}
+	return d.Version == version
 }

@@ -234,3 +234,71 @@ func TestConcurrentReadWhileWriting(t *testing.T) {
 	}
 	wg.Wait() // 断言：不 panic 即可（panic 会让测试直接挂）
 }
+
+// **乐观校验**要真的兜住"锁失效"的情况：注入一个竞争写（模拟锁没生效/外部写入），
+// 落库后库里不是我们那版 → 必须重做，而不是静默覆盖别人的版本。
+//
+// 为什么用注入而不是真并发：真并发**有时序运气**（可能恰好不冲突），而这里要验的是
+// **算法本身**——确定性比"跑十次不炸"可靠。
+type racingStore struct {
+	*lockedStore
+	// puts 计生成文档的写入次数；抢在第 armed 次写之后注入一个 v99，
+	// 模拟"锁失效、别的写者抢先落库"。
+	puts   int
+	armed  bool
+	inject bool
+}
+
+func (r *racingStore) PutStruct(ctx gocontext.Context, coll, id string, v any) error {
+	gen := strings.HasPrefix(id, "gen-")
+	if err := r.lockedStore.PutStruct(ctx, coll, id, v); err != nil {
+		return err
+	}
+	if gen {
+		r.puts++
+		// **写完立刻注入**：模拟真正的竞态窗口——我们算完 vN、落库成功，
+		// 在回读校验之前，别人抢先写了 v99。（先注入再写的话，被覆盖的就是我们，
+		// 那不叫竞态，那叫正常顺序。）
+		if !r.armed && r.inject {
+			r.armed = true
+			_ = r.lockedStore.PutStruct(ctx, coll, id, corpus.Doc{ID: id, Body: "别人的更新", Version: 99})
+		}
+	}
+	return nil
+}
+
+func TestOptimisticVerifyRetriesWhenOverwritten(t *testing.T) {
+	rs := &racingStore{lockedStore: newLockedStore(), inject: true}
+	s := NewWithStore(rs, nil, 9, 400)
+	s.DocGen = &docgen.Generator{Client: concurrentGenLLM{}}
+	s.Keys = keyringOf("alpha=sk-a")
+	body := "专利权期限为二十年，自申请日起计算。论据甲与论据乙的说明性文字。"
+	id0 := "src000000001"
+	_ = rs.PutStruct(gocontext.Background(), corpus.CollectionFor("alpha"), id0,
+		corpus.Doc{ID: id0, Body: body, Encoding: "utf-8"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/docs",
+		strings.NewReader(`{"topic":"专利权期限","store":true,"top_k":3}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Cumulus-Key", "sk-a")
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("重试后应当成功，code=%d body=%.120s", rec.Code, rec.Body.String())
+	}
+
+	// 我们的重试必须把版本推到 100（99 + 1），而不是停在被别人覆盖的那一版
+	var out GenerateDocResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Version != 100 {
+		t.Fatalf("被覆盖后应重做并落成新版本（期望 100，实际 %d）——说明乐观校验没生效", out.Version)
+	}
+	if rs.puts < 2 {
+		t.Fatalf("应至少写两次（第一次被覆盖 → 重做），实际 %d", rs.puts)
+	}
+	var d corpus.Doc
+	_ = rs.GetStruct(gocontext.Background(), corpus.CollectionFor("alpha"), "gen-"+docgen.TopicKey("专利权期限"), &d)
+	if !strings.Contains(d.Body, "论断甲") {
+		t.Fatalf("库里应是我们这一版的正文（不是别人的占位）: %.80s", d.Body)
+	}
+}
