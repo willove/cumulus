@@ -222,27 +222,6 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 
 // GET /v1/signals——聚合视图（分布 + 每族 top 问句 + 最常被点引用）。
 // 这是"下一轮靶子从哪挑"的那张表，机器可读。
-func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "GET only")
-		return
-	}
-	if s.Signals == nil {
-		writeErr(w, http.StatusNotImplemented, "signal store not configured")
-		return
-	}
-	out := map[string]any{
-		"total":  s.Signals.Len(),
-		"counts": s.Signals.Counts(),
-		"top": map[string]any{
-			knowledge.SignalReaskAfterRefusal: questionCounts(s.Signals.TopQuestions(knowledge.SignalReaskAfterRefusal, 10)),
-			knowledge.SignalReaskAfterAnswer:  questionCounts(s.Signals.TopQuestions(knowledge.SignalReaskAfterAnswer, 10)),
-			knowledge.SignalCitationClick:     citeCounts(s.Signals.TopCitations(10)),
-		},
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
 func questionCounts(sigs []knowledge.Signal) []map[string]any {
 	out := make([]map[string]any, 0, len(sigs))
 	for _, s := range sigs {
