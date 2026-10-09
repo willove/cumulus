@@ -1,6 +1,8 @@
 package api
 
 import (
+	gocontext "context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/willove/cumulus/internal/auth"
 	"github.com/willove/cumulus/internal/corpus"
+	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/store"
 )
@@ -173,4 +176,63 @@ func TestClientCannotClaimRealm(t *testing.T) {
 	if len(aDocs) != 1 {
 		t.Fatalf("write must land in the credential's realm: alpha has %d", len(aDocs))
 	}
+}
+
+// health 必须按**凭证推出的 realm** 报告篇数与 realm——验收脚本第一次跑就抓到
+// 它读启动参数里的 -realm，于是"语料明明有 3 篇、问答答得上来"，health 却报
+// realm="" / corpus_docs=0。**说谎的健康报告比没有更坏**：运维会照着空数字排查。
+func TestHealthReportsCallerRealm(t *testing.T) {
+	mk := func() *Server {
+		s := NewWithStore(newFakeStore(), nil, 9, 400)
+		s.Keys = keyringOf("alpha=sk-a,beta=sk-b")
+		return s
+	}
+	// alpha 的 realm 里放两篇
+	s := mk()
+	for _, body := range []string{"专利年费三百八十元。", "犬只外出须牵领并佩戴犬牌。"} {
+		if _, err := ingest.Text(gocontext.Background(), s.Store, "alpha", body, "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	get := func(key string) HealthResponse {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/health", nil)
+		if key != "" {
+			req.Header.Set("X-Cumulus-Key", key)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var h HealthResponse
+		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	// alpha 凭证 → realm=alpha、篇数=2
+	if h := get("sk-a"); h.Realm != "alpha" || h.CorpusDocs != 2 {
+		t.Fatalf("health 必须报调用者 realm 与其篇数: %+v", h)
+	}
+	// beta 凭证 → realm=beta、篇数=0（隔离）
+	if h := get("sk-b"); h.Realm != "beta" || h.CorpusDocs != 0 {
+		t.Fatalf("beta 必须看到自己的 realm（0 篇）: %+v", h)
+	}
+	// 无凭证 → 默认 realm（宽容形态），不能崩、也不能谎报别的 realm 的篇数
+	if h := get(""); h.Realm == "alpha" {
+		t.Fatalf("无凭证不该冒用别人的 realm: %+v", h)
+	}
+}
+
+// keyringOf 从 "realm=key,…" 规格建凭证表（测试便捷件）。
+func keyringOf(spec string) *auth.Keyring {
+	k, err := auth.ParseKeyringSpec(spec)
+	if err != nil {
+		panic(err)
+	}
+	return k
 }

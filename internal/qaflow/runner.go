@@ -195,7 +195,12 @@ type Options struct {
 	Expander query.Expander
 	// WeightedRetrieve 按词权取数（鸿沟扩展后的加权重取）；nil = 扩展
 	// 无执行处，退化普通贵路。
-	WeightedRetrieve func(weights map[string]float64) ([]EvidenceWindow, error)
+	//
+	// **它带 flow 的 context**（不是裸 func）：多租户下"取哪个索引"取决于
+	// **谁在问**，而 realm 就在 context 里。没有它，实现只能抓一个全局索引——
+	// 真跑踩到：桥扩词完全正确，加权检索却恒 0 命中（它读的是别的 realm 或
+	// 启动时的旧索引），于是 rejected-empty，鸿沟问句照旧被拒答。
+	WeightedRetrieve func(c *context.Context, weights map[string]float64) ([]EvidenceWindow, error)
 	// Abstain 零 LLM 失败预测头（早弃权/强升级）；nil = 不启用。
 	Abstain *abstain.Head
 	// Prior 开文档级多信号重排（cumulus prior 移植：lexical 无长度归一

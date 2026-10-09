@@ -39,10 +39,10 @@ type bm25Executor struct {
 	gate          *qaflow.DecisionDecider // 非 nil：接合成前闸门（CUMULUS_GATE=1）
 	route         qaflow.RouteConfig      // 路由阈值与校准来源
 	// 桥与查询分析（评测要能单独量桥的收益/代价，所以三臂都能跑）
-	bridge           bool                                                      // 接 LLM 词汇桥（CUMULUS_BRIDGE=0 消融）
-	analyzer         func(string) query.Analysis                               // 查询分析（桥的触发判据）
-	expander         query.Expander                                            // 词汇桥
-	weightedRetrieve func(map[string]float64) ([]qaflow.EvidenceWindow, error) // 加权重取
+	bridge           bool                                                                        // 接 LLM 词汇桥（CUMULUS_BRIDGE=0 消融）
+	analyzer         func(string) query.Analysis                                                 // 查询分析（桥的触发判据）
+	expander         query.Expander                                                              // 词汇桥
+	weightedRetrieve func(*context.Context, map[string]float64) ([]qaflow.EvidenceWindow, error) // 加权重取
 }
 
 // envInt 读一个整数环境变量（未设置或非法 → ok=false，用默认值）。

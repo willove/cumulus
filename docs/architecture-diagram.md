@@ -4,6 +4,23 @@
 docs/flow-grammar.md（流程）与 docs/architecture.md（分层）为 SSOT，本
 文件只画图。
 
+## 端到端验收脚本（scripts/acceptance.sh）
+
+链路上每一条承诺写成断言，**任何人任何时候都能复跑**：改了哪一环坏了哪一环，当场红。
+
+```bash
+DASHSCOPE_API_KEY=… bash scripts/acceptance.sh      # 真模型
+bash scripts/acceptance.sh --offline                # 离线（不花 LLM 钱）
+```
+
+覆盖九组：能力可见面 / 问答（有据 + 拒答）/ 词汇桥与升级 / 事件流 / 会话回放 /
+知识文档（生成 + 同主题增量）/ 选题建议 / 多租户隔离 / **失败路径**（空主题、坏 JSON、
+无证据——都必须给出可读原因）。
+
+**它第一次跑就抓出五个真 bug**（health 说谎、Rebuild 集合口径错、watch 按错索引、
+开关在 serve 没接线、桥钉死了启动索引）。详见
+[status-report.md](status-report.md) 第二节。
+
 ## 选题建议：从"不满意"的信号里挑主题
 
 知识文档的质量取决于**选题**，而选题的最好来源不是拍脑袋，是"**哪些问题我们答不上来

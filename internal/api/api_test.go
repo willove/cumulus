@@ -246,12 +246,13 @@ func newFakeStore() *fakeStore { return &fakeStore{docs: map[string]corpusDocSha
 type corpusDocShape struct {
 	ID   string
 	Body string
+	Coll string // 所属集合：多租户断言靠它（否则 ListIDs 忽略 realm 会掩盖越界）
 }
 
 func (f *fakeStore) EnsureCollection(gocontext.Context, string) error { return nil }
 func (f *fakeStore) PutStruct(_ gocontext.Context, coll, id string, v any) error {
 	if d, ok := v.(corpus.Doc); ok {
-		f.docs[id] = corpusDocShape{ID: d.ID, Body: d.Body}
+		f.docs[id] = corpusDocShape{ID: d.ID, Body: d.Body, Coll: coll}
 	}
 	return nil
 }
@@ -267,8 +268,12 @@ func (f *fakeStore) GetStruct(_ gocontext.Context, coll, id string, out any) err
 }
 func (f *fakeStore) ListIDs(_ gocontext.Context, coll string, _ int) ([]string, error) {
 	ids := make([]string, 0, len(f.docs))
-	for id := range f.docs {
-		ids = append(ids, id)
+	for id, d := range f.docs {
+		// **按集合过滤**：realm 就是集合名。假件忽略它会让"多租户隔离"的断言
+		// 变成自证——真件（cumulite）是按集合列的。
+		if d.Coll == coll {
+			ids = append(ids, id)
+		}
 	}
 	return ids, nil
 }

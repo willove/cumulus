@@ -118,6 +118,10 @@ func runServe(args []string) error {
 	idx := srv.Index()
 	srv.Options.Analyzer = analyzerFor(idx)
 	srv.Options.Prior = *priorOn
+	// **serve 也要读这个开关**（原来只有 eval 读）：首程零窗口时先升级再判不知道。
+	// 少了它，鸿沟问句在路由阶段就拒答，词汇桥永远没机会上场——而桥就是为这种情况
+	// 造的。（验收脚本第一次跑就撞上：设了开关、bridge 读数仍恒空。）
+	srv.Options.Route = routeWithEnvToggles(srv.Options.Route)
 	if *abstainOn {
 		srv.Options.Abstain = abstain.Default() // 保守启发式权重（cumulus 同款取值）
 	}
@@ -146,7 +150,18 @@ func runServe(args []string) error {
 		if os.Getenv("CUMULUS_CLASSIFY") == "1" {
 			srv.Options.WindowClassifier = &qaflow.WindowClassifier{Client: client}
 		}
-		srv.Options.WeightedRetrieve = weightedRetrieveFor(idx, *topk, *width)
+		// 桥的加权重取**同样要每次现取索引**——上面那段注释（"不能钉死"）
+		// 说的就是这件事，我只把它用在了升级贵路上，**桥这条腿漏了**。
+		// 症状：桥扩词完全正确（"犬只户外排便"…），但加权检索恒 0 命中 →
+		// rejected-empty → 退回朴素路 → 口语问句被拒答。真跑（验收脚本）抓到。
+		srv.Options.WeightedRetrieve = func(fc *context.Context, weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
+			realm := string(fc.Realm())
+			cur, err := srv.IndexFor(gocontext.Background(), realm)
+			if err != nil || cur == nil {
+				return nil, fmt.Errorf("bridge: index unavailable: %w", err)
+			}
+			return weightedRetrieveFor(cur, *topk, *width)(fc, weights)
+		}
 	}
 	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排
 	// 与语义接地尺）——升级判了却没有执行处，等于级联半条腿
@@ -189,9 +204,10 @@ func runServe(args []string) error {
 				}
 			}
 			_ = ingest.WatchDir(ctx, st, watchRealm, *watchDir, 2*time.Second, func(n int) {
-				if _, err := srv.Rebuild(gocontext.Background()); err == nil {
-					fmt.Printf("watch: +%d docs, index rebuilt\n", n)
-				}
+				// **失效的是 watchRealm 的缓存索引**，不是单数索引：多 realm 时
+				// 请求走 per-realm 缓存（刷单数索引等于刷了一个没人读的）。
+				srv.InvalidateRealm(watchRealm)
+				fmt.Printf("watch: +%d docs, index invalidated (realm=%s)\n", n, watchRealm)
 			})
 		}()
 		fmt.Printf("serve: watching %s for .txt/.md/.jsonl\n", *watchDir)

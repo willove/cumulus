@@ -212,6 +212,12 @@
           "bridge": {
             "type": "string"
           },
+          "bridge_terms": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "executed": {
             "type": "boolean"
           },

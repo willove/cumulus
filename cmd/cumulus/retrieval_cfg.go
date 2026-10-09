@@ -42,8 +42,8 @@ func (e *bm25Executor) retrievalFor() func(*context.Context, qaflow.Rewrite) ([]
 //
 // **两处调用（serve 与 eval）必须同一份实现**：桥的效果是量出来的，量的时候
 // 两个入口的行为不一致，"护栏有没有用"这个问题就答不了。
-func weightedRetrieveFor(idx *retrieval.Index, topK, width int) func(map[string]float64) ([]qaflow.EvidenceWindow, error) {
-	return func(weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
+func weightedRetrieveFor(idx *retrieval.Index, topK, width int) func(*context.Context, map[string]float64) ([]qaflow.EvidenceWindow, error) {
+	return func(_ *context.Context, weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
 		hits := idx.SearchWeighted(weights, topK, width, nil)
 		out := make([]qaflow.EvidenceWindow, 0, len(hits))
 		for _, h := range hits {

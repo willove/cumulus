@@ -121,7 +121,17 @@ func (s *Server) IndexFor(ctx gocontext.Context, realm string) (*retrieval.Index
 
 // Rebuild 从 store 重建**默认 realm** 的索引。摄入（粘贴/链接/看目录）后调用。
 func (s *Server) Rebuild(ctx gocontext.Context) (int, error) {
-	docs, err := corpus.Load(ctx, s.Store)
+	// **按 realm 重建**（realm 空 → 服务自身的 Realm，通常是 "default"）。
+	// 原先固定读默认集合 `documents`，而摄入写的是 `documents/<realm>`
+	// —— 口径不一致时，摄入后重建出来的索引是空的（"刚摄入的文档一问答就查不到"，
+	// 同样的坑在 -watch 那次踩过一次）。测试替身原先忽略集合，把这个问题盖住了。
+	// realm 为空 → 用服务自身的 Realm。注意 Rebuild 重建的是**单数索引**
+	// （`s.index`）：带凭证的请求走的是 IndexFor 的 **per-realm 缓存**，所以
+	// 单租户形态下两者一致；多 realm 时 watch/ingest 必须显式用 InvalidateRealm
+	// 让对应 realm 失效重建（真跑踩过：watch 写 alpha、rebuild 刷 default，
+	// health 读 alpha 的缓存 → 0 篇，"明明导入了 6 篇却一篇查不到"）。
+	realm := s.Realm
+	docs, err := corpus.LoadRealm(ctx, s.Store, realm)
 	if err != nil {
 		return 0, err
 	}

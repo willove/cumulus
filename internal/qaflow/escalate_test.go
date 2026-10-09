@@ -149,7 +149,7 @@ func TestEscalateExpandsVocabularyGap(t *testing.T) {
 			expandedWith = append(expandedWith, q)
 			return []string{"饲养动物", "噪声"}, nil
 		}),
-		Weighted: func(weights map[string]float64) ([]EvidenceWindow, error) {
+		Weighted: func(_ *context.Context, weights map[string]float64) ([]EvidenceWindow, error) {
 			weightedCalled = true
 			// 扩展词按索引口径拆成二元组后着重（整词进不了倒排）
 			for _, bg := range []string{"饲养", "养动", "动物"} {
@@ -191,7 +191,7 @@ func TestEscalateBridgeFailureFallsBack(t *testing.T) {
 	stage := EscalateStage{
 		Retrieve: coverageStub(win1(), 0.3),
 		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return nil, errors.New("llm down") }),
-		Weighted: func(map[string]float64) ([]EvidenceWindow, error) {
+		Weighted: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) {
 			t.Fatal("扩展失败时不该走加权路")
 			return nil, nil
 		},
@@ -258,7 +258,7 @@ func TestEscalateFallsBackWhenWeightedRetrievalMisses(t *testing.T) {
 		// 首程覆盖 0.3 → 必升级
 		Escalate: coverageStub(winDeep(), 0.9), // 朴素贵路：真能取到窗
 		Expander: &stubExpander{terms: []string{"完全无关的扩展词"}},
-		WeightedRetrieve: func(map[string]float64) ([]EvidenceWindow, error) {
+		WeightedRetrieve: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) {
 			weightedCalled++
 			return nil, nil // 桥扩偏：加权重取一条都取不到
 		},
@@ -300,7 +300,7 @@ func TestEscalateRejectsBridgeThatScoresWorse(t *testing.T) {
 	stage := &EscalateStage{
 		Retrieve: coverageStub(good, 0.9), // 朴素路：好窗口
 		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
-		Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return noise, nil }, // 桥把方向带偏
+		Weighted: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) { return noise, nil }, // 桥把方向带偏
 	}
 	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
 	_ = context.Set(c, KeyAnalysis, analysis)
@@ -334,7 +334,7 @@ func TestEscalateKeepsBridgeWhenItWins(t *testing.T) {
 	stage := &EscalateStage{
 		Retrieve: func(*context.Context, Rewrite) ([]EvidenceWindow, error) { return plain, nil },
 		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
-		Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return bridged, nil },
+		Weighted: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) { return bridged, nil },
 	}
 	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
 	_ = context.Set(c, KeyAnalysis, analysis)
@@ -372,7 +372,7 @@ func TestBridgeGuardIsAblatable(t *testing.T) {
 		stage := &EscalateStage{
 			Retrieve: coverageStub(good, 0.9),
 			Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
-			Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return noise, nil },
+			Weighted: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) { return noise, nil },
 		}
 		_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
 		_ = context.Set(c, KeyAnalysis, analysis)

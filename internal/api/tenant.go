@@ -23,6 +23,14 @@ func (s *Server) realmOf(r *http.Request) string {
 	if v, ok := r.Context().Value(realmCtxKey{}).(string); ok && v != "" {
 		return v
 	}
+	// **没有中间件时的兜底**（/v1/health 走的就是这条路：它免认证）。
+	// 有凭证就按凭证的 realm 报告，没有才用启动参数——否则 health 会对着一个
+	// 调用者根本不用的 realm 报数字（验收脚本第一次跑就抓到：realm="" 但语料有 3 篇）。
+	if s.Keys != nil && !s.Keys.Empty() {
+		if realm, err := s.Keys.Authenticate(r); err == nil && realm != "" {
+			return realm
+		}
+	}
 	return s.Realm
 }
 

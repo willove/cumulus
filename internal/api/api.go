@@ -156,11 +156,20 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// **realm 由凭证推导**（与问答面同一口径），篇数也是**该 realm 的**篇数。
+	//
+	// 验收脚本第一次跑就抓到这里：health 原先读启动参数里的 -realm，而带凭证的
+	// 请求落在凭证推出的 realm 上 —— 于是"有 3 篇语料、问答答得上来"的服务，
+	// health 却报 realm=""、corpus_docs=0。**说谎的健康报告比没有更坏**：运维
+	// 会照着一个空数字去排查。
+	realm := s.realmOf(r)
 	docs := 0
-	if idx := s.Index(); idx != nil {
+	if idx, err := s.IndexFor(r.Context(), realm); err == nil && idx != nil {
 		docs = idx.N
 	}
-	writeJSON(w, http.StatusOK, HealthResponse{Status: "ok", CorpusDocs: docs, Realm: s.Realm, CorpusVersion: s.corpusVersion()})
+	writeJSON(w, http.StatusOK, HealthResponse{
+		Status: "ok", CorpusDocs: docs, Realm: realm, CorpusVersion: s.corpusVersion(),
+	})
 }
 
 // handleStatus 是分类器可见面：哪些可选组件活着、缺什么。cumulus 的

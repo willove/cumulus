@@ -27,6 +27,9 @@ type EscalationRecord struct {
 	// weighted-error / no-bridge。**桥失手不许无声无息**——它是质量问题
 	// （召回被带歪），会悄悄拉低整轮读数。
 	Bridge string `json:"bridge,omitempty"`
+	// BridgeTerms 是桥**实际扩出的词**。放进读数是因为"桥失手"要能排查：
+	// 不知道它扩了什么，就只能猜（真跑排查 `rejected-empty` 时最缺的就是这个）。
+	BridgeTerms []string `json:"bridge_terms,omitempty"`
 }
 
 // EscalateStage 是升级的执行处（BioHarness 级联：便宜快路 → 充足性
@@ -45,7 +48,7 @@ type EscalateStage struct {
 	// 普通贵路——桥是可选件，不是必经路。
 	Expand   query.Expander
 	Analyze  func(q string) query.Analysis
-	Weighted func(weights map[string]float64) ([]EvidenceWindow, error)
+	Weighted func(c *context.Context, weights map[string]float64) ([]EvidenceWindow, error)
 }
 
 func (EscalateStage) Name() string { return "escalate" }
@@ -96,10 +99,14 @@ func (s EscalateStage) Run(c *context.Context) error {
 	if err := context.Set(c, KeyWindows, merged); err != nil {
 		return err
 	}
-	// 取回 escalateRetrieve 期间 noteBridge 记的结局：局部的 rec 是**调用前的
-	// 快照**，直接收尾会把桥的记录覆盖掉（真跑踩过：护栏行为对、记录却空）。
-	if latest, ok := context.Get(c, KeyEscalation); ok && latest.Bridge != "" {
-		rec.Bridge = latest.Bridge
+	// 取回 escalateRetrieve 期间记下的东西（桥结局、扩词……）：局部的 rec 是
+	// **调用前的快照**，直接收尾会覆盖掉它们。
+	//
+	// **整体取回而不是逐字段抄**（真跑两次踩坑的教训：先丢结局、再丢扩词，
+	// 每次都得回来补一个字段）。约定：escalateRetrieve 之后由它**拥有**这条记录，
+	// 这里只补它没管的字段（Executed/Windows/After）。
+	if latest, ok := context.Get(c, KeyEscalation); ok {
+		rec = latest
 	}
 	rec.Executed = true
 	rec.Windows = len(ws)
@@ -175,8 +182,10 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 	// 就 0 窗，于是 facts 有支撑、分数 12.8 仍然拒答）。
 	expanded, err := s.Expand.Expand(gocontext.Background(), rw.Original)
 	if err != nil || len(expanded) == 0 {
+		s.noteBridgeTerms(c, expanded)
 		return s.Retrieve(c, rw) // 桥失败：退化贵路
 	}
+	s.noteBridgeTerms(c, expanded)
 	// 合并权重：**扩展词为主，原主级降为 0.2 的边注**。桥的语义是替换不
 	// 是并列——原问词在鸿沟场景下正是失败的那批（垃圾二元组在库里稀
 	// 有、idf 高，并列着会把桥带歪：真跑教训"养狗叫得太吵"扩出噪声，
@@ -193,7 +202,7 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 			weights[bg] = 2.0
 		}
 	}
-	ws, werr := s.Weighted(weights)
+	ws, werr := s.Weighted(c, weights)
 	if werr != nil {
 		s.noteBridge(c, "weighted-error")
 		return s.Retrieve(c, rw) // 加权路出错：退化朴素贵路（不是"没证据"）
@@ -300,4 +309,20 @@ func bridgeSkipReason(s EscalateStage, thin bool) string {
 	default:
 		return "none"
 	}
+}
+
+// noteBridgeTerms 把桥扩出的词记进升级记录（可观测）。
+//
+// 挂在自己的链路上写（`revise` 之后那条路径本来就会回写记录），所以这里的写入
+// 会随 Run 末尾的收尾一并落盘——与 noteBridge 同一条时序，不额外引入依赖。
+func (s EscalateStage) noteBridgeTerms(c *context.Context, terms []string) {
+	if len(terms) == 0 {
+		return
+	}
+	rec, ok := context.Get(c, KeyEscalation)
+	if !ok {
+		return
+	}
+	rec.BridgeTerms = append([]string(nil), terms...)
+	_ = context.Set(c, KeyEscalation, rec)
 }

@@ -102,7 +102,7 @@ func TestEveryOptionalCapabilityActuallyRuns(t *testing.T) {
 		}},
 		// 2) 桥：需要 expander + 加权重取 + 有升级执行处
 		Expander: wireExpander{terms: []string{"权益"}},
-		WeightedRetrieve: func(map[string]float64) ([]EvidenceWindow, error) {
+		WeightedRetrieve: func(*context.Context, map[string]float64) ([]EvidenceWindow, error) {
 			return BM25Evidence(idx, 2, 80)(context.New("weighted"), Rewrite{Original: "权益"})
 		},
 		// 3) 升级执行处：判升级时它必须真的被调到
