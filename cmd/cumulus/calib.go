@@ -40,6 +40,42 @@ func shouldRetrieveStats(state evalfcore.RunState) string {
 		" 该检索没检索=" + itoa(shouldRetMiss) + ")"
 }
 
+// bridgeStats 汇总词汇桥的结局。**桥失手率必须看得见**：它是质量问题（召回
+// 被带歪），不是事故——日志会被刷掉，只有读数能进回归对比。
+func bridgeStats(state evalfcore.RunState) string {
+	used, rejected, off := 0, 0, 0
+	reasons := map[string]int{}
+	for _, r := range state.Results {
+		switch {
+		case r.Bridge == "":
+			off++
+		case strings.HasPrefix(r.Bridge, "used"):
+			used++
+		default:
+			rejected++
+			reasons[r.Bridge]++
+		}
+	}
+	if used+rejected == 0 {
+		return "bridge(未走桥 " + itoa(off) + " 题)"
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		label := k
+		if len(label) > 18 {
+			label = label[:18] + "…"
+		}
+		parts = append(parts, label+":"+itoa(reasons[k]))
+	}
+	pct := 100 * used / (used + rejected)
+	return "bridge(采纳 " + itoa(used) + " " + itoa(pct) + "% · 弃用 " + itoa(rejected) + " {" + strings.Join(parts, ",") + "})"
+}
+
 // gateStats 汇总闸门状态并打印。**闸门跑没跑、拦没拦必须出现在读数里**：
 // 没生效与生效但没拦，是两回事，混在一起就等于没有可见性（真跑踩过：
 // 开关写错时读数与"闸门没装"完全一样）。

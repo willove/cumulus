@@ -188,6 +188,9 @@
           "before": {
             "type": "string"
           },
+          "bridge": {
+            "type": "string"
+          },
           "executed": {
             "type": "boolean"
           },

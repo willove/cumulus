@@ -22,6 +22,10 @@ type EscalationRecord struct {
 	After     string `json:"after"`     // 升级后重判的动作（未执行则同 Before）
 	Windows   int    `json:"windows"`   // 升级后的窗口数
 	Reason    string `json:"reason,omitempty"`
+	// Bridge 是词汇桥的结局（可观测）：used / rejected-score / rejected-empty /
+	// weighted-error / no-bridge。**桥失手不许无声无息**——它是质量问题
+	// （召回被带歪），会悄悄拉低整轮读数。
+	Bridge string `json:"bridge,omitempty"`
 }
 
 // EscalateStage 是升级的执行处（BioHarness 级联：便宜快路 → 充足性
@@ -66,6 +70,11 @@ func (s EscalateStage) Run(c *context.Context) error {
 	if !ok {
 		return fmt.Errorf("escalate: rewrite missing")
 	}
+	// 先把初始记录写进 context：桥的结局要记在**同一条**记录上，而 escalateRetrieve
+	// 是在它之前跑的（真跑踩过：结局恒空——noteBridge 当时无处可写）。
+	if err := context.Set(c, KeyEscalation, rec); err != nil {
+		return err
+	}
 	ws, err := s.escalateRetrieve(c, rw)
 	if err != nil {
 		return fmt.Errorf("escalate: retrieve: %w", err)
@@ -79,6 +88,11 @@ func (s EscalateStage) Run(c *context.Context) error {
 	merged := mergeWindows(prev, ws)
 	if err := context.Set(c, KeyWindows, merged); err != nil {
 		return err
+	}
+	// 取回 escalateRetrieve 期间 noteBridge 记的结局：局部的 rec 是**调用前的
+	// 快照**，直接收尾会把桥的记录覆盖掉（真跑踩过：护栏行为对、记录却空）。
+	if latest, ok := context.Get(c, KeyEscalation); ok && latest.Bridge != "" {
+		rec.Bridge = latest.Bridge
 	}
 	rec.Executed = true
 	rec.Windows = len(ws)
@@ -167,15 +181,65 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 	}
 	ws, werr := s.Weighted(weights)
 	if werr != nil {
+		s.noteBridge(c, "weighted-error")
 		return s.Retrieve(c, rw) // 加权路出错：退化朴素贵路（不是"没证据"）
+	}
+	// **桥必须证明自己有用**（本轮加的护栏）：拿朴素路做对照，分明显更低就弃用桥。
+	//
+	// 为什么必须对照：桥扩偏时**不会返回 0 命中**——它会返回"很自信的噪声窗口"
+	//（上一轮的真跑教训："养狗叫得太吵"扩出噪声，窗口被拉去太湖流域管理条例）。
+	// 0 命中兜底抓不住这种情况，只有与原问的直接对照抓得住。
+	//
+	// BM25 一次检索是微秒级，多跑一次朴素路几乎不要钱；比"桥把检索带歪"的代价
+	// （整轮答错方向）便宜几个数量级。
+	plain, perr := s.Retrieve(c, rw)
+	if perr == nil && bridgeWorse(ws, plain, BridgeScoreRatio) {
+		s.noteBridge(c, "rejected-score")
+		return plain, nil
 	}
 	if len(ws) == 0 {
 		// **0 命中不等于不存在**。桥可能把问句扩到与语料毫无交集的方向
 		// （真跑教训："养狗叫得太吵"扩出噪声；这里的单文档问句同样被扩偏），
-		// 此时再给一次朴素机会：桥是**增强**，它失手不该等于系统失忆。
-		return s.Retrieve(c, rw)
+		// 此时给朴素路一次机会：桥是**增强**，它失手不该等于系统失忆。
+		s.noteBridge(c, "rejected-empty")
+		return plain, nil
 	}
+	s.noteBridge(c, "used")
 	return ws, nil
+}
+
+// BridgeScoreRatio 是**弃用门槛**：加权路的首窗分低于朴素路首窗分的这个比例，
+// 就认为桥把检索带歪了（0 = 桥必须更优才留）。
+//
+// 0.75 而不是 1.0：桥的召回面更大，同一批文档上的最高分**理应**不低于朴素路；
+// 留 25% 容忍度是为了不因"桥召回更好但最高分略低"这种正常情况把桥毙掉。
+// 语料/桥表现变化时这个数要按数据调（它是一个假设，不是真理）。
+const BridgeScoreRatio = 0.75
+
+// bridgeWorse 判断加权路是否明显不如朴素路（只看**首窗分**，不比较窗数：
+// 桥的价值是召回更宽，用窗数判会把"召回更好"误判成"更差"）。
+func bridgeWorse(weighted, plain []EvidenceWindow, ratio float64) bool {
+	if len(weighted) == 0 || len(plain) == 0 {
+		return false // 交给 0 命中兜底
+	}
+	return weighted[0].Score < plain[0].Score*ratio
+}
+
+// noteBridge 把桥的结局记进升级记录（可观测：桥失手不许无声无息）。
+//
+// 为什么记在这里而不是日志：桥失手是**质量问题**（召回被带歪），不是运行事故；
+// 日志会被刷掉，而 EscalationRecord 会进每题结果、能进对比与回归读数。
+func (s EscalateStage) noteBridge(c *context.Context, outcome string) {
+	rec, ok := context.Get(c, KeyEscalation)
+	if !ok {
+		return
+	}
+	if rec.Bridge == "" {
+		rec.Bridge = outcome
+	} else {
+		rec.Bridge += "+" + outcome
+	}
+	_ = context.Set(c, KeyEscalation, rec)
 }
 
 // mergeWindows 合并两个窗集：按 (SourceID,Span) 去重，按分降序，封顶

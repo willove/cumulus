@@ -101,6 +101,7 @@ export interface EscalationRecord {
   after: string;
   windows: number;
   reason?: string;
+  bridge?: string;
 }
 
 export interface ReuseState {

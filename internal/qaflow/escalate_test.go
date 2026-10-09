@@ -284,3 +284,72 @@ type stubExpander struct{ terms []string }
 func (s *stubExpander) Expand(_ gocontext.Context, _ string) ([]string, error) {
 	return s.terms, nil
 }
+
+// 桥必须**证明自己有用**：首窗分明显低于朴素路 → 弃用桥、回到朴素结果。
+//
+// 为什么这条护栏不可省：桥扩偏时**不会返回 0 命中**——它会返回"很自信的噪声窗口"
+// （真跑教训："养狗叫得太吵"扩出噪声，窗口被拉去太湖流域管理条例）。上一轮那条
+// "加权 0 命中才退回"的兜底抓不住这种情况，只有与原问直接对照抓得住。
+func TestEscalateRejectsBridgeThatScoresWorse(t *testing.T) {
+	analysis := query.Analysis{Intent: "search", Primary: map[string]float64{"饲养": 1}, OOV: []string{"闯红"}, Score: 1}
+	noise := []EvidenceWindow{{SourceID: "noise-1", Span: "rune[0:2]", Text: "完全无关的噪声", Score: 0.2}}
+	good := []EvidenceWindow{{SourceID: "ops-1", Span: "rune[0:2]", Text: "养狗管理办法", Score: 9}}
+
+	c := context.New("bridge-score")
+	stage := &EscalateStage{
+		Retrieve: coverageStub(good, 0.9), // 朴素路：好窗口
+		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
+		Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return noise, nil }, // 桥把方向带偏
+	}
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
+	_ = context.Set(c, KeyAnalysis, analysis)
+	_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+	_ = context.Set(c, KeyWindows, win1())
+	_ = context.Set(c, KeyEscalation, EscalationRecord{Triggered: true})
+
+	if err := stage.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := context.Get(c, KeyWindows)
+	if !hasWindow(ws, "ops-1") {
+		t.Fatalf("桥分更低时应保留朴素路的好窗口，got %v", ws)
+	}
+	if hasWindow(ws, "noise-1") {
+		t.Fatalf("桥的噪声窗口不该进最终窗集：%v", ws)
+	}
+	rec, _ := context.Get(c, KeyEscalation)
+	if rec.Bridge != "rejected-score" {
+		t.Fatalf("bridge outcome must be observable: %+v", rec)
+	}
+}
+
+// 反面：桥确实带来更好的首窗 → 采纳桥（护栏不许把好桥毙掉）。
+func TestEscalateKeepsBridgeWhenItWins(t *testing.T) {
+	analysis := query.Analysis{Intent: "search", Primary: map[string]float64{"饲养": 1}, OOV: []string{"闯红"}, Score: 1}
+	plain := []EvidenceWindow{{SourceID: "plain-1", Span: "rune[0:2]", Text: "一般窗口", Score: 2}}
+	bridged := []EvidenceWindow{{SourceID: "ops-1", Span: "rune[0:2]", Text: "养狗管理办法", Score: 11}}
+
+	c := context.New("bridge-good")
+	stage := &EscalateStage{
+		Retrieve: func(*context.Context, Rewrite) ([]EvidenceWindow, error) { return plain, nil },
+		Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
+		Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return bridged, nil },
+	}
+	_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
+	_ = context.Set(c, KeyAnalysis, analysis)
+	_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+	_ = context.Set(c, KeyWindows, win1())
+	_ = context.Set(c, KeyEscalation, EscalationRecord{Triggered: true})
+
+	if err := stage.Run(c); err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := context.Get(c, KeyWindows)
+	if !hasWindow(ws, "ops-1") {
+		t.Fatalf("bridge window must survive when it scores better: %v", ws)
+	}
+	rec, _ := context.Get(c, KeyEscalation)
+	if rec.Bridge != "used" {
+		t.Fatalf("bridge outcome must be recorded as used: %+v", rec)
+	}
+}

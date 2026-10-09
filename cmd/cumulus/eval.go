@@ -144,6 +144,10 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 	// 信号——只能在答案出来之后算，因此进不了路由，但进得了校准比较，
 	// 以及之后"验证后再决定升级/拒答"的环节）。
 	out.Support, out.SupportN = qaflow.AnswerSupport(answer.Text, windows)
+	// 词汇桥结局进逐题结果（桥失手是质量问题，读数里要看得见）
+	if esc, ok := context.Get(c, qaflow.KeyEscalation); ok {
+		out.Bridge = esc.Bridge
+	}
 	// 闸门/决策留痕进每题输出："有没有真决策"必须看得见（没记录与"决策说不行"
 	// 在读数里是两回事）。
 	if rec, ok := qaflow.DecisionRecordOf(c); ok {
@@ -514,7 +518,7 @@ func printRun(arm string, state evalfcore.RunState) {
 		fmt.Printf("  [%s] %s rule=%.0f evidence=%v cites=%d/%d rerank=%v%s failure=%s\n",
 			arm, r.ItemID, r.RuleScore, r.EvidenceHit, r.CitationsResolved, r.CitationsTotal, r.RerankApplied, rr, f)
 	}
-	fmt.Printf("[%s] %s %s %s\n", arm, evalfcore.Summarize(state), gateStats(state), shouldRetrieveStats(state))
+	fmt.Printf("[%s] %s %s %s %s\n", arm, evalfcore.Summarize(state), gateStats(state), shouldRetrieveStats(state), bridgeStats(state))
 }
 
 func evalCorpus() []retrieval.Document {
