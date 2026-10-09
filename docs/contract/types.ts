@@ -25,6 +25,7 @@ export interface QAResponse {
   rerank: RerankState;
   windows: WindowView[];
   usage: UsageView;
+  classification?: ClassificationView;
   committed: CommittedView;
 }
 
@@ -102,6 +103,7 @@ export interface EscalationRecord {
   windows: number;
   reason?: string;
   bridge?: string;
+  classification?: string;
 }
 
 export interface ReuseState {
@@ -136,6 +138,13 @@ export interface UsageView {
   prompt_tokens: number;
   completion_tokens: number;
   cost_known: boolean;
+}
+
+export interface ClassificationView {
+  enabled: boolean;
+  applied: boolean;
+  outcome?: string;
+  counts?: Record<string, unknown>;
 }
 
 export interface CommittedView {

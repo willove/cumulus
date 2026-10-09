@@ -179,6 +179,12 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// LastJSONObject 从任意文本里取最后一个配平且合法的 JSON 对象。
+//
+// 导出（不只内部用）：**结构化抽取的调用方都需要它**——分类、提议、解析之类的
+// 地方各写一遍正则只会得到三份不同的行为。推理链兜底与调用方共用同一份实现。
+func LastJSONObject(s string) string { return lastJSONObject(s) }
+
 // lastJSONObject 从任意文本里取最后一个配平且合法的 JSON 对象（推理链里
 // 挑结论）。找不到返回空串。
 func lastJSONObject(s string) string {

@@ -67,6 +67,27 @@
         ],
         "type": "object"
       },
+      "ClassificationView": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "counts": {
+            "type": "object"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "outcome": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "applied",
+          "enabled"
+        ],
+        "type": "object"
+      },
       "CommittedView": {
         "properties": {
           "at": {
@@ -189,6 +210,9 @@
             "type": "string"
           },
           "bridge": {
+            "type": "string"
+          },
+          "classification": {
             "type": "string"
           },
           "executed": {
@@ -369,6 +393,9 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/ClassificationView"
           },
           "committed": {
             "$ref": "#/components/schemas/CommittedView"

@@ -36,6 +36,9 @@ type QAResponse struct {
 	Rerank    qaflow.RerankState      `json:"rerank"`
 	Windows   []WindowView            `json:"windows"`
 	Usage     UsageView               `json:"usage"`
+	// Classification 是窗口分级（GaRAGe 四类）的读数：**可解释性**用，
+	// 不参与检索与路由。三段分开是因为"没开""开了失败""开了成功"要能分开。
+	Classification *ClassificationView `json:"classification,omitempty"`
 	// Committed 是本次迁移的提交视图（不变量 4 的执行处）：这次答案
 	// 针对哪版语料/配置/策略，以及路由实际生效的档位与校准程序。
 	// 缺了它，"答案为什么变了"只能靠猜——语料在长（个人库），版本必须
@@ -158,4 +161,12 @@ type UsageView struct {
 	PromptTokens     int  `json:"prompt_tokens"`
 	CompletionTokens int  `json:"completion_tokens"`
 	CostKnown        bool `json:"cost_known"`
+}
+
+// ClassificationView 是窗口分级的读数。
+type ClassificationView struct {
+	Enabled bool           `json:"enabled"`           // 分类器装了没
+	Applied bool           `json:"applied"`           // 这一问真的分级了没
+	Outcome string         `json:"outcome,omitempty"` // 失败原因（有则说明装了但没成）
+	Counts  map[string]int `json:"counts,omitempty"`  // 各类各几条（rank → 类别 → 计数）
 }

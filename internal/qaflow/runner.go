@@ -118,7 +118,7 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 	}
 	// 观测闭包：进度分母是**本次实际注册的阶段数**（装了哪些可选件，
 	// 步数就不一样）——写死一个常数会让进度条说谎。
-	r.Trace = traceFunc(opts.Emitter, opts.RunID, len(stages))
+	r.Trace = traceFunc(opts.Emitter, opts.RunID, len(stages), opts)
 	return r
 }
 
@@ -218,6 +218,9 @@ type Options struct {
 	// 没有答案却合出了很像样的答案"（真跑见过：9 条窗口全讲潜伏期长短，
 	// 答案写的是抗病毒治疗建议）只能在合成前拦。
 	Decision *DecisionDecider
+	// WindowClassifier 是**可选**的窗口分级（GaRAGe 四类）。nil = 不分级，
+	// `file` 事件里没有 class 字段——缺席是合法状态，且**与 UNKNOWN 不同**。
+	WindowClassifier *WindowClassifier
 	// Emitter 是**对外事件流**（§architecture 输出面）。nil = 不发任何事件，
 	// 流程与响应逐字段不变（harness 契约 1：观测面缺席不许改变行为）。
 	Emitter *harness.Emitter
@@ -239,13 +242,18 @@ type Options struct {
 	Bare bool
 }
 
-// traceFunc 返回挂到 flow.Runner 上的观测钩子。emitter 为 nil 时返回 nil
-// （flow 那边 nil = 不观测）——**可选面缺席不留空壳**（见文件头约定）。
-func traceFunc(em *harness.Emitter, runID string, total int) flow.TraceFunc {
-	if em == nil {
+// traceFunc 返回挂到 flow.Runner 上的观测钩子。
+//
+// **emitter 为 nil 不等于"不观测"**：只要装了窗口分级器，仍然要挂（它需要把分级结果
+// 写进 context 的挂点）。真跑踩过：`/v1/qa`（一次性 JSON）不装 emitter，早退把整个
+// trace 连分级一起挡掉 → 读数里永远 `applied=false`，而分类器明明装着
+// （`enabled=true`）。两个都没接才返回 nil——**可选面缺席不留空壳，但别把另一个
+// 可选面顺手当掉**。
+func traceFunc(em *harness.Emitter, runID string, total int, opts Options) flow.TraceFunc {
+	if em == nil && opts.WindowClassifier == nil {
 		return nil
 	}
-	return NewTrace(em, runID, total).Stage
+	return NewTrace(em, runID, total).withClassifier(opts.WindowClassifier).Stage
 }
 
 // routeWithEscalate 把"有没有升级执行处"写进路由配置。

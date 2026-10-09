@@ -18,18 +18,25 @@ import (
 // **缺席即无事件**：Emitter 为 nil 时本类型什么都不发，流程逐字段不变
 // （harness 契约 1：可选增强不许变成依赖）。
 type Trace struct {
-	em    *harness.Emitter
-	runID string
-	files map[string]bool // 已发过的 docid（去重：升级/重取数会重发同一篇）
-	done  int             // 已收尾的阶段数（算进度用）
-	total int             // 本次流程的标准阶段数（分母；0 = 未知）
-	synth bool            // 已经过合成阶段（详情文案要防"用未来数据解释过去"）
+	em         *harness.Emitter
+	runID      string
+	classifier *WindowClassifier // nil = 不分级（事件里没有 class 字段）
+	files      map[string]bool   // 已发过的 docid（去重：升级/重取数会重发同一篇）
+	done       int               // 已收尾的阶段数（算进度用）
+	total      int               // 本次流程的标准阶段数（分母；0 = 未知）
+	synth      bool              // 已经过合成阶段（详情文案要防"用未来数据解释过去"）
 }
 
 // NewTrace 装一个事件发射器（em 为 nil = 这一层没接）。total 是本次流程的
 // 标准阶段数——**进度要有分母**，否则百分比就是猜的。
 func NewTrace(em *harness.Emitter, runID string, total int) *Trace {
 	return &Trace{em: em, runID: runID, files: map[string]bool{}, total: total}
+}
+
+// withClassifier 装窗口分级器（可选能力；nil = 不分级）。
+func (t *Trace) withClassifier(c *WindowClassifier) *Trace {
+	t.classifier = c
+	return t
 }
 
 // Emitter 返回底层发射器（供上层补发终态事件）。
@@ -46,7 +53,18 @@ func (t *Trace) Emitter() *harness.Emitter {
 // 检索日志（旧 cumulus 的 stage=file 同形）。但 BM25 是一次性返回有序列表，所以
 // 事件是**有序批量**发出，而不是逐个检索瞬间——这是接口决定的，**不许假装成流式**。
 func (t *Trace) Stage(c *context.Context, name string, phase flow.TracePhase, durMS int64) {
-	if t == nil || t.em == nil {
+	if t == nil {
+		return
+	}
+	if t.em == nil && t.classifier == nil {
+		return // 没有出口也没有分级器：这一层没接（合法状态）
+	}
+	if t.em == nil {
+		// **只有分级器、没有事件出口**（`/v1/qa` 一次性 JSON 就是这个形态）：
+		// 分级结果仍要落到 context 的挂点上，否则读数里"未分级"与"没跑"分不开。
+		if phase == flow.TraceDone && name == (EvidenceStage{}).Name() {
+			t.classifyOnly(c)
+		}
 		return
 	}
 	p := harness.PhaseStart
@@ -71,11 +89,33 @@ func (t *Trace) Stage(c *context.Context, name string, phase flow.TracePhase, du
 	}
 }
 
-// emitWindows 把最终窗集发成 file 事件（rank/标题/分数/坐标/预览）。
+// emitWindows 把最终窗集发成 file 事件（rank/标题/分数/坐标/预览 + 类别）。
+//
+// 分级在**这里**做而不是更早：发事件时我们手上就是最终窗集（升级/驱逐都过了），
+// 早做会分到一批已经作废的窗口。
 func (t *Trace) emitWindows(c *context.Context) {
 	ws, ok := context.Get(c, KeyWindows)
 	if !ok {
 		return
+	}
+	// 分级失败**不发空类别**：宁可这一批窗口没有类别（消费方显示"未分级"），
+	// 也不要把半张表写进事件流。
+	var classes map[int]string
+	if t.classifier != nil {
+		rw, ok2 := context.Get(c, KeyRewrite)
+		switch {
+		case !ok2:
+			t.noteClassify(c, "no-rewrite")
+		default:
+			got, err := t.classifier.Classify(c, rw.Original, ws)
+			if err != nil {
+				// 分级失败要**看得见**（否则读数里"没有类别"和"没分级"分不开，
+				// 而我第一版就是这么把失败静默掉的）
+				t.noteClassify(c, "failed: "+err.Error())
+			} else {
+				classes = got
+			}
+		}
 	}
 	for i, w := range ws {
 		if t.files[w.SourceID] {
@@ -85,6 +125,7 @@ func (t *Trace) emitWindows(c *context.Context) {
 		ev, err := harness.File(t.runID, harness.FileInfo{
 			Rank: i + 1, DocID: w.SourceID, Title: w.Title, Score: w.Score,
 			Span: w.Span, Preview: truncateRunes(w.Text, 160),
+			Class: classes[i+1], // 没分级就是空（消费方显示"未分级"）
 		})
 		if err != nil {
 			continue
@@ -275,4 +316,38 @@ func oneLine(s string) string {
 		return string(rs[:60]) + "…"
 	}
 	return s
+}
+
+// noteClassify 把分级失败的结局记进升级记录旁的分类字段（可观测）。
+func (t *Trace) noteClassify(c *context.Context, outcome string) {
+	rec, ok := context.Get(c, KeyEscalation)
+	if !ok {
+		return // 还没升级（正常时序）：此时结局已由 KeyWindowClass 承载
+	}
+	if rec.Classification == "" {
+		rec.Classification = outcome
+	} else {
+		rec.Classification += "+" + outcome
+	}
+	_ = context.Set(c, KeyEscalation, rec)
+}
+
+// classifyOnly 只做分级并写挂点（没有事件出口时的形态：`/v1/qa` 一次性 JSON）。
+// 窗口事件仍发不出去，但**分级读数要看得见**——否则那条路径上分级等于没接。
+func (t *Trace) classifyOnly(c *context.Context) {
+	ws, ok := context.Get(c, KeyWindows)
+	if !ok || len(ws) == 0 {
+		_ = SetWindowClass(c, nil)
+		return
+	}
+	rw, ok := context.Get(c, KeyRewrite)
+	if !ok {
+		_ = SetWindowClass(c, nil)
+		return
+	}
+	got, err := t.classifier.Classify(c, rw.Original, ws)
+	if err != nil {
+		t.noteClassify(c, "failed: "+err.Error())
+	}
+	_ = SetWindowClass(c, got)
 }

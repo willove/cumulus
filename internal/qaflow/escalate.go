@@ -27,6 +27,10 @@ type EscalationRecord struct {
 	// weighted-error / no-bridge。**桥失手不许无声无息**——它是质量问题
 	// （召回被带歪），会悄悄拉低整轮读数。
 	Bridge string `json:"bridge,omitempty"`
+	// Classification 是窗口分级的结局（空 = 没分级）。**"没有类别"与"没分级"
+	// 必须分得开**——第一版把分级失败静默吞掉，结果读数里两者一模一样，
+	// 排查时完全看不出发生过什么。
+	Classification string `json:"classification,omitempty"`
 }
 
 // EscalateStage 是升级的执行处（BioHarness 级联：便宜快路 → 充足性

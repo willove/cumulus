@@ -162,6 +162,8 @@ let ansBuf = "";
 let sessionId = "";
 let lastSeq = 0;
 let manifest = null;
+// 窗口分类计数（GaRAGe 四类）：分数说"排第几"，类别说"有没有用"。
+const classes = {};
 
 $("go").onclick = () => { const q = $("q").value.trim(); if (q) run(q); };
 $("q").addEventListener("keydown", e => { if (e.key === "Enter") $("go").click(); });
@@ -329,7 +331,7 @@ function handle(ev) {
       $("bar").classList.add("done");
       $("bar").firstElementChild.style.width = "100%";
       $("pct").textContent = "完成 · 事件 " + ((d.counts || {}).delivered || "?") +
-        " · 丢失 " + ((d.counts || {}).dropped || 0);
+        " · 丢失 " + ((d.counts || {}).dropped || 0) + " · 分类 " + (classSummary() || "未分级");
       loadManifest();
       // 收尾后思考区收成一行，可再展开
       $("thinkWrap").open = false;
@@ -420,7 +422,7 @@ function stageHit(f, ev) {
   }
   li.classList.remove("now");
   li.querySelector(".dt").textContent = "命中 #" + f.rank + " " + (f.title || f.doc_id) +
-    "（" + Number(f.score || 0).toFixed(2) + "）";
+    "（" + Number(f.score || 0).toFixed(2) + (f.class ? " · " + f.class : " · 未分级") + "）";
   row("file", ev.seq, ev.at_ms, f.doc_id + " #" + f.rank + " " + Number(f.score || 0).toFixed(2));
 }
 
@@ -444,6 +446,13 @@ function renderCounts() {
   $("contract").textContent = missing.length
     ? "标红 = 事件到了但界面没分支：请在源码里补 case \"" + missing[0] + "\"。"
     : "所有事件类型都有处理分支——事件流是完整的。";
+}
+
+// classSummary 把分类计数压成一行（ANSWER:2 RELATED:5 …）。
+function classSummary() {
+  const keys = Object.keys(classes);
+  if (!keys.length) return "";
+  return keys.sort().map(k => k + ":" + classes[k]).join(" ");
 }
 
 function escapeHTML(s) {

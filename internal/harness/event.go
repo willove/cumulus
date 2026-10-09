@@ -85,6 +85,10 @@ type FileInfo struct {
 	Span    string  `json:"span,omitempty"`    // 窗口坐标（可回溯）
 	Preview string  `json:"preview,omitempty"` // 原文片段（截断）
 	Cited   bool    `json:"cited,omitempty"`   // 最终是否被引用（done 时可回填）
+	// Class 是 GaRAGe 四类（ANSWER / RELATED / OUTDATED / UNKNOWN）。
+	// **空 = 未分级**（分类器没接或失败）——空与 UNKNOWN 是两回事：
+	// UNKNOWN 是"判了但判不了"，空是"没判"。消费方必须能分开。
+	Class string `json:"class,omitempty"`
 }
 
 // TextInfo 是文本片段载荷（思考/答案）。Replace=true 表示**整段替换**而非追加
@@ -207,6 +211,10 @@ func File(runID string, f FileInfo) (Event, error) {
 	if f.Rank <= 0 {
 		return Event{}, fmt.Errorf("harness: file 缺 rank")
 	}
+	if f.Class != "" && !windowClassIs(f.Class) {
+		// 非法类别名不许进流：下游不该收到"也许吧"这种值，而"自己猜一下"更糟。
+		return Event{}, fmt.Errorf("harness: file 类别非法 %q", f.Class)
+	}
 	return Event{Kind: KindFile, RunID: runID, File: &f}, nil
 }
 
@@ -327,4 +335,28 @@ func Kinds() []Kind {
 		KindStarted, KindStage, KindFile, KindReasoning, KindContent,
 		KindCitations, KindRelated, KindError, KindDone,
 	}
+}
+
+// windowClassIs 由 qaflow 注入的合法类别集合（避免 harness → qaflow 的反向依赖：
+// **harness 不认识流程层**）。默认四个 GaRAGe 类。
+var windowClasses = []string{"ANSWER", "RELATED", "OUTDATED", "UNKNOWN"}
+
+// SetWindowClasses 注入合法类别集合（qaflow 在装配时调一次）。
+//
+// 为什么用注入而不是直接引用 qaflow：事件词表属于 kernel-ish 的边界，它不认识
+// 流程层；类别名由上层决定，边界只负责**校验**。
+func SetWindowClasses(classes []string) {
+	if len(classes) == 0 {
+		return
+	}
+	windowClasses = append([]string(nil), classes...)
+}
+
+func windowClassIs(c string) bool {
+	for _, x := range windowClasses {
+		if c == x {
+			return true
+		}
+	}
+	return false
 }

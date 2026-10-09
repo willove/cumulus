@@ -373,6 +373,11 @@ func runServe(args []string) error {
 		// 使用信号落数据目录（与语料同盘，同生共死）：再问族服务端推
 		// 导，cite 族前端钩子，cumulus signals 看聚合
 		srv.Signals = knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
+		// 窗口分级（GaRAGe 四类）：**只影响可解释性**（file 事件带类别），
+		// 不参与检索排序与路由判据。CUMULUS_CLASSIFY=1 开。
+		if os.Getenv("CUMULUS_CLASSIFY") == "1" {
+			srv.Options.WindowClassifier = &qaflow.WindowClassifier{Client: client}
+		}
 		srv.Options.WeightedRetrieve = weightedRetrieveFor(idx, *topk, *width)
 	}
 	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排

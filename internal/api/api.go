@@ -343,6 +343,20 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 		resp.Reason = a.RefusalReason
 		resp.Citations = append(resp.Citations, a.Citations...)
 	}
+	// 窗口分级（可选）：类别计数 + 分级是否发生过 + 结局。
+	// **"未分级"与"分级失败"必须分得开**（前者是没开分类器，后者是开了但没成）。
+	resp.Classification = &ClassificationView{Enabled: s.Options.WindowClassifier != nil}
+	if classes, ok := qaflow.WindowClassOf(c); ok {
+		counts := map[string]int{}
+		for _, cl := range classes {
+			counts[cl]++
+		}
+		resp.Classification.Applied = true
+		resp.Classification.Counts = counts
+	}
+	if esc, ok := context.Get(c, qaflow.KeyEscalation); ok && esc.Classification != "" {
+		resp.Classification.Outcome = esc.Classification
+	}
 	if an, ok := context.Get(c, qaflow.KeyAnalysis); ok {
 		resp.Analysis = AnalysisView{Intent: an.Intent, Primary: an.Primary, OOV: an.OOV, Score: an.Score}
 	}
