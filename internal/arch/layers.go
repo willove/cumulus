@@ -98,25 +98,26 @@ var packages = map[string]Layer{
 	// 被 api 调用。它是 capabilities（运行时能力，不是 tooling）。
 	"docgen": LayerCapabilities,
 	// usage 是**用量计量与配额**（运行时能力：共享实例的必需品）
-	"usage":             LayerCapabilities,
-	"deepcore":          LayerCapabilities,
-	"embed":             LayerCapabilities,
-	"evaldata":          LayerTooling,
-	"evalfcore":         LayerTooling,
-	"facts":             LayerCapabilities,
-	"harness":           LayerCapabilities, // 对外输出面（只依赖 kernel；依赖 pipeline 会被 boundary 拦住）
-	"harness/evokechat": LayerCapabilities, // 协议适配（翻成 invoke-chat 调用序列；零依赖，不认识 UI）
-	"failure":           LayerCapabilities,
-	"ingest":            LayerCapabilities,
-	"knowledge":         LayerCapabilities, // 复用命中 + 使用信号（运行时能力，不是评测工具）
-	"knowledge/belief":  LayerCapabilities,
-	"learncore":         LayerTooling,
-	"llm":               LayerCapabilities,
-	"minilm":            LayerCapabilities,
-	"prior":             LayerCapabilities,
-	"query":             LayerCapabilities,
-	"rerank":            LayerCapabilities,
-	"retrieval":         LayerCapabilities,
+	"usage":              LayerCapabilities,
+	"deepcore":           LayerCapabilities,
+	"embed":              LayerCapabilities,
+	"evaldata":           LayerTooling,
+	"evalfcore":          LayerTooling,
+	"facts":              LayerCapabilities,
+	"harness":            LayerCapabilities, // 对外输出面（只依赖 kernel；依赖 pipeline 会被 boundary 拦住）
+	"harness/evokechat":  LayerCapabilities, // 协议适配（翻成 invoke-chat 调用序列；零依赖，不认识 UI）
+	"failure":            LayerCapabilities,
+	"ingest":             LayerCapabilities,
+	"knowledge":          LayerCapabilities, // 复用命中 + 使用信号（运行时能力，不是评测工具）
+	"knowledge/belief":   LayerCapabilities,
+	"knowledge/affinity": LayerCapabilities, // token×document 账本（复用先验，默认只记不排）
+	"learncore":          LayerTooling,
+	"llm":                LayerCapabilities,
+	"minilm":             LayerCapabilities,
+	"prior":              LayerCapabilities,
+	"query":              LayerCapabilities,
+	"rerank":             LayerCapabilities,
+	"retrieval":          LayerCapabilities,
 	// pipeline：流程编排
 	"judge":  LayerTooling, // 只有评测/verify 用（cmd/cumulus），引擎不依赖
 	"qaflow": LayerPipeline,

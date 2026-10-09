@@ -19,13 +19,16 @@ import (
 	embedPkg "github.com/willove/cumulus/internal/embed"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/knowledge/affinity"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 	"github.com/willove/cumulus/internal/usage"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Server 是一次装配的服务。零件（合成/向量/复用/升级）装配时定死，
@@ -179,7 +182,61 @@ func (s *Server) handleQA(w http.ResponseWriter, r *http.Request) {
 	if s.Signals != nil && req.Session != "" {
 		s.Signals.Remember(req.Session, req.Question, resp.Refused)
 	}
+	// **token×document 账本**（移植自 cumulus 原版 internal/affinity）。
+	//
+	// 记的是"这次问了这些词，实际上由这些文档当证据"。读的时候按**当前查询的词**
+	// 查账本——CJK 二元组天然把"宠物扰邻"与"宠物伤人"连起来，不靠主题聚类对不对。
+	//
+	// **默认只记不重排**（affinity.RerankEnabled 默认 false）：原版把后验做成全局文档
+	// 声望实测 −11pp，宁可不重排也不做错；账本的收益必须先用真实问答量出来。
+	// 账本写失败**不许影响这一问的答案**（同 usage/signals 的纪律）。
+	if s.Store != nil && !resp.Refused {
+		s.recordAffinity(r.Context(), s.realmOf(r), req.Question, resp)
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// recordAffinity 把"问的词 × 当证据的文档"记进账本。
+//
+// 权重用**答案置信度**（affinity.OutcomeWeight）：答得确定的教得更多，答得勉强的也留
+// 一点痕迹（否则预算耗尽的 DEEP 等于什么都没学到）。
+func (s *Server) recordAffinity(ctx gocontext.Context, realm, question string, resp QAResponse) {
+	toks := affinity.TrimTokens(retrieval.Fields(question), affinity.DefaultMaxTokensPerQ)
+	if len(toks) == 0 {
+		return
+	}
+	// Citations 是 "docID#rune[a:b]" 形态 → 取 docID（账本记的是文档，不是窗口）。
+	docs := make([]string, 0, len(resp.Citations))
+	for _, ct := range resp.Citations {
+		if id := strings.TrimSpace(strings.SplitN(ct, "#", 2)[0]); id != "" {
+			docs = append(docs, id)
+		}
+	}
+	if len(docs) == 0 {
+		return
+	}
+	// 权重：**这一问**的可观测强度。API 面没有判定置信度读数（决策头默认关），
+	// 所以按"有没有引用"分两档：有引用 = 明确答了（1.0），无引用 = 答了但没落到
+	// 证据上（0.4，仍记一条痕迹——预算耗尽的深循环等于是什么都没学到）。
+	//
+	// **不编一个假的置信度**：账本的长期质量取决于记进去的权重诚实，猜一个数比缺一个
+	// 数更坏（它会被当成读数用）。
+	w := affinity.OutcomeWeight(0.4)
+	if len(docs) > 0 {
+		w = affinity.OutcomeWeight(1.0)
+	}
+	coll := affinity.CollectionFor(realm)
+	// 集合**必须先声明**（存储契约：写不存在的集合会失败）。原来这里把 Record 的
+	// 错误直接吞掉，于是"账本一条都没写进去"表现为**读数为空**——一个看起来像
+	// "还没学到东西"的正常状态，而不是一个能看见的故障。这正是 usage/signals
+	// 纪律的反面。
+	if err := s.Store.EnsureCollection(ctx, coll); err != nil {
+		log.Printf("affinity: ensure collection %s: %v", coll, err)
+		return
+	}
+	if err := affinity.NewLedger(s.Store, coll).Record(ctx, toks, docs, w, time.Now()); err != nil {
+		log.Printf("affinity: record %s: %v", coll, err)
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

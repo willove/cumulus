@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	gocontext "context"
 
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/knowledge"
+	"github.com/willove/cumulus/internal/knowledge/affinity"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
 )
@@ -222,6 +224,27 @@ func atoiView(s string) int {
 
 // record 从 context 采一次问答的完整记录。这是 HTTP 面的核心承诺：
 // 答案只是其中一个字段。
+// ledgerWeights 读账本给出的文档先验。
+//
+// **默认返回 nil（只记不排）**：原版把后验做成全局文档声望实测 −11pp（51 丢 / 18 赚），
+// 一篇文章回答很多问题、竞争文档各不相同，全局声望会把常被错引的热门文档沉底。
+// 账本的收益必须先用真实问答量出来，不能先信——所以开关默认关，且显式开启后
+// 读失败也只返回 nil（**绝不让账本拖垮一个问句**）。
+func (s *Server) ledgerWeights(ctx gocontext.Context, realm, question string) map[string]float64 {
+	if !affinity.RerankEnabled() || s.Store == nil {
+		return nil
+	}
+	toks := affinity.TrimTokens(retrieval.Fields(question), affinity.DefaultMaxTokensPerQ)
+	if len(toks) == 0 {
+		return nil
+	}
+	w, err := affinity.NewLedger(s.Store, affinity.CollectionFor(realm)).Weights(ctx, toks, time.Now())
+	if err != nil || len(w) == 0 {
+		return nil
+	}
+	return w
+}
+
 func (s *Server) record(c *context.Context, question string) QAResponse {
 	resp := QAResponse{Question: question, Citations: []string{}}
 	if a, ok := context.Get(c, qaflow.KeyAnswer); ok {
