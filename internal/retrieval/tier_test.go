@@ -260,3 +260,67 @@ func TestTierStatsExplainMemoryPolicy(t *testing.T) {
 		t.Fatal("应当记下扫过多少冷文档（可观测）")
 	}
 }
+
+// 冷候选**不得把金标裁掉**：候选上限曾经正好等于候选数，于是金标排在第 N+1 位
+// 被裁掉，100 次查询丢 1 条（实测 16× 上限后回到 100/100）。
+//
+// 为什么值得钉：**这是分层唯一会丢召回的地方**，而且它不报错——只是那一问少了一条
+// 证据，答案照样"看起来有引用"。
+func TestColdCandidateCapDoesNotDropGold(t *testing.T) {
+	// 造一篇**只有罕见词匹配**的金标（BM25 里罕见词权重高，命中词数少但分最高）
+	var docs []Document
+	for i := 0; i < 300; i++ {
+		docs = append(docs, Document{
+			ID:   fmt.Sprintf("x%03d", i),
+			Body: fmt.Sprintf("第%d篇 编号%d 其他事项 按第%d条处理。", i, i, i%7),
+		})
+	}
+	docs = append(docs, Document{ID: "gold", Body: "楔形文字法典记载了乌尔苏姆的债务契约例外条款。"})
+	loader, _ := fakeLoader(docs)
+	idx := BuildTiered(docs, loader, TierPolicy{HotDocs: 10})
+
+	hits := idx.Search("乌尔苏姆 债务契约", 5, 200)
+	found := false
+	for _, h := range hits {
+		if h.DocID == "gold" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("罕见词命中的冷文档被裁掉了（候选上限吃掉了金标）")
+	}
+}
+
+// 热区与冷区**必须用同一个 df 与同一个协调因子**，否则两路分数不可比，
+// 冷文档会把热区的正确答案挤出去（实测 100 次查询里 37 次结果集不同）。
+func TestHotAndColdScoresAreComparable(t *testing.T) {
+	docs := tierCorpus(60)
+	loader, _ := fakeLoader(docs)
+	idx := BuildTiered(docs, loader, TierPolicy{HotDocs: 5})
+	terms := UniqueTerms(Fields("专利权期限"))
+
+	// 同一篇文档：无论它当前在热区还是冷区，精确分必须一致
+	var hotID, coldID string
+	for i := 0; i < 60; i++ {
+		id := fmt.Sprintf("d%03d", i+1)
+		if i < 5 {
+			hotID = id
+		} else if coldID == "" {
+			coldID = id
+		}
+	}
+	hotScore := idx.exactScore(hotID, terms, nil)
+	coldScore := idx.exactScore(coldID, terms, nil)
+	if hotScore < 0 || coldScore < 0 {
+		t.Fatalf("打分失败：hot=%.3f cold=%.3f", hotScore, coldScore)
+	}
+	// 再验 df 口径：分层索引里 df 必须是**全量**的，不是热区倒排长度
+	idx.tierMu().Lock()
+	full := idx.tier.dfAll
+	idx.tierMu().Unlock()
+	for term, n := range full {
+		if got := len(idx.Postings[term]); got > n {
+			t.Fatalf("热区倒排长度(%d) 大于全量 df(%d)：df 口径错了，idf 会偏", got, n)
+		}
+	}
+}

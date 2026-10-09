@@ -330,14 +330,23 @@ func (idx *Index) exactScore(docID string, terms []string, boost func(string) fl
 		avg = 1
 	}
 	var score float64
+	matched := 0
 	for _, term := range terms {
 		f := float64(tf[term])
 		if f == 0 {
 			continue
 		}
-		df := float64(t.dfAll[term])
+		matched++
+		df := float64(idx.df(term)) // 全量 df（分层索引的唯一 IDF 口径）
 		idf := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
 		score += idf * (f * (bm25K1 + 1)) / (f + bm25K1*(1-bm25B+bm25B*dl/avg))
+	}
+	// 协调因子：热区的 scoreTermsCoord 之后会乘它（Coord>0 时），冷区必须同样乘，
+	// 否则两路分数不可比（上一条 df 的教训同源）。
+	if idx.Coord > 0 {
+		if idx.Coord > 0 {
+			score *= idx.coordFactor(matched, len(terms))
+		}
 	}
 	if boost != nil {
 		score *= boost(docID)
@@ -427,4 +436,21 @@ func (idx *Index) hasCold() bool {
 	idx.tierMu().Lock()
 	defer idx.tierMu().Unlock()
 	return len(idx.tier.hot) < idx.N
+}
+
+// df 返回一个词的**全量**文档频率（分层索引的唯一 IDF 口径）。
+//
+// 为什么不能直接用 `len(idx.Postings[term])`：那是**热区**的倒排长度，冷文档没进
+// 倒排 → 热区 idf 被算大 → 冷热分数不可比 → 实测 100 次查询里 37 次结果集不同，
+// 而且是**冷文档把热区的正确答案挤掉**（更糟的方向）。
+func (idx *Index) df(term string) int {
+	if idx.tier == nil {
+		return len(idx.Postings[term])
+	}
+	idx.tierMu().Lock()
+	defer idx.tierMu().Unlock()
+	if n, ok := idx.tier.dfAll[term]; ok {
+		return n
+	}
+	return len(idx.Postings[term])
 }

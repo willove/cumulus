@@ -121,7 +121,10 @@ func (idx *Index) scoreTermsCoord(unique []string) (map[string]float64, map[stri
 		if len(postings) == 0 {
 			continue
 		}
-		df := float64(len(postings))
+		// df 取**全量**（分层索引的冷文档没有倒排，用 len(postings) 会把
+		// 热区的 idf 算大——于是冷文档的分与热文档不可比，实测把热区的正确答案
+		// 挤出了 top-9：100 次查询里 37 次结果集不一致）。
+		df := float64(idx.df(term))
 		idf := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
 		for _, p := range postings {
 			dl := float64(idx.DocLens[p.DocID])

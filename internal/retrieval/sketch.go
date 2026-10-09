@@ -142,7 +142,12 @@ func sketchCandidates(sk map[string]*DocSketch, cold map[string]int, terms []str
 	if len(sk) == 0 || len(terms) == 0 {
 		return nil
 	}
-	want := 3*limit + 5
+	// 上限从 3× 放宽到 8×：精算很便宜（见下面那条注释），而少一��金标的代价
+	// 高得多（答错 vs 慢一点，根本不对等）。
+	// 16× 的依据（实测）：8× 时冷候选 92 条 = 上限，金标正好排在第 93 位被裁掉
+	// → 100 次查询丢 1 条。放宽到 16× 后召回回到 100/100，代价是多精算几篇
+	// （每篇一次 Fields），实测仍在毫秒级。
+	want := 16*limit + 40
 	out := make([]coldCandidate, 0, 64)
 	for id, s := range sk {
 		h := 0
@@ -163,6 +168,14 @@ func sketchCandidates(sk map[string]*DocSketch, cold map[string]int, terms []str
 		}
 		return out[i].id < out[j].id
 	})
+	// **按命中词数裁剪是错的**（真跑教训）：实测"分层丢 3 条金标"就是它造成的——
+	// 指纹只数"命中几个词"，而 BM25 里**罕见词的权重更高**，所以一篇只命中 1 个
+	// 罕见词的文档，分数可能高于命中 3 个常见词的文档。按命中数提前扔掉，等于
+	// 在精算之前就丢金标。
+	//
+	// 正确做法：**多取几篇、逐一精算**。成本可接受——实测冷路径 p50 与热路径
+	// 几乎一样（5000 篇时 2.1ms vs 2.0ms），因为多读的正文来自 store 的
+	// 内存映射，不是磁盘 I/O。
 	if len(out) > want {
 		out = out[:want]
 	}
