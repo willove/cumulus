@@ -350,7 +350,7 @@ func runServe(args []string) error {
 	// 鸿沟桥）：分析用索引事实，桥用 LLM，加权重取用加权检索。LLM 不在
 	// 时桥缺席——鸿沟时退化普通贵路（ 遥测可见）。
 	idx := srv.Index()
-	srv.Options.Analyzer = func(q string) query.Analysis { return query.Analyze(q, idx, idx.N) }
+	srv.Options.Analyzer = analyzerFor(idx)
 	srv.Options.Prior = *priorOn
 	if *abstainOn {
 		srv.Options.Abstain = abstain.Default() // 保守启发式权重（cumulus 同款取值）
@@ -363,21 +363,17 @@ func runServe(args []string) error {
 		// 桥的结果按归一化问句缓存：桥是链上最后一个非确定源，缓存后同
 		// 一问题的第二次起行为完全一致（破局后 12 跑时对时不对，根因就
 		// 是模型每次给的扩展词不同）
-		srv.Options.Expander = &query.Cached{Inner: &query.LLM{Client: client}}
+		// CUMULUS_BRIDGE=0 关桥（消融）：桥的收益/代价要能单独量。
+		if os.Getenv("CUMULUS_BRIDGE") != "0" {
+			srv.Options.Expander = &query.Cached{Inner: &query.LLM{Client: client}}
+		}
 		// 事实覆盖判官：词面判据认不出改写（"专利期" vs "专利权的期
 		// 限"），未盖的事实让模型判一次——只升级不降级，失败不阻塞
 		srv.Options.FactScorer = &facts.LLMScorer{Client: client}
 		// 使用信号落数据目录（与语料同盘，同生共死）：再问族服务端推
 		// 导，cite 族前端钩子，cumulus signals 看聚合
 		srv.Signals = knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
-		srv.Options.WeightedRetrieve = func(weights map[string]float64) ([]qaflow.EvidenceWindow, error) {
-			hits := idx.SearchWeighted(weights, *topk, *width, nil)
-			out := make([]qaflow.EvidenceWindow, 0, len(hits))
-			for _, h := range hits {
-				out = append(out, qaflow.EvidenceWindow{SourceID: h.DocID, Title: h.Title, Span: h.SpanCoord, Text: h.SpanText, Score: h.Score})
-			}
-			return out, nil
-		}
+		srv.Options.WeightedRetrieve = weightedRetrieveFor(idx, *topk, *width)
 	}
 	// 升级贵路无条件装配（深循环不要 embedder；embedder 只服务语义重排
 	// 与语义接地尺）——升级判了却没有执行处，等于级联半条腿

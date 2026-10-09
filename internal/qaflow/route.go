@@ -33,6 +33,20 @@ type RouteConfig struct {
 	Program string
 	// ThresholdVersion 是阈值版本标签（改程序或改校准集即改标签）。
 	ThresholdVersion string
+	// HasEscalate 说明**有升级执行处**（贵路/桥装配了）。零窗口时要不要先升级，
+	// 取决于有没有地方可升——没有就只能是拒答（诚实的不知道）。
+	//
+	// 它是**接线时的声明**；运行期还要与 EscalateStage 的实际执行处一起判
+	// （两个条件都满足才升）——配置说"有"但没装执行处时，那只是空转。
+	HasEscalate bool
+	// ZeroWindowEscalate：首程零窗口时**先升级再判不知道**（默认关）。
+	//
+	// 为什么这是开关而不是直接改：词面全落空时先拒答，等于**在唯一为这种情况
+	// 造的机制（贵路 + 词汇桥）上场之前就放弃了**。但先升级也可能把"语料里真的
+	// 没有"的情况变成"多花一次钱还是拒答"——两种都说得通，所以**先量再定**：
+	// CUMULUS_ZERO_WINDOW_ESCALATE=1 开。CUMULUS_BRIDGE=0 时它仍然有用
+	// （贵路本身就可能捞到词面失配的文档）。
+	ZeroWindowEscalate bool
 }
 
 // ProgramName 归一化程序名（空值 = 手工）。
@@ -117,6 +131,12 @@ func (s RouteStage) Run(c *context.Context) error {
 	threshold := thresholdFor(base, s.Config.GammaStepOverride, max(1, sig.FactsK))
 	d.Signals.Threshold = threshold
 	switch {
+	case !grounded && s.Config.ZeroWindowEscalate && s.Config.HasEscalate && s.hasEscalate:
+		// 词面全落空：**先升级**。贵路与词汇桥就是为这种情况造的（口语问句 vs
+		// 书面文档），在它们上场之前就拒答 = 白造了。真跑发现：零窗口直接拒答
+		// 让桥**一次都走不到**（三臂对照全是"未走桥 10 题"）。
+		d.Action = "escalate"
+		d.Reason = "no evidence window on fast path; escalate before refusing (词汇桥/贵路专为这种情况而设)"
 	case !grounded:
 		d.Action = "refuse" // 没有证据：诚实的不知道，不许硬答
 		d.Reason = "no evidence window; refuse by grammar"

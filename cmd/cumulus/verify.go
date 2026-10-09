@@ -116,3 +116,40 @@ func judgeFromEnv(which string) (judge.Judge, error) {
 	}
 	return &judge.LLM{Client: c}, nil
 }
+
+func judgeLabel(which string) string {
+	switch which {
+	case "llm":
+		return "llm(等义)"
+	case "points":
+		return "points(分点覆盖)"
+	default:
+		return "none (N/A)"
+	}
+}
+
+// truncateRunes 截断到 n 个字符（eval 明细打印用）。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
+// shortSHA 安全截断指纹（12 位）。指纹长度随来源不同（内容寻址 16 位、
+// 演示用的短串），硬切 [:12] 会在短串上 panic——真跑踩过。
+func shortSHA(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
+// widthFromKnobs 取证据窗口宽度（桥的加权重取与首程同一把尺，否则两路不可比）。
+func widthFromKnobs(knobs map[string]float64) int {
+	if knobs != nil && knobs["evidence.width"] >= 1 {
+		return int(knobs["evidence.width"])
+	}
+	return 400
+}

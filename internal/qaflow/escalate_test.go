@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/query"
 )
 
@@ -351,5 +352,100 @@ func TestEscalateKeepsBridgeWhenItWins(t *testing.T) {
 	rec, _ := context.Get(c, KeyEscalation)
 	if rec.Bridge != "used" {
 		t.Fatalf("bridge outcome must be recorded as used: %+v", rec)
+	}
+}
+
+// 护栏本身要**可消融**（CUMULUS_BRIDGE_GUARD=0）：不能验证的护栏不如没有。
+// 同一份输入，关护栏后噪声窗口应当进入最终窗集（证明开关真的关掉了它）。
+func TestBridgeGuardIsAblatable(t *testing.T) {
+	analysis := query.Analysis{Intent: "search", Primary: map[string]float64{"饲养": 1}, OOV: []string{"闯红"}, Score: 1}
+	noise := []EvidenceWindow{{SourceID: "noise-1", Span: "rune[0:2]", Text: "完全无关的噪声", Score: 0.2}}
+	good := []EvidenceWindow{{SourceID: "ops-1", Span: "rune[0:2]", Text: "养狗管理办法", Score: 9}}
+
+	run := func(guard bool) bool {
+		if guard {
+			t.Setenv("CUMULUS_BRIDGE_GUARD", "1")
+		} else {
+			t.Setenv("CUMULUS_BRIDGE_GUARD", "0")
+		}
+		c := context.New("ablate")
+		stage := &EscalateStage{
+			Retrieve: coverageStub(good, 0.9),
+			Expand:   fnExpander(func(gocontext.Context, string) ([]string, error) { return []string{"饲养动物"}, nil }),
+			Weighted: func(map[string]float64) ([]EvidenceWindow, error) { return noise, nil },
+		}
+		_ = context.Set(c, KeyRewrite, Rewrite{Original: "养狗叫得太吵"})
+		_ = context.Set(c, KeyAnalysis, analysis)
+		_ = context.Set(c, KeyRoute, RouteDecision{Action: "escalate"})
+		_ = context.Set(c, KeyWindows, win1())
+		_ = context.Set(c, KeyEscalation, EscalationRecord{Triggered: true})
+		if err := stage.Run(c); err != nil {
+			t.Fatal(err)
+		}
+		ws, _ := context.Get(c, KeyWindows)
+		return hasWindow(ws, "noise-1")
+	}
+
+	if run(true) {
+		t.Fatal("with guard on, the noise window must not survive")
+	}
+	if !run(false) {
+		t.Fatal("with guard off, the bridge result must be accepted (ablation ineffective)")
+	}
+}
+
+// 零窗口的两种处置：**默认直接拒答**（今天的语义），开了开关才"先升级"。
+//
+// 为什么要有这个开关：词面全落空时先拒答，等于在唯一为这种情况造的机制（贵路 +
+// 词汇桥）上场之前就放弃——真跑发现桥因此一次都走不到。但"先升级"也可能把"语料里
+// 真的没有"拖成多花一次钱才拒答。两种都说得通，所以做成开关、先量再定。
+func TestZeroWindowRoutingModes(t *testing.T) {
+	noWindows := func(*context.Context, Rewrite) ([]EvidenceWindow, error) { return nil, nil }
+	// 合成面替身：零窗口时**直接拒答**而不是报错（真实链路的拒答是合成阶段
+	// 的语义，不是异常；这里只是让测试的注意力落在路由动作上）。
+	tolerant := func(_ string, ws []EvidenceWindow, _ facts.Report) (Answer, Usage, error) {
+		if len(ws) == 0 {
+			return Answer{Refused: true}, Usage{}, nil
+		}
+		return Answer{Text: "有答案"}, Usage{}, nil
+	}
+
+	// 默认：零窗口 → 拒答（不发合成）
+	c1 := context.New("zero-default")
+	r1 := Runner("q", noWindows, tolerant, Options{Escalate: noWindows})
+	if err := r1.Run(c1); err != nil {
+		t.Fatal(err)
+	}
+	route1, _ := context.Get(c1, KeyRoute)
+	if route1.Action != "refuse" {
+		t.Fatalf("default behaviour must stay refuse-on-zero-window: %+v", route1)
+	}
+
+	// 开关开 + 有升级执行处 → 先升级
+	c2 := context.New("zero-escalate")
+	r2 := Runner("q", noWindows, tolerant, Options{
+		Escalate: noWindows,
+		Route:    RouteConfig{ZeroWindowEscalate: true},
+	})
+	if err := r2.Run(c2); err != nil {
+		t.Fatal(err)
+	}
+	route2, _ := context.Get(c2, KeyRoute)
+	esc2, _ := context.Get(c2, KeyEscalation)
+	if esc2.Triggered != true {
+		t.Fatalf("zero-window escalate mode must trigger escalation: %+v (route=%+v)", esc2, route2)
+	}
+
+	// 开关开但**没有升级执行处** → 仍然拒答（先升级是空转）
+	c3 := context.New("zero-nobackend")
+	r3 := Runner("q", noWindows, tolerant, Options{
+		Route: RouteConfig{ZeroWindowEscalate: true},
+	})
+	if err := r3.Run(c3); err != nil {
+		t.Fatal(err)
+	}
+	route3, _ := context.Get(c3, KeyRoute)
+	if route3.Action != "refuse" {
+		t.Fatalf("no escalate backend must still refuse: %+v", route3)
 	}
 }

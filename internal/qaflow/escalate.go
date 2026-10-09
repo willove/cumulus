@@ -2,6 +2,7 @@ package qaflow
 
 import (
 	"fmt"
+	"os"
 
 	gocontext "context"
 
@@ -48,6 +49,12 @@ type EscalateStage struct {
 }
 
 func (EscalateStage) Name() string { return "escalate" }
+
+// Available 报告这一层**有没有执行处**（贵路或桥）。路由在"零窗口要不要先升级"
+// 上要复核它：配置声明有、但实际没装 = 空转，那还是直接拒答。
+func (s EscalateStage) Available() bool {
+	return s.Retrieve != nil || (s.Expand != nil && s.Weighted != nil)
+}
 func (EscalateStage) Reads() []string {
 	return []string{KeyRoute.String(), KeyRewrite.String()}
 }
@@ -152,7 +159,14 @@ func routeWith(c *context.Context, ws []EvidenceWindow) RouteDecision {
 func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]EvidenceWindow, error) {
 	a, hasAnalysis := context.Get(c, KeyAnalysis)
 	thin := !hasAnalysis || a.Thin(2, 2.0)
+	// 桥的触发判定必须**看得见**：三臂对照全读"未走桥"时，靠猜会连错四次
+	// （语料/开关/装配/路由各猜一遍），真正的答案是"thin 没成立"。
+	if os.Getenv("CUMULUS_BRIDGE_DEBUG") == "1" {
+		fmt.Printf("bridge-debug: analysis=%v primary=%d oov=%d thin=%v expand=%v weighted=%v\n",
+			hasAnalysis, len(a.Primary), len(a.OOV), thin, s.Expand != nil, s.Weighted != nil)
+	}
 	if s.Expand == nil || s.Weighted == nil || !thin {
+		s.noteBridge(c, "skipped:"+bridgeSkipReason(s, thin))
 		return s.Retrieve(c, rw)
 	}
 	// 注意下面那条"加权 0 命中 → 退回朴素贵路"的兜底：桥扩偏时加权重取可能
@@ -193,7 +207,7 @@ func (s EscalateStage) escalateRetrieve(c *context.Context, rw Rewrite) ([]Evide
 	// BM25 一次检索是微秒级，多跑一次朴素路几乎不要钱；比"桥把检索带歪"的代价
 	// （整轮答错方向）便宜几个数量级。
 	plain, perr := s.Retrieve(c, rw)
-	if perr == nil && bridgeWorse(ws, plain, BridgeScoreRatio) {
+	if perr == nil && bridgeGuardEnabled() && bridgeWorse(ws, plain, BridgeScoreRatio) {
 		s.noteBridge(c, "rejected-score")
 		return plain, nil
 	}
@@ -266,4 +280,24 @@ func mergeWindows(a, b []EvidenceWindow) []EvidenceWindow {
 		out = out[:12]
 	}
 	return out
+}
+
+// bridgeGuardEnabled 读 CUMULUS_BRIDGE_GUARD（默认开；=0 关护栏，只用于消融实验）。
+//
+// 为什么护栏本身也要能关：它是**假设**（桥的首窗分不该明显低于朴素路）。要验证这个
+// 假设，就必须能在同一份数据上关掉它跑一遍——不能验证的护栏不如没有。
+func bridgeGuardEnabled() bool { return os.Getenv("CUMULUS_BRIDGE_GUARD") != "0" }
+
+// bridgeSkipReason 说清桥为什么没上场（可观测：桥"没走"要有原因，不能只说没走）。
+func bridgeSkipReason(s EscalateStage, thin bool) string {
+	switch {
+	case s.Expand == nil:
+		return "no-expander"
+	case s.Weighted == nil:
+		return "no-weighted"
+	case !thin:
+		return "not-thin"
+	default:
+		return "none"
+	}
 }

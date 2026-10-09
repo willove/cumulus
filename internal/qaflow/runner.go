@@ -29,7 +29,9 @@ func Runner(query string, retrieve func(*context.Context, Rewrite) ([]EvidenceWi
 		FactsStage{Scorer: opts.FactScorer}, // 事实覆盖 + 一致性门（恒注册：这是"答得全不全"的
 		// 判据，不是可选件；注不注册由上面的 list 说话，不设空壳）
 		EvictStage{Budget: opts.CtxBudget.WithDefaults()},
-		RouteStage{Config: opts.Route},
+		RouteStage{Config: routeWithEscalate(opts.Route, opts.Escalate, opts.StreamSynth), hasEscalate: EscalateStage{
+			Retrieve: opts.Escalate, Expand: opts.Expander, Weighted: opts.WeightedRetrieve,
+		}.Available()},
 		EscalateStage{Retrieve: opts.Escalate, Expand: opts.Expander, Analyze: opts.Analyzer, Weighted: opts.WeightedRetrieve},
 		SynthesizeStage{Query: query, Synth: synth, GroundingFloor: opts.GroundingFloor, Stream: opts.StreamSynth, Emit: opts.Emitter, RunID: opts.RunID},
 		AccountStage{},
@@ -244,4 +246,13 @@ func traceFunc(em *harness.Emitter, runID string, total int) flow.TraceFunc {
 		return nil
 	}
 	return NewTrace(em, runID, total).Stage
+}
+
+// routeWithEscalate 把"有没有升级执行处"写进路由配置。
+//
+// 为什么路由要知道这件事：零窗口时该"先升级再拒答"还是"直接拒答"，取决于**有
+// 没有地方可升**。没有执行处时"先升级"是空转——那还是直接拒答（诚实的不知道）。
+func routeWithEscalate(rc RouteConfig, escalate func(*context.Context, Rewrite) ([]EvidenceWindow, error), expander any) RouteConfig {
+	rc.HasEscalate = escalate != nil || expander != nil
+	return rc
 }

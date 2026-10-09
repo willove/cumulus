@@ -12,6 +12,7 @@ import (
 	"github.com/willove/cumulus/internal/evalfcore"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/failure"
+	"github.com/willove/cumulus/internal/llm"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/query"
 	"github.com/willove/cumulus/internal/retrieval"
@@ -39,6 +40,11 @@ type bm25Executor struct {
 	decide        bool                    // CUMULUS_DECIDE=1：合成后跑答案级验证
 	gate          *qaflow.DecisionDecider // 非 nil：接合成前闸门（CUMULUS_GATE=1）
 	route         qaflow.RouteConfig      // 路由阈值与校准来源
+	// 桥与查询分析（评测要能单独量桥的收益/代价，所以三臂都能跑）
+	bridge           bool                                                      // 接 LLM 词汇桥（CUMULUS_BRIDGE=0 消融）
+	analyzer         func(string) query.Analysis                               // 查询分析（桥的触发判据）
+	expander         query.Expander                                            // 词汇桥
+	weightedRetrieve func(map[string]float64) ([]qaflow.EvidenceWindow, error) // 加权重取
 }
 
 // envInt 读一个整数环境变量（未设置或非法 → ok=false，用默认值）。
@@ -101,20 +107,31 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 	if e.deep != nil {
 		retrieve = qaflow.BM25DeepEvidence(e.idx, e.width(), *e.deep)
 	}
+	// 升级执行处：**单臂也要装**。
+	//
+	// 真跑踩到的坑：桥住在 escalateRetrieve 里（桥要靠贵路这一层上场），而
+	// escalateFn 原来只在级联臂装配 —— 于是单臂"升级触发了 10 次、桥一次没走"。
+	// 桥的接线与"要不要测级联"是两件事，混在一起时前者被后者悄悄关掉了。
 	var escalateFn func(*context.Context, qaflow.Rewrite) ([]qaflow.EvidenceWindow, error)
 	if e.escalate {
 		escalateFn = e.escalateBackend()
+	} else {
+		// 默认贵路：深循环（同 serve 的"升级贵路无条件装配"口径）
+		escalateFn = qaflow.BM25DeepEvidence(e.idx, e.width(), qaflow.DefaultDeep())
 	}
 	r := qaflow.Runner(question, retrieve, synthFn, qaflow.Options{
-		CorpusVersion:   "frozen",
-		ConfigVersion:   "eval",
-		StrategyVersion: "v0.1",
-		BeliefVersion:   "none",
-		GroundingFloor:  e.grounding(),
-		Escalate:        escalateFn,
-		Decision:        e.gate,
-		Bare:            e.bare,
-		Route:           e.route,
+		CorpusVersion:    "frozen",
+		ConfigVersion:    "eval",
+		StrategyVersion:  "v0.1",
+		BeliefVersion:    "none",
+		GroundingFloor:   e.grounding(),
+		Escalate:         escalateFn,
+		Decision:         e.gate,
+		Analyzer:         e.analyzer,
+		Expander:         e.expander,
+		WeightedRetrieve: e.weightedRetrieve,
+		Bare:             e.bare,
+		Route:            e.route,
 	})
 	if err := r.Run(c); err != nil {
 		return evalfcore.ItemOutcome{}, fmt.Errorf("qaflow: %w", err)
@@ -147,6 +164,11 @@ func (e *bm25Executor) Answer(ctx gocontext.Context, question string) (evalfcore
 	// 词汇桥结局进逐题结果（桥失手是质量问题，读数里要看得见）
 	if esc, ok := context.Get(c, qaflow.KeyEscalation); ok {
 		out.Bridge = esc.Bridge
+		if esc.Triggered && out.Bridge == "" {
+			// 触发了升级却没有桥结局 = 桥没上场（可观测：否则读数只说"未走桥"，
+			// 说不清是没触发、还是触发了但没条件）
+			out.Bridge = "no-bridge-on-escalate"
+		}
 	}
 	// 闸门/决策留痕进每题输出："有没有真决策"必须看得见（没记录与"决策说不行"
 	// 在读数里是两回事）。
@@ -261,6 +283,28 @@ func runEval(ctx gocontext.Context) error {
 		return err
 	}
 	synthFn, streamFn, synthLabel, err := pickSynth(os.Getenv("CUMULUS_SYNTH"))
+	// 桥的两个消融开关（量的用途，不是产品配置）：
+	//   CUMULUS_BRIDGE=0     关桥（退回朴素贵路）
+	//   CUMULUS_BRIDGE_GUARD=0 关护栏（采信桥，不管它把检索带偏）
+	// 三臂对照才能说清"护栏有没有用"：关桥 / 开桥无护栏 / 开桥带护栏。
+	// 桥要用 LLM；没有配置就缺席（缺席是合法状态：鸿沟时退化朴素贵路，遥测可见）
+	var llmForBridge *llm.OpenAICompleter
+	if os.Getenv("CUMULUS_BRIDGE") != "0" {
+		if c, err := llmFromEnvImpl(); err == nil {
+			llmForBridge = c
+		} else {
+			fmt.Printf("bridge: 无 LLM，桥缺席（%v）\n", err)
+		}
+	}
+	// 桥的装配状态要看得见（真跑教训：四轮对照全读"未走桥"，第一反应是语料/
+	// 开关错了，实际是**桥压根没装**而提示只在出错时打）
+	if llmForBridge != nil {
+		fmt.Printf("bridge: 已装配（model=%s）\n", llmForBridge.Model)
+	} else if os.Getenv("CUMULUS_BRIDGE") == "0" {
+		fmt.Println("bridge: 已关（CUMULUS_BRIDGE=0）")
+	} else {
+		fmt.Println("bridge: 缺席（无 LLM 配置）")
+	}
 	// 评测侧目前不发事件流（它要的是逐题指标，不是帧序列），但流式能力
 	// 仍显式接上：**能力声明在接线处，评测要不要用是另一件事**。v1 传 nil
 	// 给 executor，合成照旧走整条（答案与流式路径逐字段一致，见 synth 流式的纪律 3）。
@@ -329,6 +373,7 @@ func runEval(ctx gocontext.Context) error {
 		if sp.gate {
 			ex.gate = qaflow.DecideFromEnv("answerable")
 		}
+		bindBridge(ex, idx, llmForBridge, sp.knobs)
 		if sp.withEmbed && embedFn != nil {
 			ex.embedder = embedFn()
 		}
@@ -542,32 +587,3 @@ func evalItems() []evalfcore.Item {
 
 // evalCorpusNote: q3 是构造的真失败——三个干扰文档在 BM25 词频上压过
 // 金标 fin-1（topk=3 时金标在窗外）。
-
-func judgeLabel(which string) string {
-	switch which {
-	case "llm":
-		return "llm(等义)"
-	case "points":
-		return "points(分点覆盖)"
-	default:
-		return "none (N/A)"
-	}
-}
-
-// truncateRunes 截断到 n 个字符（eval 明细打印用）。
-func truncateRunes(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
-}
-
-// shortSHA 安全截断指纹（12 位）。指纹长度随来源不同（内容寻址 16 位、
-// 演示用的短串），硬切 [:12] 会在短串上 panic——真跑踩过。
-func shortSHA(s string) string {
-	if len(s) <= 12 {
-		return s
-	}
-	return s[:12]
-}
