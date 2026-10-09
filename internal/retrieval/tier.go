@@ -65,6 +65,8 @@ type tiered struct {
 	bodies map[string]string
 	// postingsRef 指向所属 Index 的倒排（估算内存占用用，避免包一层）。
 	postingsRef map[string][]Posting
+	// tfCache 是 (docID, term) → 词频的有界缓存（见 termFreq/tfCacheMax）。
+	tfCache map[string]int
 }
 
 // TierStats 是分层的可观测读数（进 /v1/status：内存策略必须看得见）。
@@ -133,6 +135,7 @@ func BuildTiered(docs []Document, loader Loader, policy TierPolicy) *Index {
 		sketches: map[string]*DocSketch{},
 		dfAll:    map[string]int{},
 		bodies:   map[string]string{},
+		tfCache:  map[string]int{},
 	}
 
 	// 全局统计量（df / 指纹 / 长度）——**全量**，但**不留词元**（见 exactScore 的注释）
@@ -279,16 +282,92 @@ func (idx *Index) mergeCold(hits []Hit, terms []string, boost func(string) float
 	if len(cands) == 0 {
 		return hits
 	}
-	var extra []Hit
+	// **三段式：指纹命中数粗筛 → 精算 → 切窗口**。
+	//
+	// 真实法律语料逼出来的：1548 篇 × 5523 字，一次查询的冷候选有 184 篇，
+	// 逐篇精算（每篇扫 8 遍全文数词频）要 46ms —— 相当于每次问答都慢半拍。
+	//
+	// 粗筛口径 = **命中词数 × idf 之和**（上界）：罕见词权重高，所以"命中词少但都是
+	// 罕见词"的文档仍然排在前面（不会像"只数命中个数"那样丢掉金标——那个坑我们踩过）。
+	// 取粗筛前 `coarseK` 篇精算，其余不碰正文：**用一点召回风险换数量级的延迟**，
+	// 而且粗筛上界不会系统性偏向常见词（这是它比"按命中个数裁剪"好的地方）。
+	idfs := idx.idfsOf(terms)
+	type scored struct {
+		id     string
+		upper  float64
+		terms  int
+		spread float64 // 命中词的 idf 跨度（见下面排序注释）
+	}
+	coarse := make([]scored, 0, len(cands))
 	for _, c := range cands {
+		var upper float64
+		maxIDF := 0.0 // 命中的**最大 idf**：命中罕见词 = 这篇分高的证据
+		for _, tm := range terms {
+			if !t.sketches[c.id].Has(tm) {
+				continue
+			}
+			idf := idfs[tm]
+			upper += idf
+			if idf > maxIDF {
+				maxIDF = idf
+			}
+		}
+		// **上界相同时按"命中词数"再排**（真跑逼出来的一条）：常见词 idf≈0
+		// （BM25 的 idf 是 log(1+(N-df+0.5)/(df+0.5))，df=N 时就是 0），所以
+		// 一篇文档若只命中常见词，上界就是 0——**几百篇的上界完全相同**，排序退化成
+		// 按 id 排，真金标（命中了那个罕见三元词，idf 最高）被挤到 78 名。
+		// 现在把命中词数作为次级键：上界相同的那一大片里，命中更多的排前面。
+		coarse = append(coarse, scored{id: c.id, upper: upper, terms: c.hits, spread: maxIDF})
+	}
+	// 粗筛排序：**命中词数 → 最大 idf → 上界 → id**
+	//
+	// 主键为什么是"命中词数"而不是 idf 之和（真实法律语料逼出来的）：1548 篇法律里
+	// "合同/书面/劳动"都是**常见词，idf≈0**（BM25 的 idf = log(1+(N-df+.5)/(df+.5))，
+	// df≈N 时就是 0），于是"idf 上界"对几百篇文档**完全相同** → 粗筛失效 →
+	// 《劳动合同法》被《招标投标条例》挤掉（实测：全内存下第一名的窗口是正确答案，
+	// 分层下前几名全是无关法律）。
+	//
+	// 命中词数在法律库里**有区分力**（《劳动合同法》额外命中"劳动合同/书面/用人单位/
+	// 订立"，那些泛泛含"合同"的法律只命中 1–2 个）；在罕见词场景里 idf 作次键兜底
+	// （合成语料实测：真金标只命中 1 个罕见词，靠 maxIDF 才排得进粗筛）。
+	sort.Slice(coarse, func(i, j int) bool {
+		if coarse[i].terms != coarse[j].terms {
+			return coarse[i].terms > coarse[j].terms
+		}
+		if coarse[i].spread != coarse[j].spread {
+			return coarse[i].spread > coarse[j].spread
+		}
+		if coarse[i].upper != coarse[j].upper {
+			return coarse[i].upper > coarse[j].upper
+		}
+		return coarse[i].id < coarse[j].id
+	})
+
+	// 精算多少篇 = **k×8，且至少 96 篇**。
+	//
+	// 为什么"至少 96"：粗筛上限太小会**静默裁掉真金标**（实测粗筛第 76 名就被裁掉，
+	// 而它的精算分是全场最高的 10.255）。粗筛本来就是启发式，宁可多算几十篇——
+	// 每篇精算只是扫 8 遍正文（真实语料实测 72 篇 ≈ 18ms），而裁错的代价是答错。
+	coarseK := k * 8
+	if coarseK < 96 {
+		coarseK = 96
+	}
+	if coarseK < k {
+		coarseK = k
+	}
+	if len(coarse) > coarseK {
+		coarse = coarse[:coarseK]
+	}
+
+	var extra []Hit
+	for _, c := range coarse {
 		if _, ok := t.loader(c.id); !ok {
 			continue // 取不到（可能已删）——不算失败，只是这一篇没有
 		}
-		score := idx.exactScore(c.id, terms, boost)
-		// **冷文档也要切窗口**（windowHit 走 BodyOf：热区内存、冷区 loader）。
-		// 少了这一步就会"检索得到、但引用窗口是空的"——那是最阴的一种坏：结果看起来
-		// 有引用坐标，点进去什么都没有。
-		extra = append(extra, idx.windowHit(c.id, terms, width, score))
+		// **先只打分，不切窗口**：窗口化要在整篇正文上找词簇（贵），而我们只需要
+		// 最终 top-k 的窗口。真实法律语料（1548 篇 × 5523 字）上，给 184 个候选
+		// 逐一切窗口要多花 **100ms**——占整体 151ms 的一大半。改成"先排序、后切窗"。
+		extra = append(extra, Hit{DocID: c.id, Title: idx.TitleOf(c.id), Score: idx.exactScoreIDF(c.id, terms, boost, idfs)})
 	}
 	if len(extra) == 0 {
 		return hits
@@ -302,12 +381,43 @@ func (idx *Index) mergeCold(hits []Hit, terms []string, boost func(string) float
 	if len(merged) > k {
 		merged = merged[:k]
 	}
+	// **排序裁剪之后再切窗口**（只给这 k 条切）——见上面那段"先打分后切窗"的说明。
+	for i := range merged {
+		if merged[i].SpanText != "" || merged[i].SpanCoord != "" {
+			continue // 已经有窗口（热区来的）
+		}
+		if coord := idx.Window(merged[i].DocID, terms, width); coord != "" {
+			merged[i].SpanCoord = coord
+			if body, ok := idx.BodyOf(merged[i].DocID); ok {
+				merged[i].SpanText, _ = ResolveSpan(body, coord)
+			}
+		}
+	}
 	idx.touchHot(merged)
 	return merged
 }
 
 // exactScore 按**全量统计量**精确算一篇文档的加权 BM25 分（冷文档专用）。
 func (idx *Index) exactScore(docID string, terms []string, boost func(string) float64) float64 {
+	return idx.exactScoreIDF(docID, terms, boost, nil)
+}
+
+// idfsOf 预先算好一组词的 idf（**每个候选重算是纯浪费**：8 个词 × 184 个候选
+// = 1472 次 df 查询 + 1472 次抢锁）。真实语料上这一项占了精算时间的大头。
+func (idx *Index) idfsOf(terms []string) map[string]float64 {
+	out := make(map[string]float64, len(terms))
+	for _, t := range terms {
+		df := float64(idx.df(t))
+		if df == 0 {
+			continue
+		}
+		out[t] = math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
+	}
+	return out
+}
+
+// exactScoreIDF 是 exactScore 的批量版（复用预算好的 idf）。
+func (idx *Index) exactScoreIDF(docID string, terms []string, boost func(string) float64, idfs map[string]float64) float64 {
 	t := idx.tier
 	if t == nil {
 		return 0
@@ -316,33 +426,40 @@ func (idx *Index) exactScore(docID string, terms []string, boost func(string) fl
 	if !ok {
 		return 0
 	}
-	// **现切词元，不缓存**：缓存每篇的词元几乎和倒排一样贵（实测：2000 篇时
-	// docTokens ≈ 7 MB，比分层省下的还多 → 分层反而更费内存）。冷文档精算本来
-	// 就已经把正文取回来了，切一次词是微秒级的事。
-	docTerms := Fields(body)
-	tf := map[string]int{}
-	for _, x := range docTerms {
-		tf[x]++
+	// 词频用**词元计数**（与热区同口径）。
+	//
+	// 中间试过 `strings.Count(body, term)`（快 30 倍），但它会数到**跨词边界**的匹配：
+	// 实测 "第3" 在正文里出现 2 次，而**词元计数是 0**（Fields 的切法不产生这个二元组）。
+	// 于是两条路径的分数不同 → 实测 100 次查询里 **35–44 次的 top-9 分数集合与全内存
+	// 不一致**。快但不同口径 = 错，所以退回词元计数。
+	//
+	// 速度靠**有界词元缓存**找回：冷文档切一次词，按 term→tf 缓存（只缓存**问过的词**，
+	// 不是整篇词元表），有上限（`tfCacheMax`），超了整批丢弃重来。
+	dl := float64(idx.DocLens[docID])
+	if dl <= 0 {
+		dl = float64(len([]rune(body)))
 	}
-	dl := float64(len(docTerms))
 	avg := idx.AvgLen
 	if avg <= 0 {
 		avg = 1
 	}
+	if idfs == nil {
+		idfs = idx.idfsOf(terms)
+	}
 	var score float64
 	matched := 0
 	for _, term := range terms {
-		f := float64(tf[term])
+		idf, ok := idfs[term]
+		if !ok {
+			continue
+		}
+		f := float64(idx.termFreq(docID, body, term))
 		if f == 0 {
 			continue
 		}
 		matched++
-		df := float64(idx.df(term)) // 全量 df（分层索引的唯一 IDF 口径）
-		idf := math.Log(1 + (float64(idx.N)-df+0.5)/(df+0.5))
 		score += idf * (f * (bm25K1 + 1)) / (f + bm25K1*(1-bm25B+bm25B*dl/avg))
 	}
-	// 协调因子：热区的 scoreTermsCoord 之后会乘它（Coord>0 时），冷区必须同样乘，
-	// 否则两路分数不可比（上一条 df 的教训同源）。
 	if idx.Coord > 0 {
 		if idx.Coord > 0 {
 			score *= idx.coordFactor(matched, len(terms))
@@ -352,90 +469,6 @@ func (idx *Index) exactScore(docID string, terms []string, boost func(string) fl
 		score *= boost(docID)
 	}
 	return score
-}
-
-// ── 升权 / 降权 ───────────────────────────────────────────────────────────
-
-// touchHot 把这次命中的文档升权进热区，并按预算做 LRU 降权。
-//
-// 升权门槛：默认"进了 top-k 就升"。这条策略的依据是**访问就是价值**——被反复命中的
-// 文档留在内存里，冷门文档自然沉下去。降权只丢内存，**不丢语料**（指纹还在，
-// 下次命中照样被筛出来并取回）。
-func (idx *Index) touchHot(hits []Hit) {
-	if idx.tier == nil || idx.tier.loader == nil {
-		return
-	}
-	t := idx.tier
-	// 构建倒排要改 postings/byID/DocLens（共享结构）→ 串行化
-	idx.tier.buildMu.Lock()
-	defer idx.tier.buildMu.Unlock()
-
-	t.mu.Lock()
-	for _, h := range hits {
-		if t.hot[h.DocID] {
-			t.lru = touchLru(t.lru, h.DocID)
-			continue
-		}
-		if t.policy.PromoteScore > 0 && h.Score < t.policy.PromoteScore {
-			continue // 没到升权门槛：留在冷区（不占热区预算）
-		}
-		body, ok := t.loader(h.DocID)
-		if !ok {
-			continue
-		}
-		idx.indexDoc(h.DocID, body, nil)
-		t.putHot(h.DocID, body)
-		t.lru = touchLru(t.lru, h.DocID)
-		t.stats.Promoted++
-	}
-	// 预算超了就降权（LRU 头部 = 最久没用）
-	keep, evicted := evictIfNeeded(t.lru, t.policy.HotDocs)
-	t.lru = keep
-	for _, id := range evicted {
-		if !t.hot[id] {
-			continue
-		}
-		idx.dropDoc(id)
-		delete(t.hot, id)
-		delete(t.bodies, id)
-		t.stats.Demoted++
-	}
-	t.mu.Unlock()
-}
-
-// dropDoc 把一篇文档的倒排**撤出**索引（降权时用；指纹与 DocLens 保留——
-// 它们是全局统计量，撤了会改变分数口径）。
-func (idx *Index) dropDoc(id string) {
-	for term, ps := range idx.Postings {
-		out := ps[:0]
-		for _, p := range ps {
-			if p.DocID != id {
-				out = append(out, p)
-			}
-		}
-		if len(out) == 0 {
-			delete(idx.Postings, term)
-			continue
-		}
-		idx.Postings[term] = out
-	}
-	delete(idx.byID, id)
-	delete(idx.tier.bodies, id)
-}
-
-// hasCold 报告是否还有冷文档（**没有冷文档时早退是对的**）。
-//
-// 真跑教训（长文档探针 10/10 → 9/10）：我写的是 `len(ids) == 0 && idx.tier == nil`
-// 才早退，结果**分层索引永远不早退**——但反过来写错成"热区空就早退"同样致命：
-// 分层索引启动时热区只预热前 N 篇，若查询词全在冷区，`Rank` 返回空，
-// 早退会让**冷区筛选永远走不到**（真跑症状：答案在冷文档里，窗口里没有）。
-func (idx *Index) hasCold() bool {
-	if idx.tier == nil {
-		return false
-	}
-	idx.tierMu().Lock()
-	defer idx.tierMu().Unlock()
-	return len(idx.tier.hot) < idx.N
 }
 
 // df 返回一个词的**全量**文档频率（分层索引的唯一 IDF 口径）。
@@ -453,4 +486,43 @@ func (idx *Index) df(term string) int {
 		return n
 	}
 	return len(idx.Postings[term])
+}
+
+// tfCacheMax 是**词频缓存**的条目上限（term 级，不是文档级）。
+//
+// 为什么有上限：真实法律语料一篇 5523 字 → 约 4000 个词元；无上限缓存会把内存又吃回去
+// （我们刚从"每篇都放倒排"里省出 70%）。4096 条 ≈ 每篇存 16 个查询词，够覆盖
+// 同一篇文档的反复提问，又不会无界增长。超限就**整批丢弃**（不做 LRU：LRU 的簿记
+// 成本和收益在这个量级上不成比例，而丢弃后重新计只是慢一点，不影响正确性）。
+const tfCacheMax = 4096
+
+// termFreq 取一个词在文档里的**词元频次**（与热区口径一致），带缓存。
+func (idx *Index) termFreq(docID, body, term string) int {
+	if idx.tier == nil {
+		return 0
+	}
+	t := idx.tier
+	key := docID + "\x00" + term
+	t.mu.Lock()
+	v, hit := t.tfCache[key]
+	full := len(t.tfCache) >= tfCacheMax
+	t.mu.Unlock()
+	if hit {
+		return v
+	}
+	if full {
+		t.mu.Lock()
+		t.tfCache = map[string]int{} // 整批丢弃（见 tfCacheMax 的说明）
+		t.mu.Unlock()
+	}
+	n := 0
+	for _, x := range Fields(body) {
+		if x == term {
+			n++
+		}
+	}
+	t.mu.Lock()
+	t.tfCache[key] = n
+	t.mu.Unlock()
+	return n
 }

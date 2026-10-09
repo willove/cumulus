@@ -164,43 +164,66 @@ func WatchDir(ctx gocontext.Context, p corpus.Port, realm, dir string, interval 
 }
 
 func scanOnce(ctx gocontext.Context, p corpus.Port, realm, dir string, seen map[string]string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0 // 目录暂无/已删：等下一轮
-	}
+	// **递归子目录**（真跑逼出来的）：真实语料是按目录组织的——法律库长这样：
+	//   法律/ 行政法规/ 司法解释/ 宪法/ 附录/ …
+	// 而原来只 `os.ReadDir(dir)` 扫**一层**，于是 1548 篇法律文本**一篇都没读到**
+	// （日志里连 "watch: +N docs" 都没有：顶层只有 .DS_Store）。
+	//
+	// 隐藏目录一律跳过（.git/.obsidian 之类不是知识）；深度有上限（防软链自指）。
 	imported := 0
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	var walk func(string, int)
+	walk = func(d string, depth int) {
+		if depth > maxScanDepth {
+			return
 		}
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		raw, err := os.ReadFile(path)
+		entries, err := os.ReadDir(d)
 		if err != nil {
-			continue
+			return // 目录暂无/已删/无权限：等下一轮
 		}
-		sum := corpus.DigestHex(raw) // 内容寻址同口径（规范化前，仅用于"变没变"判定）
-		if seen[path] == sum {
-			continue // 见过且没变
-		}
-		seen[path] = sum
-		switch {
-		case strings.HasSuffix(name, ".jsonl"):
-			if n, err := corpus.ImportFileRealm(ctx, p, realm, path); err == nil {
-				imported += n
-			}
-		case strings.HasSuffix(name, ".txt"), strings.HasSuffix(name, ".md"):
-			body := string(raw)
-			if strings.TrimSpace(body) == "" {
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
 				continue
 			}
-			if _, err := Text(ctx, p, realm, body, name); err == nil {
-				imported++
+			full := filepath.Join(d, name)
+			if e.IsDir() {
+				walk(full, depth+1)
+				continue
 			}
+			imported += scanFile(ctx, p, realm, full, name, seen)
 		}
 	}
+	walk(dir, 0)
 	return imported
+}
+
+// maxScanDepth 限制递归深度（防御：指向自己的软链会让遍历无限下去）。
+const maxScanDepth = 8
+
+// scanFile 处理单个文件（按后缀分派），返回本次导入的条数。
+func scanFile(ctx gocontext.Context, p corpus.Port, realm, path, name string, seen map[string]string) int {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	sum := corpus.DigestHex(raw) // 内容寻址同口径（规范化前，仅用于"变没变"判定）
+	if seen[path] == sum {
+		return 0 // 见过且没变
+	}
+	seen[path] = sum
+	switch {
+	case strings.HasSuffix(name, ".jsonl"):
+		if n, err := corpus.ImportFileRealm(ctx, p, realm, path); err == nil {
+			return n
+		}
+	case strings.HasSuffix(name, ".txt"), strings.HasSuffix(name, ".md"):
+		body := string(raw)
+		if strings.TrimSpace(body) == "" {
+			return 0
+		}
+		if _, err := Text(ctx, p, realm, body, name); err == nil {
+			return 1
+		}
+	}
+	return 0
 }

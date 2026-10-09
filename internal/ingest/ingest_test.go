@@ -134,3 +134,38 @@ func writeFile(t *testing.T, dir, name, content string) {
 func (m *memPort) Query(_ gocontext.Context, _ string, _ map[string]any, _, _ int, _ any) (int, error) {
 	return 0, nil
 }
+
+// 目录摄入必须**递归子目录**（真跑逼出来的）：真实语料是按目录组织的
+// （法律库：法律/ 行政法规/ 司法解释/ 宪法/ …），原来只扫一层，于是 1548 篇
+// **一篇都没读到**——而且**日志里连一句报错都没有**（顶层只有一个 .DS_Store）。
+func TestScanOnceRecursesIntoSubdirectories(t *testing.T) {
+	root := t.TempDir()
+	mustWrite := func(rel, body string) {
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("法律/专利法.txt", "专利法的第一条内容，用于测试递归摄入。")
+	mustWrite("行政法规/条例.txt", "行政法规的第一条内容，用于测试递归摄入。")
+	mustWrite("司法解释/解释.txt", "司法解释的第一条内容，用于测试递归摄入。")
+	mustWrite("顶层.txt", "顶层文件内容，用于测试递归摄入。")
+	// 隐藏目录不应被摄入（.git 之类不是知识）
+	mustWrite(".git/config.md", "不该被摄入的内容。")
+
+	m := newMemPort()
+	n := scanOnce(gocontext.Background(), m, "default", root, map[string]string{})
+	if n != 4 {
+		t.Fatalf("应导入 4 篇（3 个子目录 + 1 个顶层），实际 %d", n)
+	}
+	for coll, docs := range m.docs {
+		for id, v := range docs {
+			if d, ok := v.(corpus.Doc); ok && strings.Contains(d.Body, "不该被摄入") {
+				t.Fatalf("隐藏目录不该被摄入: %s/%s", coll, id)
+			}
+		}
+	}
+}

@@ -124,6 +124,9 @@ func TestTierMeasure(t *testing.T) {
 		// 文档分数**完全相同**（都含"编号/其他/事项"），于是差异全部来自平局取舍、
 		// 与召回无关——那个指标测的是噪声。**该测的是：金标在不在。**
 		goldInFull, goldInTiered, regressions, ties := 0, 0, 0, 0
+		// **最硬的判据：两条路径的 top-9 分数集合是否一致**（doc id 可能因同分而不同，
+		// 但**分数集合**必须一致——分数一致才说明排序口径没被分层改变）。
+		scoreMismatch := 0
 		for _, q := range append(append([]string{}, hotQ...), coldQ...) {
 			// 金标 = **问句里那个数字**对应的文档（真跑教训：我第一版用"查询下标"当
 			// 编号，于是金标成了 0.004 分的噪声填充项，量出"分层丢 3 条"——其实两边的
@@ -151,6 +154,31 @@ func TestTierMeasure(t *testing.T) {
 			if inA && !inB {
 				regressions++
 				if regressions <= 3 {
+					// 粗筛里这篇排第几？（判定粗筛是否该背锅）
+					idfs := tiered.idfsOf(UniqueTerms(Fields(q)))
+					type sc struct {
+						id    string
+						upper float64
+					}
+					var cs []sc
+					for cid, sk := range tiered.tier.sketches {
+						var up float64
+						for _, tm := range UniqueTerms(Fields(q)) {
+							if sk.Has(tm) {
+								up += idfs[tm]
+							}
+						}
+						if up > 0 {
+							cs = append(cs, sc{cid, up})
+						}
+					}
+					sort.Slice(cs, func(i, j int) bool { return cs[i].upper > cs[j].upper })
+					rank := 0
+					for i, c := range cs {
+						if c.id == gold {
+							rank = i + 1
+						}
+					}
 					var ranked []string
 					for _, h := range a {
 						ranked = append(ranked, fmt.Sprintf("%s:%.3f", h.DocID, h.Score))
@@ -159,10 +187,26 @@ func TestTierMeasure(t *testing.T) {
 					for _, h := range b {
 						tb = append(tb, fmt.Sprintf("%s:%.3f", h.DocID, h.Score))
 					}
-					t.Logf("    ↳ 丢金标 %s（查询 %q）· 全内存: %v · 分层: %v", gold, q, ranked, tb)
+					extraT := tiered.exactScore(gold, UniqueTerms(Fields(q)), nil)
+					t.Logf("    ↳ 丢金标 %s（查询 %q）· 粗筛第 %d/%d · 精算分 %.4f · 全内存: %v · 分层: %v",
+						gold, q, rank, len(cs), extraT, ranked, tb)
 				}
 			}
-			// 平局程度：全内存结果里有多少条与首条同分（分不出来 = 取舍是任意的）
+			// 分数集合比对（分层是否改变了排序口径）
+			sa, sb := make([]float64, 0, len(a)), make([]float64, 0, len(b))
+			for _, h := range a {
+				sa = append(sa, h.Score)
+			}
+			for _, h := range b {
+				sb = append(sb, h.Score)
+			}
+			for j := range sa {
+				if j >= len(sb) || sa[j]-sb[j] > 1e-6 || sb[j]-sa[j] > 1e-6 {
+					scoreMismatch++
+					break
+				}
+			}
+			// 平局程度：全内存 top-9 里有多少条与首条同分（同分 = 谁进都是任意的）
 			if len(a) > 1 && a[0].Score > 0 {
 				same := 0
 				for _, h := range a[1:] {
@@ -207,8 +251,10 @@ func TestTierMeasure(t *testing.T) {
 		pct(t, "全内存 p50/p95", fullD)
 		pct(t, "分层·热命中", hotD)
 		pct(t, "分层·冷命中", coldD)
-		t.Logf("  金标在 top9：全内存 %d/%d · 分层 %d/%d · **分层丢的 %d 条** · 有平局的查询 %d",
+		t.Logf("  金标在 top9：全内存 %d/%d · 分层 %d/%d · 差 %d 条（其中**同分并列**的 %d）",
 			goldInFull, len(hotQ)+len(coldQ), goldInTiered, len(hotQ)+len(coldQ), regressions, ties)
+		t.Logf("  **分数集合不一致的查询：%d/%d**（这是分层是否改变排序口径的硬判据）",
+			scoreMismatch, len(hotQ)+len(coldQ))
 		t.Logf("  冷候选 %d 条，其中假阳性 %d 条（%.0f%%）· 升权 %d · 降权 %d",
 			len(cands), fp, 100*float64(fp)/float64(math_max(1, len(cands))), st.Promoted, st.Demoted)
 	}
