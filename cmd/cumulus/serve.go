@@ -43,6 +43,7 @@ func runServe(args []string) error {
 	abstainOn := fs.Bool("abstain", false, "zero-LLM fail-prediction head (cumulus abstain: early refusal / forced escalation)")
 	topk := fs.Int("topk", 9, "retrieval top-k; 实测依据见 defaultKnobs")
 	width := fs.Int("width", 400, "evidence window width (runes); 实测下限见 defaultKnobs")
+	hotDocs := fs.Int("hot-docs", 2000, "热区文档数上限（0 = 全内存；其余文档留词项指纹、按需取回）")
 	// realm = 语料集合的**物理分区**（集合名 documents/<realm>）。多项目共用一个
 	// 实例时用它隔开；空 = 默认集合（单机老路径不变）。
 	realmFlag := fs.String("realm", "", "corpus realm (collection namespace: documents/<realm>)")
@@ -85,6 +86,7 @@ func runServe(args []string) error {
 	}
 	// 摄入面装配：store 是语料的家，索引是它的投影（摄入后热重建）
 	srv := api.NewWithStore(st, synthFn, *topk, *width)
+	srv.HotDocs = *hotDocs
 	srv.Realm = *realmFlag
 	srv.StreamSynth = streamFn
 	// 凭证表：`CUMULUS_KEYS=realm=key,realm2=key2`（realm 由**凭证推导**，
@@ -117,6 +119,11 @@ func runServe(args []string) error {
 				api.PruneSessions(gocontext.Background(), st)
 			}
 		}()
+	}
+	if *hotDocs > 0 {
+		fmt.Printf("index: 分层（热区上限 %d 篇，其余按词项指纹筛选并取回原文）\n", *hotDocs)
+	} else {
+		fmt.Println("index: 全内存（-hot-docs=0）")
 	}
 	if keys.Empty() {
 		fmt.Println("serve: 未配 CUMULUS_KEYS —— 所有请求放行（仅限本地/单人使用）")

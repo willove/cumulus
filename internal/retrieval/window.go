@@ -13,7 +13,8 @@ import (
 // 向两侧各扩 width/2 个 rune。返回 "rune[起:止]" 坐标；找不到返回 ""。
 // 坐标而不是文本：引用可核的前提是坐标可回溯（ResolveSpan）。
 func (idx *Index) Window(docID string, terms []string, width int) string {
-	d, ok := idx.byID[docID]
+	body, ok := idx.BodyOf(docID)
+	d := Document{ID: docID, Body: body}
 	if !ok || width <= 0 {
 		return ""
 	}

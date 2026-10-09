@@ -602,6 +602,9 @@
           },
           "synthesis": {
             "type": "boolean"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/TierStats"
           }
         },
         "required": [
@@ -631,6 +634,56 @@
           "score",
           "source_id",
           "span"
+        ],
+        "type": "object"
+      },
+      "TierStats": {
+        "properties": {
+          "cold_docs": {
+            "type": "integer"
+          },
+          "cold_exact": {
+            "type": "integer"
+          },
+          "cold_scanned": {
+            "type": "integer"
+          },
+          "demoted": {
+            "type": "integer"
+          },
+          "estimate_mb": {
+            "type": "number"
+          },
+          "hot_docs": {
+            "type": "integer"
+          },
+          "hot_limit": {
+            "type": "integer"
+          },
+          "promoted": {
+            "type": "integer"
+          },
+          "sketch_bytes": {
+            "type": "integer"
+          },
+          "tiered": {
+            "type": "boolean"
+          },
+          "total_docs": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cold_docs",
+          "cold_exact",
+          "cold_scanned",
+          "demoted",
+          "hot_docs",
+          "hot_limit",
+          "promoted",
+          "sketch_bytes",
+          "tiered",
+          "total_docs"
         ],
         "type": "object"
       },

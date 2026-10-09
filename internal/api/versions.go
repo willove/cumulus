@@ -109,7 +109,14 @@ func (s *Server) IndexFor(ctx gocontext.Context, realm string) (*retrieval.Index
 	if err != nil {
 		return nil, err
 	}
-	idx := retrieval.Build(docs)
+	// 分层索引：**倒排只放热区**，其余文档留词项指纹 + 按需取回正文。
+	//
+	// 为什么（实测）：1800 篇 / 1.49 MB 语料 → 全内存索引 26.5 MB，其中倒排占
+	// 99.4%。每 MB 语料 ≈ 17 MB 内存且无上限，所以不能全放内存。
+	//
+	// 预算是 CUMULUS_HOT_DOCS（默认 2000 篇 ≈ 70 MB）。**预算 ≥ 语料规模时行为与
+	// 旧的��内存索引逐字节一致**——所以个人小库完全不受影响。
+	idx := s.buildIndex(ctx, realm, docs)
 	s.mu.Lock()
 	if s.indexes == nil {
 		s.indexes = map[string]*retrieval.Index{}
@@ -137,7 +144,7 @@ func (s *Server) Rebuild(ctx gocontext.Context) (int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.index = retrieval.Build(docs)
+	s.index = s.buildIndex(ctx, s.Realm, docs)
 	return len(docs), nil
 }
 
@@ -296,4 +303,27 @@ func (s *Server) record(c *context.Context, question string) QAResponse {
 		resp.Committed = views[len(views)-1]
 	}
 	return resp
+}
+
+// buildIndex 建（可能分层的）索引。hotBudget<=0 或读文档失败时**退���全内存**。
+//
+// 退���必须诚实：拿不到 loader（比如 store 不支持读回某篇）就老老实实全内存建索引，
+// 宁可多占内存，也不能让语料"看起来是有了但检索不到"。
+func (s *Server) buildIndex(ctx gocontext.Context, realm string, docs []retrieval.Document) *retrieval.Index {
+	budget := s.HotDocs
+	if budget <= 0 {
+		return retrieval.Build(docs)
+	}
+	coll := corpus.CollectionFor(realm)
+	loader := func(docID string) (string, bool) {
+		if s.Store == nil {
+			return "", false
+		}
+		var d corpus.Doc
+		if err := s.Store.GetStruct(ctx, coll, docID, &d); err != nil {
+			return "", false
+		}
+		return d.Body, true
+	}
+	return retrieval.BuildTiered(docs, loader, retrieval.TierPolicy{HotDocs: budget})
 }

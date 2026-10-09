@@ -16,11 +16,11 @@ func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor
 	if anchor == "" {
 		return idx.Window(docID, terms, width)
 	}
-	d, ok := idx.byID[docID]
+	body, ok := idx.BodyOf(docID)
 	if !ok || width <= 0 {
 		return ""
 	}
-	runes := []rune(d.Body)
+	runes := []rune(body)
 	n := len(runes)
 	if n == 0 {
 		return ""
@@ -152,10 +152,10 @@ func (idx *Index) WindowAnchored(docID string, terms []string, width int, anchor
 	// 名章节名的簇一样大，但最近的标记是上一条目录项、距离远——真跑教
 	// 训：专利法目录里就有"第四十二条 发明专利权的期限为二十年"整句，
 	// 簇大小与正文并列，不区分就锚进目录），其次簇最大，再其次最靠前。
-	marks := articleMark.FindAllStringIndex(d.Body, -1)
+	marks := articleMark.FindAllStringIndex(body, -1)
 	markRune := make([]int, 0, len(marks))
 	for _, m := range marks {
-		markRune = append(markRune, len([]rune(d.Body[:m[0]])))
+		markRune = append(markRune, len([]rune(body[:m[0]])))
 	}
 	markDist := func(p int) int { // p 到最近的前置条文标记的距离（无 = -1）
 		closest := -1
@@ -280,13 +280,13 @@ func (idx *Index) SearchFactWeighted(weights map[string]float64, k, width int, a
 		coord := idx.WindowAnchored(id, terms, width, anchorPhrase)
 		text := ""
 		if coord != "" {
-			if d, ok := idx.byID[id]; ok {
-				text, _ = ResolveSpan(d.Body, coord)
+			if body, ok := idx.BodyOf(id); ok {
+				text, _ = ResolveSpan(body, coord)
 			}
 		}
 		hits = append(hits, Hit{DocID: id, Score: scores[id], SpanCoord: coord, SpanText: text, Title: idx.TitleOf(id)})
 	}
-	return hits
+	return idx.mergeCold(hits, terms, nil, k, width)
 }
 
 // WindowMultiSpans 在**同一篇文档**里取多个**互不重叠**的段位窗口，按词面密度贪心。
@@ -306,10 +306,11 @@ func (idx *Index) WindowMultiSpans(docID string, terms []string, width, maxSpans
 	if maxSpans <= 0 {
 		maxSpans = 2
 	}
-	d, ok := idx.byID[docID]
+	raw, ok := idx.BodyOf(docID)
 	if !ok {
 		return nil
 	}
+	d := Document{ID: docID, Body: raw}
 	body := []rune(d.Body)
 	if len(body) == 0 {
 		return nil

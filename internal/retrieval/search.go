@@ -38,11 +38,11 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 		boost = func(string) float64 { return 1 }
 	}
 	pool := k * poolFactor
+	terms := UniqueTerms(Fields(query))
 	ids := idx.Rank(query, pool)
-	if len(ids) == 0 {
+	if len(ids) == 0 && !idx.hasCold() {
 		return nil
 	}
-	terms := UniqueTerms(Fields(query))
 	scores := idx.scoreTerms(terms)
 
 	type weighted struct {
@@ -64,16 +64,25 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 	}
 	hits := make([]Hit, 0, len(ws))
 	for _, w := range ws {
-		coord := idx.Window(w.id, terms, width)
-		text := ""
-		if coord != "" {
-			if d, ok := idx.byID[w.id]; ok {
-				text, _ = ResolveSpan(d.Body, coord)
-			}
-		}
-		hits = append(hits, Hit{DocID: w.id, Score: scores[w.id], SpanCoord: coord, SpanText: text, Title: idx.TitleOf(w.id)})
+		// **Hit.Score 保持"未乘 boost"**（与分层之前逐字节一致）：排序用乘过的分
+		// （ws.total），但对外暴露的分是原始 BM25。分层那版图省事改成了乘过的分，
+		// 结果长文档探针 10/10 → 9/10（下游的驱逐/重排按分做决策，一改就变）。
+		hits = append(hits, idx.windowHit(w.id, terms, width, scores[w.id]))
 	}
-	return hits
+	// 冷区：指纹筛选 → 取回正文精算 → 与热区合并（分层只是内存策略，召回不变）
+	return idx.mergeCold(hits, terms, boost, k, width)
+}
+
+// windowHit 给一篇文档切窗口并取回文本（热区走内存、冷区走 loader）。
+func (idx *Index) windowHit(docID string, terms []string, width int, score float64) Hit {
+	coord := idx.Window(docID, terms, width)
+	text := ""
+	if coord != "" {
+		if body, ok := idx.BodyOf(docID); ok {
+			text, _ = ResolveSpan(body, coord)
+		}
+	}
+	return Hit{DocID: docID, Score: score, SpanCoord: coord, SpanText: text, Title: idx.TitleOf(docID)}
 }
 
 // poolFactor：候选池相对返回数的倍数。信念重排要在池子里做，
@@ -280,7 +289,10 @@ func (idx *Index) SearchWeighted(weights map[string]float64, k, width int, boost
 	for term := range weights {
 		terms = append(terms, term)
 	}
-	return idx.hitsFrom(ranked, terms, width, scores)
+	hits := idx.hitsFrom(ranked, terms, width, scores)
+	// 冷区合并：**桥的加权重取也必须够得到冷文档**——桥扩出的词多半是"库里少见的
+	// 词"，而少见词往往正落在冷文档上（真跑踩过：桥明明扩对了，加权检索却 0 命中）。
+	return idx.mergeCold(hits, terms, boost, k, width)
 }
 
 // scoreWeighted 按词权算分：idf × 权 × tf 分量（与 scoreTerms 同式，

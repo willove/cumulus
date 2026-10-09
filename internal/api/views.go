@@ -8,6 +8,7 @@ package api
 import (
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/qaflow"
+	"github.com/willove/cumulus/internal/retrieval"
 )
 
 // QARequest 是 POST /v1/qa 的请求。
@@ -154,6 +155,9 @@ type StatusResponse struct {
 	Embedder  bool `json:"embedder"`
 	Reuse     bool `json:"reuse"`
 	Escalate  bool `json:"escalate"`
+	// Tier 是**分层索引**读数（内存里放了多少、升权降权各多少次）。
+	// 不看它就不知道"库里有多少在内存里"，也无法判断要不要调 -hot-docs。
+	Tier *retrieval.TierStats `json:"tier,omitempty"`
 }
 
 // UsageView 是用量账。CostKnown=false 表示上游不报（成本未知不是 0）。

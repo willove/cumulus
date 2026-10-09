@@ -35,6 +35,9 @@ type Server struct {
 	Store corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
 	// Meter 是**用量计量与配额**（可选件）：nil = 不计量也不限流。
 	Meter *usage.Meter
+	// HotDocs 是**热区文档数上限**（0 = 全内存）。分层索引的预算：倒排只放热区，
+	// 冷文档留词项指纹、按需取回正文（见 versions.buildIndex）。
+	HotDocs int
 	// DocGen 是**知识文档生成**（可选件）：把证据整理成一篇可核对的文档写回
 	// 语料，于是下一轮问答能引用它。nil = 不提供（端点回 501，/v1/status 可见）。
 	DocGen *DocGen
@@ -199,12 +202,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleStatus 是分类器可见面：哪些可选组件活着、缺什么。cumulus 的
 // MCS 静默不触发，缺的就是这一面。
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, StatusResponse{
+	sr := StatusResponse{
 		Synthesis: s.Synth != nil,
 		Embedder:  s.Embedder != nil,
 		Reuse:     s.Reuse != nil,
 		Escalate:  s.Escalate != nil,
-	})
+	}
+	// 分层读数：**内存里放了多少、升权降权各多少次**——不看这个就不知道"库里有多少
+	// 在内存里"，也无法判断要不要调预算。
+	if idx, err := s.IndexFor(r.Context(), s.realmOf(r)); err == nil && idx != nil {
+		st := idx.TierStats()
+		sr.Tier = &st
+	}
+	writeJSON(w, http.StatusOK, sr)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

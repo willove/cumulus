@@ -189,6 +189,21 @@ export interface StatusResponse {
   embedder: boolean;
   reuse: boolean;
   escalate: boolean;
+  tier?: TierStats;
+}
+
+export interface TierStats {
+  tiered: boolean;
+  total_docs: number;
+  hot_docs: number;
+  cold_docs: number;
+  hot_limit: number;
+  promoted: number;
+  demoted: number;
+  cold_scanned: number;
+  cold_exact: number;
+  sketch_bytes: number;
+  estimate_mb?: number;
 }
 
 export interface IngestRequest {

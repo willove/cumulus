@@ -1,6 +1,6 @@
 package retrieval
 
-import ()
+import "sync"
 
 // BM25 参数：Robertson-Sparck Jones 默认值，五十年文献的共识。
 // k1 控制词频饱和，b 控制文档长度归一。设计上不可调——每个搜索引擎
@@ -46,6 +46,21 @@ type Index struct {
 	Coord float64
 
 	byID map[string]Document
+
+	// ── 分层（热区/冷区）状态；为 nil = 全内存（Build 出来的就是这种） ──
+	//
+	// 为什么要它：实测 1800 篇 / 1.49 MB 语料的索引占 26.5 MB，其中倒排 26.28 MB
+	// （99.4%）。倒排随语料**线性增长**，所以不能全放内存。分层把倒排限制在热区，
+	// 冷文档只留**词项指纹**（无假阴性）+ 需要时从磁盘取回原文精算。
+	//
+	// 关键性质：**分层只是内存策略**——预算 ≥ 语料规模时行为与 Build 逐字节一致，
+	// 所以对小个人库零影响。详见 tier.go。
+	tier *tiered
+	// tierLock 保护分层状态；Once 让 Index 的零值也能安全用（惰性建锁）。
+	tierLock     sync.Mutex
+	tierLockOnce sync.Once
+	// sketchWords 是每篇指纹的位数组长度（uint64 个数）；冷文档筛选时按位取。
+	sketchWords int
 }
 
 // Build 从语料建索引。确定性：同输入同索引。零 LLM，O(全文字长)。
@@ -61,17 +76,9 @@ func Build(docs []Document) *Index {
 		if d.ID == "" {
 			continue
 		}
-		idx.byID[d.ID] = d
 		tokens := Fields(d.Body)
-		idx.DocLens[d.ID] = len(tokens)
+		idx.indexDoc(d.ID, d.Body, tokens)
 		totalTokens += len(tokens)
-		tf := make(map[string]int, len(tokens))
-		for _, t := range tokens {
-			tf[t]++
-		}
-		for term, count := range tf {
-			idx.Postings[term] = append(idx.Postings[term], Posting{DocID: d.ID, TF: count})
-		}
 		idx.N++
 		totalRunes += len([]rune(d.Body))
 	}
@@ -85,3 +92,49 @@ func Build(docs []Document) *Index {
 // Hit 是一条检索命中。SpanCoord 是证据窗口在原文里的 rune 坐标
 // （"rune[起点:终点]"）；SpanText 是该坐标解析出的原文——合成面要的是
 // 原文，坐标只是引用凭据。两样都在检索侧一次产出，别让下游再解一遍。
+
+// indexDoc 把**一篇**文档的倒排放进索引（Build 与分层升权共用同一条路径——
+// 两处各写一份，迟早会漂移）。
+//
+// tokens 为 nil 时**自己算**（分层升权时若忘了传，会得到"热区里一具没有倒排的空壳"
+// ——真跑症状：升权成功、热区里有它、检索却查不到它，postings 中=0）。
+func (idx *Index) indexDoc(id, body string, tokens []string) {
+	if id == "" {
+		return
+	}
+	if tokens == nil {
+		tokens = Fields(body)
+	}
+	if idx.Postings == nil {
+		idx.Postings = map[string][]Posting{}
+	}
+	if idx.DocLens == nil {
+		idx.DocLens = map[string]int{}
+	}
+	if idx.byID == nil {
+		idx.byID = map[string]Document{}
+	}
+	idx.byID[id] = Document{ID: id, Body: body}
+	idx.DocLens[id] = len(tokens)
+	tf := make(map[string]int, len(tokens))
+	for _, t := range tokens {
+		tf[t]++
+	}
+	for term, count := range tf {
+		idx.Postings[term] = append(idx.Postings[term], Posting{DocID: id, TF: count})
+	}
+}
+
+// BodyOf 取一篇文档的正文（**热区从内存，冷区从 loader**）。
+//
+// 窗口切片（WindowAnchored / WindowMultiSpans / ResolveSpan）都要按坐标回原文，
+// 所以冷文档必须能在这里"现取"——否则窗口功能对冷文档等于不存在。
+func (idx *Index) BodyOf(docID string) (string, bool) {
+	if d, ok := idx.byID[docID]; ok {
+		return d.Body, true
+	}
+	if idx.tier == nil || idx.tier.loader == nil {
+		return "", false
+	}
+	return idx.tier.loader(docID)
+}

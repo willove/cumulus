@@ -47,7 +47,7 @@ fi
 go build -o "$BIN" ./cmd/cumulus || exit 1
 env CUMULUS_KEYS="probe=$KEY" ${ENVV[@]+"${ENVV[@]}"} \
   "$BIN" serve $SYNTH -listen "127.0.0.1:$PORT" -data "$WORK/data" -watch "$DIR" \
-  >"$WORK/serve.log" 2>&1 &
+  ${HOT_FLAG:=-hot-docs 2000} >"$WORK/serve.log" 2>&1 &
 # 等语料就位。**必须等篇数而不是只等端口**：health 在空语料下也返回 200，
 # 于是"服务活着但一篇都没有"会被当成就绪——第一版脚本就这样跑出了 0/10 的
 # 假读数（而手动起同样的服务是 9 篇）。
