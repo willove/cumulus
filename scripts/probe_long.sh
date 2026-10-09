@@ -63,7 +63,20 @@ if [[ "${docs:-0}" -lt 9 ]]; then
   tail -5 "$WORK/serve.log" >&2
   exit 1
 fi
-echo "长文档已就位：${docs} 篇（窗口宽 400 runes，文档 379–1733 字）"
+echo "长文档已就位：${docs} 篇（目录 $DIR，窗口宽 400 runes，文档 379–1733 字）"
+# 自检：探针必须读到**自己那份**语料（金标 id 对不上时读数全是假的）。
+python3 - "$DIR" "$BASE" "$KEY" <<'SELFPROBE'
+import json, sys, urllib.request
+dir_path, base, key = sys.argv[1], sys.argv[2], sys.argv[3]
+docs = [json.loads(l) for l in open(f"{dir_path}/corpus.jsonl", encoding="utf-8")]
+req = urllib.request.Request(f"{base}/v1/health", headers={"X-Cumulus-Key": key})
+with urllib.request.urlopen(req, timeout=30) as r:
+    got = json.load(r).get("corpus_docs", 0)
+if got != len(docs):
+    print(f"  ⚠ 语料对不上：磁盘 {len(docs)} 篇 vs 服务 {got} 篇（读数不可信）", file=sys.stderr)
+    sys.exit(3)
+print(f"  自检通过：磁盘与服务都是 {got} 篇")
+SELFPROBE
 echo
 
 python3 - "$DIR" "$BASE" "$KEY" <<'PY'
@@ -95,8 +108,12 @@ for it in items:
     got = {w.get("source_id") for w in wins}
     cited = json.dumps(d.get("citations") or [], ensure_ascii=False)
     win_text = " ".join((w.get("text") or "") for w in wins)
+    # 归一化后比较：模型/格式化可能引入换行、全角标点与半角混用，
+    # 不归一化会把"答案就在窗口里"判成没命中（真跑踩过一次这样的假阴性）。
+    def norm(x: str) -> str:
+        return "".join(ch for ch in (x or "") if not ch.isspace()).replace("，", ",").replace("。", ".")
     ev = bool(gold & got) if gold else None
-    wh = (ans in win_text or ans in cited) if ans else None
+    wh = (norm(ans) in norm(win_text) or norm(ans) in norm(cited)) if ans else None
     if ans:
         answerable += 1
         ev_hit += 1 if ev else 0
@@ -114,6 +131,13 @@ for it in items:
             honest += 1
         else:
             halluc += 1
+    if wh is False:
+        # 判失败的题把窗口逐条打出来：否则"明明手动能复现、脚本却判失败"这类事
+        # 只能靠猜（真跑在这上面卡了很久）。
+        print(f"    ↳ {it['id']} 未命中，打印窗口：")
+        for w in wins[:6]:
+            print(f"        {w.get('span')} 分={w.get('score',0):.1f} 含答案={norm(ans) in norm(w.get('text') or '')} | {(w.get('text') or '')[:26]}")
+        print(f"        期望答案: {ans[:40]}")
     rows.append((it["id"], it["question"][:26], d.get("refused"), ev, wh, len(wins), (d.get("answer") or "")[:0]))
 
 w = "{:<9}{:<28}{:>8}{:>10}{:>10}{:>7}"

@@ -288,3 +288,137 @@ func (idx *Index) SearchFactWeighted(weights map[string]float64, k, width int, a
 	}
 	return hits
 }
+
+// WindowMultiSpans 在**同一篇文档**里取多个**互不重叠**的段位窗口，按词面密度贪心。
+//
+// 为什么需要（真跑，长文档探针）：BM25 给一篇文档**只有一个分数**，所以任何"每篇
+// 一个窗口"的检索在长文里都会漏——答案所在段落的词密度可能与开头段落**并列最高**
+// （实测《专利审查指南》：开头"宣告/无效/专利"与末尾答案段各 3 个命中），而窗口
+// 只取密度最高的那一处，于是**答案在 98% 处却完全没被覆盖**（window hit 9/10 的
+// 那 1 题）。
+//
+// 做法：按段位扫描 → 每轮取当前命中最多的段 → 跳过与已取窗口重叠的部分 → 直到
+// 取够 `maxSpans`。**不是**把整篇切成 n 块全给（那等于搬运），而是"**只给最像
+// 证据的那几处**"。
+//
+// 为什么不会伤害短文档：短文档的段位数不足，贪心自然退化成原来那一个窗口。
+func (idx *Index) WindowMultiSpans(docID string, terms []string, width, maxSpans int) []Hit {
+	if maxSpans <= 0 {
+		maxSpans = 2
+	}
+	d, ok := idx.byID[docID]
+	if !ok {
+		return nil
+	}
+	body := []rune(d.Body)
+	if len(body) == 0 {
+		return nil
+	}
+	type span struct{ lo, hi, hits int }
+	// 段位按窗口宽切（比窗口略宽，让相邻证据不被切碎）
+	step := width
+	if step <= 0 {
+		step = 400
+	}
+	spans := make([]span, 0, len(body)/step+1)
+	for lo := 0; lo < len(body); lo += step {
+		hi := lo + step
+		if hi > len(body) {
+			hi = len(body)
+		}
+		seg := string(body[lo:hi])
+		n := 0
+		for _, t := range terms {
+			if t == "" {
+				continue
+			}
+			if idx.coordCount(seg, t) > 0 {
+				n++
+			}
+		}
+		spans = append(spans, span{lo, hi, n})
+	}
+	var out []Hit
+	taken := make([][2]int, 0, maxSpans)
+	for len(out) < maxSpans {
+		best := -1
+		for i, sp := range spans {
+			if sp.hits == 0 {
+				continue
+			}
+			if overlaps(taken, sp.lo, sp.hi) {
+				continue
+			}
+			if best == -1 || sp.hits > spans[best].hits {
+				best = i
+			}
+		}
+		if best == -1 {
+			break
+		}
+		sp := spans[best]
+		// 该段向两侧扩到窗口宽（段本身可能比窗口窄）
+		lo, hi := sp.lo, sp.hi
+		if hi-lo < step {
+			lo = maxInt(0, hi-step)
+			hi = minInt(len(body), lo+step)
+		}
+		// **扩展后再判一次重叠**：扩展可能把窗口推进已取区域（真跑：
+		// rune[0:400] 之后的第二窗扩成 rune[68:468]，与第一窗重叠 332 字——
+		// 那样"多段位"只是把同一段给了两遍，还白花 token）。
+		if overlaps(taken, lo, hi) {
+			// 收缩到不重叠的剩余部分；实在没有就跳过这一段
+			lo = hi
+			for i := len(taken) - 1; i >= 0; i-- {
+				if taken[i][0] >= lo {
+					break
+				}
+				if taken[i][1] > lo {
+					lo = taken[i][1]
+				}
+			}
+			hi = minInt(len(body), lo+step)
+			if hi-lo < step/4 {
+				// 剩余太小，**不值得给一个窗口**（半截窗口既不够读又费 token）
+				break
+			}
+		}
+		coord := fmt.Sprintf("rune[%d:%d]", lo, hi)
+		text, _ := ResolveSpan(d.Body, coord)
+		out = append(out, Hit{DocID: docID, SpanCoord: coord, SpanText: text,
+			Title: idx.TitleOf(docID), Score: float64(sp.hits)})
+		taken = append(taken, [2]int{lo, hi})
+	}
+	return out
+}
+
+// coordCount 数 term 在文本里出现多少次（按二元组口径，见 Fields）。
+func (idx *Index) coordCount(text, term string) int {
+	if term == "" {
+		return 0
+	}
+	return strings.Count(text, term)
+}
+
+func overlaps(taken [][2]int, lo, hi int) bool {
+	for _, t := range taken {
+		if lo < t[1] && t[0] < hi {
+			return true
+		}
+	}
+	return false
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

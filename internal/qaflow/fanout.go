@@ -52,6 +52,12 @@ func retrievePerFact(c *context.Context, idx *retrieval.Index, fx []facts.Fact, 
 		// 案句收在窗里，不被密度/稀有度带到隔壁条文（真跑教训：专利期
 		// 限两连问，窗口曾停在"授予专利权决定"那条）
 		hits := idx.SearchFactWeighted(weights, k, width, f.Query)
+		// **长文档：同一篇再取一个段位窗口**（BM25 每篇只有一个分数，所以"每篇一窗"
+		// 在长文里必然漏掉远处的高密度段——真跑：答案在 98% 处、词密度与开头段并列
+		// 最高，却完全没被覆盖）。段位窗口与锚定窗口**不重叠**，所以不是重复给。
+		if len(fx) == 1 && longDocAnchorable(idx, f.ID) {
+			hits = append(hits, idx.WindowMultiSpans(firstDocID(hits), termsOf(weights), width, multiSpanLimit)...)
+		}
 		for _, h := range hits {
 			key := h.DocID + "#" + h.SpanCoord
 			if seen[key] {
@@ -96,3 +102,24 @@ func longDocAnchorable(idx *retrieval.Index, factID string) bool {
 
 // defaultWidthRunes 是默认窗口宽（与 Options.Width 的默认值同口径）。
 const defaultWidthRunes = 400
+
+// multiSpanLimit 是长文档下**同篇额外段位窗口**的数量上限。
+//
+// 为什么是 2 而不是更多：每多一个窗口就多一份要读的正文（合成面 token 也在涨），
+// 而实测两处（开头程序规定 + 末尾结论）已经覆盖了探针里的全部失败形状。
+const multiSpanLimit = 2
+
+func firstDocID(hits []retrieval.Hit) string {
+	if len(hits) == 0 {
+		return ""
+	}
+	return hits[0].DocID
+}
+
+func termsOf(weights map[string]float64) []string {
+	out := make([]string, 0, len(weights))
+	for t := range weights {
+		out = append(out, t)
+	}
+	return out
+}
