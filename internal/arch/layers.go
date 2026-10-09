@@ -89,11 +89,14 @@ var packages = map[string]Layer{
 	"store":  LayerPorts,
 	"decide": LayerPorts,
 	// capabilities：能力件
-	"auth":              LayerCapabilities, // 凭证 → realm（鉴权网关；不依赖任何上层）
-	"abstain":           LayerCapabilities, // 弃答权重门（运行时能力：facts 阶段在用）
-	"calib":             LayerTooling,
-	"corpus":            LayerCapabilities,
-	"ctxmgmt":           LayerCapabilities,
+	"auth":    LayerCapabilities, // 凭证 → realm（鉴权网关；不依赖任何上层）
+	"abstain": LayerCapabilities, // 弃答权重门（运行时能力：facts 阶段在用）
+	"calib":   LayerTooling,
+	"corpus":  LayerCapabilities,
+	"ctxmgmt": LayerCapabilities,
+	// docgen 是**知识文档生成**（语料的生产入口）：依赖检索与 LLM，
+	// 被 api 调用。它是 capabilities（运行时能力，不是 tooling）。
+	"docgen":            LayerCapabilities,
 	"deepcore":          LayerCapabilities,
 	"embed":             LayerCapabilities,
 	"evaldata":          LayerTooling,

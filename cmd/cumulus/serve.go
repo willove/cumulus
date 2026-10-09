@@ -9,6 +9,7 @@ import (
 	"github.com/willove/cumulus/internal/auth"
 	"github.com/willove/cumulus/internal/context"
 	"github.com/willove/cumulus/internal/corpus"
+	"github.com/willove/cumulus/internal/docgen"
 	"github.com/willove/cumulus/internal/facts"
 	"github.com/willove/cumulus/internal/ingest"
 	"github.com/willove/cumulus/internal/knowledge"
@@ -138,6 +139,8 @@ func runServe(args []string) error {
 		// 使用信号落数据目录（与语料同盘，同生共死）：再问族服务端推
 		// 导，cite 族前端钩子，cumulus signals 看聚合
 		srv.Signals = knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
+		// 知识文档生成：把证据整理成一篇可核对的文档写回语料（下一轮能引用它）
+		srv.DocGen = &docgen.Generator{Client: client}
 		// 窗口分级（GaRAGe 四类）：**只影响可解释性**（file 事件带类别），
 		// 不参与检索排序与路由判据。CUMULUS_CLASSIFY=1 开。
 		if os.Getenv("CUMULUS_CLASSIFY") == "1" {
@@ -168,7 +171,24 @@ func runServe(args []string) error {
 	// 看目录：文件落进去即入库（零摩擦摄入的第三条路）
 	if *watchDir != "" {
 		go func() {
-			_ = ingest.WatchDir(ctx, st, *realmFlag, *watchDir, 2*time.Second, func(n int) {
+			// 看目录摄入的 realm **必须与请求侧一致**：带凭证时请求都落在密钥推出的
+			// realm 上，而这里用空 realm 会写进 `documents/`——于是"watch 说导入了
+			// 3 篇，问答/生成却 0 窗口"（真跑踩到）。
+			//
+			// 口径：**有密钥时取第一个密钥的 realm**（单 realm 部署的常见形态），
+			// 其次 -realm，最后空（无凭证的单租户开发形态）。多个 realm 时 watch
+			// 只能写一个——所以多 realm 部署不该用 watch 摄入（用 /v1/docs 或逐 realm
+			// 的目录），这一点在启动提示里说明。
+			watchRealm := *realmFlag
+			if keys != nil {
+				if rs := keys.Realms(); len(rs) == 1 {
+					watchRealm = rs[0]
+				} else if len(rs) > 1 {
+					fmt.Printf("watch: 警告：配了 %d 个 realm，目录摄入只写一个（%s）；多 realm 请逐 realm 摄入\n", len(rs), rs[0])
+					watchRealm = rs[0]
+				}
+			}
+			_ = ingest.WatchDir(ctx, st, watchRealm, *watchDir, 2*time.Second, func(n int) {
 				if _, err := srv.Rebuild(gocontext.Background()); err == nil {
 					fmt.Printf("watch: +%d docs, index rebuilt\n", n)
 				}

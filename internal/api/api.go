@@ -32,7 +32,10 @@ import (
 // 语料与索引例外：摄入是运行时事件，索引跟着重建（个人库规模，毫秒级）。
 type Server struct {
 	Store corpus.Port // 摄入面：语料活着的地方（索引只是它的投影）
-	Synth qaflow.SynthFunc
+	// DocGen 是**知识文档生成**（可选件）：把证据整理成一篇可核对的文档写回
+	// 语料，于是下一轮问答能引用它。nil = 不提供（端点回 501，/v1/status 可见）。
+	DocGen *DocGen
+	Synth  qaflow.SynthFunc
 	// StreamSynth 是**可选**能力：填了它，流式端点会把思考与正文逐段发出。
 	// nil = 只支持整条（那就发整段 content 帧，不假装流式）。
 	StreamSynth qaflow.StreamSynthFunc
@@ -67,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/qa/stream", s.handleQAStream)
 	mux.HandleFunc("/v1/sessions", s.handleSession)
 	mux.HandleFunc("/v1/sessions/", s.handleSession)
+	mux.HandleFunc("/v1/docs", s.handleGenerateDoc)
 	mux.HandleFunc("/v1/signal", s.handleSignal)
 	mux.HandleFunc("/v1/signals", s.handleSignals)
 	mux.HandleFunc("/v1/health", s.handleHealth)

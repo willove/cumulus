@@ -4,17 +4,22 @@ package main
 
 import (
 	gocontext "context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
-	"os"
-	"strings"
-	"time"
-
 	"github.com/willove/cumulus/internal/context"
+	"github.com/willove/cumulus/internal/corpus"
 	"github.com/willove/cumulus/internal/ctxmgmt"
+	"github.com/willove/cumulus/internal/docgen"
 	"github.com/willove/cumulus/internal/knowledge"
 	"github.com/willove/cumulus/internal/qaflow"
 	"github.com/willove/cumulus/internal/retrieval"
+	"github.com/willove/cumulus/internal/store"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 func main() {
@@ -38,6 +43,8 @@ func run(args []string) error {
 		return runLearn(gocontext.Background())
 	case "serve":
 		return runServe(args[1:])
+	case "doc":
+		return runDoc(args)
 	case "signals":
 		return runSignals(args[1:])
 	default:
@@ -261,4 +268,89 @@ func pruneEvery() time.Duration {
 		return time.Hour
 	}
 	return d
+}
+
+// runDoc 手动生成知识文档：cumulus doc "主题" [-store=false]
+//
+// 为什么是**手动**：选题这件事目前只有人能做对（信号辅助的自动选题留到有真实
+// 使用数据之后——用没有验证的选题规则生成文档，等于往语料里灌噪声）。
+func runDoc(args []string) error {
+	fs := flag.NewFlagSet("doc", flag.ContinueOnError)
+	storeIt := fs.Bool("store", true, "写入语料（默认 true；false = 只预览）")
+	topK := fs.Int("topk", 9, "取多少条证据")
+	data := fs.String("data", "", "数据目录（与服务端一致，默认 ./.cumulus）")
+	corpusDir := fs.String("corpus", "", "语料目录（要生成文档得先有语料）")
+	_ = fs.Parse(args)
+	topic := fs.Arg(0)
+	if topic == "" {
+		return fmt.Errorf("用法: cumulus doc \"主题\" [-store=false]")
+	}
+	client, err := llmFromEnvImpl()
+	if err != nil {
+		return fmt.Errorf("doc: 需要 LLM: %w", err)
+	}
+	if *corpusDir == "" {
+		return fmt.Errorf("doc: 需要 -corpus 目录（生成文档要有语料可依据）")
+	}
+	st, err := store.Open(*data, *data == "")
+	if err != nil {
+		return err
+	}
+	docs, err := corpus.Load(gocontext.Background(), st)
+	if err != nil {
+		return err
+	}
+	for _, f := range readDocs(*corpusDir) {
+		docs = append(docs, f)
+	}
+	idx := retrieval.Build(docs)
+	g := &docgen.Generator{Client: client}
+	doc, gerr := g.Generate(gocontext.Background(), topic, idx.Search(topic, *topK, 400))
+	if gerr != nil {
+		return gerr
+	}
+	fmt.Printf("# %s\n\n%s", doc.Title, doc.Body)
+	fmt.Printf("\n覆盖：%d/%d 条证据被引用 · %d 节 · %d 处缺口\n",
+		doc.Coverage.WindowsUsed, doc.Coverage.WindowsTotal, doc.Coverage.Sections, doc.Coverage.Gaps)
+	if *storeIt {
+		// 与 /v1/docs **同一口径**：加 marker + gen- 前缀（检索期据此降权）。
+		// 两处口径必须一致——不一致就会出现"一份带前缀一份不带"，降权规则漏一半。
+		body := docgen.ApplyMarker(doc.Body)
+		id := "gen-" + corpus.DigestHex([]byte(body))[:12]
+		coll := corpus.CollectionFor("default")
+		if err := st.EnsureCollection(gocontext.Background(), coll); err != nil {
+			return err
+		}
+		if err := st.PutStruct(gocontext.Background(), coll, id,
+			corpus.Doc{ID: id, Body: body, Encoding: "text/plain; charset=utf-8"}); err != nil {
+			return err
+		}
+		fmt.Printf("已写入语料：%s（下一轮问答可以引用它）\n", id)
+	}
+	return nil
+}
+
+// readDocs 读目录里的文档文件（与 ingest 的目录入口同口径）。
+func readDocs(dir string) []retrieval.Document {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []retrieval.Document
+	for _, e := range entries {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		out = append(out, retrieval.Document{ID: docIDOf(body), Body: string(body)})
+	}
+	return out
+}
+
+func docIDOf(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])[:12]
 }
