@@ -183,3 +183,130 @@ func snapToArticlesInfo(runes []rune, lo, hi, fallbackStart, fallbackEnd int) (i
 // 路径 k×2 后，专利法这种长文档直接烧成分钟级 CPU（再问 240s 不返
 // 回，goroutine 栈 runnable 停在 fanout）。现在：**一次 O(n·候选数)
 // 预计算全部出现位置，之后所有判定只在这些小列表上做**。
+
+// windowSpans 给一篇文档挑**多个互补窗口**（长文档用）。
+//
+// 为什么需要（真实法律语料实测）：《劳动合同法》1.3 万字，问"劳动合同应当采用书面形式"，
+// 答案条文在 **84%** 处，而只出一个窗口时选中的是 **33%** 处的"第三十五条 变更劳动合同"
+// ——**文档找对了、条文选错了**，于是答案变成"证据不足"。
+//
+// 根因：单窗口按"命中不同词的数量"取胜，两处各命中 3 个词 → 平局 → 前面的赢。而
+// 真正该赢的那处含**罕见词**（"书面"），它该按 idf 赢。
+//
+// 做法：贪心取若干**互不重叠**的窗口，每一轮挑"**新增覆盖 idf 质量**最高"的段
+// （已经被覆盖的词不再重复计分）——于是 84% 处那条会因为覆盖了"书面"而拿到自己的窗口。
+//
+// 什么时候用：文档明显长于一个窗口时（`len(body) > 3×width`）才多给窗口；短文档
+// 退化成一个窗口（零行为变化）。
+func (idx *Index) windowSpans(docID string, terms []string, width, maxSpans int) []string {
+	body, ok := idx.BodyOf(docID)
+	if !ok || width <= 0 {
+		return nil
+	}
+	runes := []rune(body)
+	// 短文档：**一个窗口就是整篇**（与旧行为逐字节一致）。
+	// 写成 `return nil` 会把"文档比窗口还短"的正常情况也吞掉——真跑踩过，
+	// 表现是 `Search` 零命中（一条既有测试当场变红）。
+	if len(runes) <= 3*width {
+		if c := idx.Window(docID, terms, width); c != "" {
+			return []string{c}
+		}
+		return nil
+	}
+	if maxSpans <= 1 {
+		maxSpans = 2
+	}
+	idfs := idx.idfsOf(terms)
+
+	type pos struct {
+		at   int
+		term string
+	}
+	var positions []pos
+	for _, term := range terms {
+		tr := []rune(term)
+		from := 0
+		for {
+			loc := byteIndexRune(runes, tr, from)
+			if loc < 0 {
+				break
+			}
+			positions = append(positions, pos{at: loc, term: term})
+			from = loc + len(tr)
+		}
+	}
+	if len(positions) == 0 {
+		return nil
+	}
+
+	covered := map[string]bool{}
+	taken := make([][2]int, 0, maxSpans)
+	out := make([]string, 0, maxSpans)
+	for len(out) < maxSpans {
+		bestStart, bestGain := -1, 0.0
+		for _, p := range positions {
+			lo := clampPos(p.at-width/2, 0, len(runes)-width)
+			hi := lo + width
+			if overlaps(taken, lo, hi) {
+				continue
+			}
+			// **新增覆盖的 idf 质量**（已覆盖的词不重复计分）
+			gain := 0.0
+			for _, q := range positions {
+				if q.at < lo || q.at >= hi || covered[q.term] {
+					continue
+				}
+				gain += idfs[q.term]
+			}
+			if gain > bestGain {
+				bestGain, bestStart = gain, lo
+			}
+		}
+		if bestStart < 0 || bestGain <= 0 {
+			break // 没有"还没被覆盖的新词"了
+		}
+		hi := bestStart + width
+		// 围着这一簇里的命中吸附到条文
+		from, to := -1, -1
+		for _, p := range positions {
+			if p.at >= bestStart && p.at < hi {
+				if from < 0 || p.at < from {
+					from = p.at
+				}
+				if e := p.at + len([]rune(p.term)); e > to {
+					to = e
+				}
+			}
+		}
+		if from < 0 {
+			from, to = bestStart, hi
+		}
+		st, en := snapToArticles(runes, from, to, bestStart, hi)
+		if en > len(runes) {
+			en = len(runes)
+		}
+		out = append(out, fmt.Sprintf("rune[%d:%d]", st, en))
+		taken = append(taken, [2]int{st, en})
+		for _, p := range positions {
+			if p.at >= st && p.at < en {
+				covered[p.term] = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		if c := idx.Window(docID, terms, width); c != "" {
+			return []string{c}
+		}
+	}
+	return out
+}
+
+func clampPos(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}

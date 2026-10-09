@@ -67,7 +67,7 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 		// **Hit.Score 保持"未乘 boost"**（与分层之前逐字节一致）：排序用乘过的分
 		// （ws.total），但对外暴露的分是原始 BM25。分层那版图省事改成了乘过的分，
 		// 结果长文档探针 10/10 → 9/10（下游的驱逐/重排按分做决策，一改就变）。
-		hits = append(hits, idx.windowHit(w.id, terms, width, scores[w.id]))
+		hits = append(hits, idx.hitsFor(w.id, terms, width, scores[w.id])...)
 	}
 	// 冷区：指纹筛选 → 取回正文精算 → 与热区合并（分层只是内存策略，召回不变）
 	return idx.mergeCold(hits, terms, boost, k, width)
@@ -75,14 +75,11 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 
 // windowHit 给一篇文档切窗口并取回文本（热区走内存、冷区走 loader）。
 func (idx *Index) windowHit(docID string, terms []string, width int, score float64) Hit {
-	coord := idx.Window(docID, terms, width)
-	text := ""
-	if coord != "" {
-		if body, ok := idx.BodyOf(docID); ok {
-			text, _ = ResolveSpan(body, coord)
-		}
+	hs := idx.hitsFor(docID, terms, width, score)
+	if len(hs) == 0 {
+		return Hit{DocID: docID, Score: score, Title: idx.TitleOf(docID)}
 	}
-	return Hit{DocID: docID, Score: score, SpanCoord: coord, SpanText: text, Title: idx.TitleOf(docID)}
+	return hs[0] // 多出来的窗口由调用方通过 hitsFor 拿（快路径见 SearchWith）
 }
 
 // poolFactor：候选池相对返回数的倍数。信念重排要在池子里做，
@@ -323,17 +320,38 @@ func (idx *Index) scoreWeighted(weights map[string]float64) map[string]float64 {
 func (idx *Index) hitsFrom(ranked []string, terms []string, width int, scores map[string]float64) []Hit {
 	hits := make([]Hit, 0, len(ranked))
 	for _, id := range ranked {
-		coord := idx.Window(id, terms, width)
-		text := ""
-		if coord != "" {
-			if d, ok := idx.byID[id]; ok {
-				text, _ = ResolveSpan(d.Body, coord)
-			}
-		}
-		hits = append(hits, Hit{DocID: id, Score: scores[id], SpanCoord: coord, SpanText: text, Title: idx.TitleOf(id)})
+		hits = append(hits, idx.hitsFor(id, terms, width, scores[id])...)
 	}
 	return hits
 }
+
+// hitsFor 给一篇文档生成命中：**长文档给多个互补窗口**（见 windowSpans）。
+//
+// 为什么一篇文档可以出多条命中：证据集按 `docID#span` 去重，两条不同 span 的命中
+// 都会保留；而长文档里"答案在 84% 处"正是靠第二条窗口才被覆盖到的（真跑实测）。
+// 短文档**只出一条**（逐字节等价于旧行为）。
+func (idx *Index) hitsFor(id string, terms []string, width int, score float64) []Hit {
+	coords := idx.windowSpans(id, terms, width, multiWindowLimit)
+	if len(coords) == 0 {
+		return nil
+	}
+	body, _ := idx.BodyOf(id)
+	out := make([]Hit, 0, len(coords))
+	for _, coord := range coords {
+		text := ""
+		if body != "" {
+			text, _ = ResolveSpan(body, coord)
+		}
+		out = append(out, Hit{DocID: id, Score: score, SpanCoord: coord, SpanText: text, Title: idx.TitleOf(id)})
+	}
+	return out
+}
+
+// multiWindowLimit 是长文档里**一篇最多给几个窗口**。
+//
+// 为什么是 3：实测《劳动合同法》那条答案在 84% 处，第 2 个窗口就够；而每个窗口都是
+// 要进合成面的正文，窗口数×宽度 = token 成本，不能放开。
+const multiWindowLimit = 3
 
 func rankByScore(scores map[string]float64, docLens map[string]int) []string {
 	ids := make([]string, 0, len(scores))
