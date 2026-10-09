@@ -44,7 +44,9 @@ func run(args []string) error {
 	case "serve":
 		return runServe(args[1:])
 	case "doc":
-		return runDoc(args)
+		return runDoc(args[1:])
+	case "topics":
+		return runTopics(args[1:])
 	case "signals":
 		return runSignals(args[1:])
 	default:
@@ -389,4 +391,33 @@ func sectionsFromBody(body string) []docgen.Section {
 func docIDOf(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// runTopics 列出**选题建议**（cumulus topics）：从使用信号里挑"值得写成文档"的主题。
+//
+// 与 GET /v1/docs/topics 同一口径（docgen.SuggestTopics）。**只列不生成**——
+// 人工挑一个，再 cumulus doc "主题"。
+func runTopics(args []string) error {
+	fs := flag.NewFlagSet("topics", flag.ContinueOnError)
+	limit := fs.Int("limit", 10, "最多列几条")
+	data := fs.String("data", "", "数据目录（与服务端一致）")
+	_ = fs.Parse(args)
+	if _, err := store.Open(*data, *data == ""); err != nil {
+		return err
+	}
+	sigs := knowledge.NewSignalStore(filepath.Join(*data, "signals.json"))
+	topics, err := docgen.SuggestTopics(sigs, *limit, nil)
+	if err != nil {
+		return err
+	}
+	if len(topics) == 0 {
+		fmt.Println("还没有使用信号（或信号库为空）——多问答几次，拒答后追问的问句就是选题。")
+		return nil
+	}
+	fmt.Println("选题建议（分数 = 权重×次数；只建议不生成）：")
+	for i, t := range topics {
+		fmt.Printf("  %d. [%s ×%d · 分数 %.1f] %s\n", i+1, t.Reason, t.Count, t.Score, t.Question)
+	}
+	fmt.Printf("\n挑一个走：cumulus doc \"%s\"\n", topics[0].Question)
+	return nil
 }

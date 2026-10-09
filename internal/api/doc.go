@@ -14,6 +14,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -228,4 +229,54 @@ func docgenJudge(g *DocGen) docgen.EquivalentJudge {
 	}
 	j := &docgen.EquivalentJudgeLLM{Client: g.Client}
 	return j.Judge()
+}
+
+// handleSuggestTopics 是**选题建议**（GET /v1/docs/topics）。
+//
+// 它**只给候选，不生成**：自动往语料里灌文档等于用没验证的规则污染知识库。
+// 人挑一个主题，走 POST /v1/docs 生成——这条人工确认的闸门是刻意的。
+//
+// 候选来自使用信号的"不满意"族（拒答后追问 / 答后追问）：那些正是知识库的空缺处。
+// cite（引用被点开）说明那段知识**已经够用**，不作为选题。
+func (s *Server) handleSuggestTopics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if s.Signals == nil {
+		writeErr(w, http.StatusNotImplemented, "no signal store（没有使用信号就没有建议）")
+		return
+	}
+	if s.Store == nil {
+		writeErr(w, http.StatusNotImplemented, "no store wired")
+		return
+	}
+	limit := 10
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	realm := s.realmOf(r)
+	covers := func(topicKey string) (string, bool) {
+		id := genPrefix + topicKey
+		var d corpus.Doc
+		if err := s.Store.GetStruct(gocontext.Background(), corpus.CollectionFor(realm), id, &d); err != nil {
+			return "", false
+		}
+		return id, true
+	}
+	topics, err := docgen.SuggestTopics(s.Signals, limit, covers)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "suggest: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"topics": topics,
+		"note":   "只建议不生成：挑一个主题走 POST /v1/docs（covered=true 表示该主题已有文档，该更新而不是新建）",
+		"weights": map[string]float64{
+			"refusal_unsatisfied": docgen.WeightRefused,
+			"answer_incomplete":   docgen.WeightIncomplete,
+		},
+	})
 }

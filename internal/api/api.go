@@ -71,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/sessions", s.handleSession)
 	mux.HandleFunc("/v1/sessions/", s.handleSession)
 	mux.HandleFunc("/v1/docs", s.handleGenerateDoc)
+	mux.HandleFunc("/v1/docs/topics", s.handleSuggestTopics)
 	mux.HandleFunc("/v1/signal", s.handleSignal)
 	mux.HandleFunc("/v1/signals", s.handleSignals)
 	mux.HandleFunc("/v1/health", s.handleHealth)
