@@ -50,6 +50,10 @@ func (idx *Index) SearchWith(query string, k, width int, boost func(docID string
 		total float64
 	}
 	ws := make([]weighted, 0, len(ids))
+	// 注：**曾经在这里叠过"长片段加成"，实测有害，已撤**（见 phrase.go 的说明）：
+	// 真实法律语料上，金标与干扰文档的加成**几乎完全相同**（14.57 vs 14.57），
+	// 因为每部法律都满是"合同应/用书面"这类套话——**片段连续性能区分"文档里的哪一条"，
+	// 区分不了"哪一部"**。片段加成现在只用在窗口选择（windowSpans），那里它确实有效。
 	for _, id := range ids {
 		ws = append(ws, weighted{id: id, total: scores[id] * boost(id)})
 	}
